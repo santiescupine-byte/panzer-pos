@@ -185,6 +185,10 @@ let DEMO = {
     {id:"c4", nombre:"PRODUCTOS COMPLEMENTARIOS DE LAVADO", orden:4, activo:true},
     {id:"c5", nombre:"SNACKS", orden:5, activo:true},
   ],
+  descuentos: [
+    {id:"d1", nombre:"Empleado 10%", porcentaje:10, activo:true},
+    {id:"d2", nombre:"Promoción 5%", porcentaje:5, activo:true},
+  ],
   empleados: [
     {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
     {id:"e1", nombre:"Johan",   rol:"cajero",  activo:true, pin:"1234", sedes:["Toberín"]},
@@ -312,6 +316,27 @@ const db = {
   async deleteCategoria(id){
     if(DEMO_MODE){ DEMO.categorias=DEMO.categorias.filter(x=>x.id!==id); return; }
     const {error}=await sb.from('categorias').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- DESCUENTOS ----
+  async listDescuentos(){
+    if(DEMO_MODE) return [...DEMO.descuentos];
+    const {data,error}=await sb.from('descuentos').select('*').order('nombre');
+    if(error) return [];   // si la tabla aún no existe, no romper
+    return data||[];
+  },
+  async saveDescuento(d){
+    if(DEMO_MODE){
+      if(d.id){ DEMO.descuentos=DEMO.descuentos.map(x=>x.id===d.id?{...x,...d}:x); }
+      else { DEMO.descuentos.push({...d,id:uid()}); }
+      return;
+    }
+    const row={nombre:d.nombre,porcentaje:Number(d.porcentaje)||0,activo:d.activo};
+    if(d.id){ const {error}=await sb.from('descuentos').update(row).eq('id',d.id); if(error) throw error; }
+    else { const {error}=await sb.from('descuentos').insert(row); if(error) throw error; }
+  },
+  async deleteDescuento(id){
+    if(DEMO_MODE){ DEMO.descuentos=DEMO.descuentos.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('descuentos').delete().eq('id',id); if(error) throw error;
   },
   // ---- EMPLEADOS ----
   async listEmpleados(){
@@ -557,7 +582,7 @@ function App(){
         <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={salir}>Salir</button>
       </div>
       <div className="tabs">
-        {[["informes","Informes"],["inventario","Inventario"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
+        {[["informes","Informes"],["inventario","Inventario"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["descuentos","Descuentos"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
           <div key={k} className={"tab"+(tab===k?" active":"")} onClick={()=>setTab(k)}>{l}</div>
         ))}
       </div>
@@ -567,6 +592,7 @@ function App(){
         {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
         {tab==="productos"  && <Productos showToast={showToast}/>}
         {tab==="categorias" && <Categorias showToast={showToast}/>}
+        {tab==="descuentos" && <Descuentos showToast={showToast}/>}
         {tab==="sedes"      && <Sedes showToast={showToast}/>}
         {tab==="empleados"  && <Empleados showToast={showToast}/>}
       </div>
@@ -748,6 +774,60 @@ function ProductoModal({p,cats,sedes,allProds,onClose,onSave}){
 // ============================================================
 // SECCIÓN: CATEGORÍAS
 // ============================================================
+function Descuentos({showToast}){
+  const [items,setItems]=useState(null);
+  const [editing,setEditing]=useState(null);
+  const load=async()=>{ try{ setItems(await db.listDescuentos()); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  useEffect(()=>{ load(); },[]);
+  const guardar=async(d)=>{ try{ await db.saveDescuento(d); setEditing(null); await load(); showToast("Descuento guardado"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const eliminar=async(d)=>{ if(!window.confirm("¿Eliminar \""+d.nombre+"\"?")) return; try{ await db.deleteDescuento(d.id); await load(); showToast("Descuento eliminado"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  if(!items) return <div className="empty">Cargando…</div>;
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Descuentos <span className="muted">({items.length})</span></div>
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",porcentaje:10,activo:true})}>+ Nuevo descuento</button>
+      </div>
+      <div className="muted" style={{marginBottom:12}}>Estos descuentos (en %) aparecen en el POS para aplicarlos a un producto o al ticket completo.</div>
+      <div className="card" style={{padding:0}}>
+        <table className="tbl">
+          <thead><tr><th>Nombre</th><th className="num">Porcentaje</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {items.length===0 && <tr><td colSpan="4"><div className="empty">Sin descuentos. Crea uno.</div></td></tr>}
+            {items.map(d=>(
+              <tr key={d.id} className={d.activo?"":"inactive"}>
+                <td className="row-name">{d.nombre}</td>
+                <td className="num"><b>{d.porcentaje}%</b></td>
+                <td>{d.activo?<span className="pill pill-prod">Activo</span>:<span className="pill pill-off">Inactivo</span>}</td>
+                <td><div className="actions">
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...d})}>Editar</button>
+                  <button className="btn btn-danger btn-sm" onClick={()=>eliminar(d)}>✕</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar descuento":"Nuevo descuento"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})} placeholder="Ej: Empleado 10%"/>
+            <label className="label">Porcentaje (%)</label>
+            <input className="input" type="number" min="0" max="100" value={editing.porcentaje} onChange={e=>setEditing({...editing,porcentaje:Number(e.target.value)||0})}/>
+            <label className="check"><input type="checkbox" checked={!!editing.activo} onChange={e=>setEditing({...editing,activo:e.target.checked})}/> Activo</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!editing.nombre.trim()||editing.porcentaje<=0} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Categorias({showToast}){
   const [cats,setCats]=useState(null);
   const [editing,setEditing]=useState(null);

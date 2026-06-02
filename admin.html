@@ -189,6 +189,13 @@ let DEMO = {
     {id:"d1", nombre:"Empleado 10%", porcentaje:10, activo:true},
     {id:"d2", nombre:"Promoción 5%", porcentaje:5, activo:true},
   ],
+  insumos: [
+    {id:"i1", nombre:"Base lavado", unidad:"L", costo:8000, stock:50, stock_minimo:10, activo:true},
+    {id:"i2", nombre:"Cera carnauba", unidad:"kg", costo:25000, stock:8, stock_minimo:2, activo:true},
+    {id:"i3", nombre:"Fragancia", unidad:"ml", costo:120, stock:3000, stock_minimo:500, activo:true},
+  ],
+  recetas: {},        // producto_id → [{insumo_id, cantidad}]
+  producciones: [],   // historial demo
   empleados: [
     {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
     {id:"e1", nombre:"Johan",   rol:"cajero",  activo:true, pin:"1234", sedes:["Toberín"]},
@@ -337,6 +344,77 @@ const db = {
   async deleteDescuento(id){
     if(DEMO_MODE){ DEMO.descuentos=DEMO.descuentos.filter(x=>x.id!==id); return; }
     const {error}=await sb.from('descuentos').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- PRODUCCIÓN: INSUMOS ----
+  async listInsumos(){
+    if(DEMO_MODE) return [...DEMO.insumos];
+    const {data,error}=await sb.from('insumos').select('*').order('nombre');
+    if(error) return []; return data||[];
+  },
+  async saveInsumo(i){
+    if(DEMO_MODE){
+      if(i.id && DEMO.insumos.some(x=>x.id===i.id)){ DEMO.insumos=DEMO.insumos.map(x=>x.id===i.id?{...x,...i}:x); }
+      else { DEMO.insumos.push({...i,id:i.id||uid()}); } return;
+    }
+    const row={nombre:i.nombre,unidad:i.unidad,costo:Number(i.costo)||0,stock:Number(i.stock)||0,stock_minimo:Number(i.stock_minimo)||0,activo:i.activo!==false};
+    if(i.id){ const {error}=await sb.from('insumos').update(row).eq('id',i.id); if(error) throw error; }
+    else { const {error}=await sb.from('insumos').insert(row); if(error) throw error; }
+  },
+  async deleteInsumo(id){
+    if(DEMO_MODE){ DEMO.insumos=DEMO.insumos.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('insumos').delete().eq('id',id); if(error) throw error;
+  },
+  async entradaInsumo(id, cantidad, costo, nota){
+    if(DEMO_MODE){ const i=DEMO.insumos.find(x=>x.id===id); if(i){ i.stock=(Number(i.stock)||0)+Number(cantidad); if(costo) i.costo=Number(costo); } return; }
+    const {error}=await sb.rpc('entrada_insumo',{p_insumo_id:id,p_cantidad:Number(cantidad),p_costo_unit:costo?Number(costo):null,p_nota:nota||null}); if(error) throw error;
+  },
+  // ---- PRODUCCIÓN: RECETAS ----
+  // ---- CLAVE DE FÓRMULAS (seguridad servidor) ----
+  async claveFormulasExiste(){
+    if(DEMO_MODE) return true;
+    const {data,error}=await sb.rpc('clave_formulas_existe'); if(error) return false; return !!data;
+  },
+  async verificarClaveFormulas(clave){
+    if(DEMO_MODE) return clave==='demo';
+    const {data,error}=await sb.rpc('verificar_clave_formulas',{p_clave:clave}); if(error) return false; return !!data;
+  },
+  async setClaveFormulas(actual,nueva){
+    if(DEMO_MODE) return true;
+    const {error}=await sb.rpc('set_clave_formulas',{p_clave_actual:actual||'',p_nueva:nueva}); if(error) throw error; return true;
+  },
+  // ---- RECETAS (requieren clave; viajan por funciones seguras) ----
+  async getReceta(productoId, clave){
+    if(DEMO_MODE) return [...(DEMO.recetas[productoId]||[])];
+    const {data,error}=await sb.rpc('get_receta',{p_clave:clave,p_producto_id:productoId});
+    if(error) throw error; return (data||[]).map(r=>({insumo_id:r.insumo_id,cantidad:Number(r.cantidad)}));
+  },
+  async saveReceta(productoId, items, clave){
+    if(DEMO_MODE){ DEMO.recetas[productoId]=items.filter(x=>x.insumo_id); return; }
+    const {error}=await sb.rpc('set_receta',{p_clave:clave,p_producto_id:productoId,p_items:items.filter(x=>x.insumo_id).map(x=>({insumo_id:x.insumo_id,cantidad:Number(x.cantidad)||0}))});
+    if(error) throw error;
+  },
+  async getProduccionInsumos(produccionId, clave){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('get_produccion_insumos',{p_clave:clave,p_produccion_id:produccionId});
+    if(error) throw error; return data||[];
+  },
+  // ---- PRODUCCIÓN: PRODUCIR ----
+  async producir(productoId, cantidad, sede, operador, nota){
+    if(DEMO_MODE){
+      const rec=DEMO.recetas[productoId]||[]; let costo=0;
+      rec.forEach(r=>{ const ins=DEMO.insumos.find(x=>x.id===r.insumo_id); if(ins){ const c=r.cantidad*cantidad; ins.stock-=c; costo+=(Number(ins.costo)||0)*c; } });
+      const p=DEMO.productos.find(x=>x.id===productoId); if(p){ p.stock=p.stock||{}; p.stock[sede]=(Number(p.stock[sede])||0)+cantidad; }
+      DEMO.producciones.unshift({id:uid(),created_at:new Date().toISOString(),producto_nombre:p?p.nombre:'',cantidad,sede,operador,costo_total:costo,nota});
+      return costo;
+    }
+    const {data,error}=await sb.rpc('producir',{p_producto_id:productoId,p_cantidad:Number(cantidad),p_sede:sede,p_operador:operador||null,p_nota:nota||null});
+    if(error) throw error; return data;
+  },
+  async listProducciones(){
+    if(DEMO_MODE) return [...DEMO.producciones];
+    // sin embed: el detalle de insumos está bloqueado y se carga aparte con la clave
+    const {data,error}=await sb.from('producciones').select('id,producto_nombre,cantidad,sede,costo_total,operador,created_at').order('created_at',{ascending:false}).limit(200);
+    if(error) return []; return data||[];
   },
   // ---- EMPLEADOS ----
   async listEmpleados(){
@@ -582,13 +660,14 @@ function App(){
         <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={salir}>Salir</button>
       </div>
       <div className="tabs">
-        {[["informes","Informes"],["inventario","Inventario"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["descuentos","Descuentos"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
+        {[["informes","Informes"],["inventario","Inventario"],["produccion","Producción"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["descuentos","Descuentos"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
           <div key={k} className={"tab"+(tab===k?" active":"")} onClick={()=>setTab(k)}>{l}</div>
         ))}
       </div>
       <div className="page">
         {tab==="informes"   && <Informes showToast={showToast}/>}
         {tab==="inventario" && <Inventario showToast={showToast}/>}
+        {tab==="produccion" && <Produccion showToast={showToast}/>}
         {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
         {tab==="productos"  && <Productos showToast={showToast}/>}
         {tab==="categorias" && <Categorias showToast={showToast}/>}
@@ -1550,6 +1629,339 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
           <button className="btn btn-danger" disabled={borrando} onClick={onEliminar}>{borrando?"Eliminando…":"🗑 Eliminar recibo"}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: PRODUCCIÓN (insumos, recetas, producir, historial)
+// ============================================================
+const UNIDADES=["g","kg","ml","L","unidad"];
+
+function Produccion({showToast}){
+  const [sub,setSub]=useState("insumos");
+  const [clave,setClave]=useState(null);    // clave verificada (fórmulas desbloqueadas) o null
+  const [existe,setExiste]=useState(true);
+  const [modal,setModal]=useState(null);     // 'unlock' | 'setclave'
+  useEffect(()=>{ db.claveFormulasExiste().then(setExiste).catch(()=>{}); },[]);
+  const onUnlock=()=>setModal('unlock');
+  return (
+    <div>
+      <div className="subnav">
+        {[["insumos","Insumos"],["recetas","Recetas"],["producir","Producir"],["historial","Historial"]].map(([k,l])=>(
+          <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
+        ))}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+        {clave
+          ? <><span className="pill pill-prod">🔓 Fórmulas desbloqueadas</span><button className="btn btn-ghost btn-sm" onClick={()=>setClave(null)}>Bloquear</button></>
+          : <><span className="pill pill-off">🔒 Fórmulas protegidas</span><button className="btn btn-amber btn-sm" onClick={onUnlock}>Desbloquear fórmulas</button></>}
+        <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={()=>setModal('setclave')}>{existe?"Cambiar clave":"Definir clave"}</button>
+      </div>
+
+      {sub==="insumos"   && <Insumos showToast={showToast}/>}
+      {sub==="recetas"   && <Recetas showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
+      {sub==="producir"  && <Producir showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
+      {sub==="historial" && <HistorialProd showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
+
+      {modal==='unlock' && <ClaveModal titulo="Desbloquear fórmulas" label="Clave de fórmulas" onClose={()=>setModal(null)}
+        onOk={async(c)=>{ if(await db.verificarClaveFormulas(c)){ setClave(c); setModal(null); showToast("Fórmulas desbloqueadas"); } else { showToast("Clave incorrecta","err"); } }}/>}
+      {modal==='setclave' && <SetClaveModal existe={existe} onClose={()=>setModal(null)}
+        onOk={async(actual,nueva)=>{ try{ await db.setClaveFormulas(actual,nueva); setExiste(true); setClave(nueva); setModal(null); showToast("Clave guardada"); }catch(e){ showToast(""+(e.message||e),"err"); } }}/>}
+    </div>
+  );
+}
+
+function ClaveModal({titulo,label,onClose,onOk}){
+  const [c,setC]=useState(""); const [busy,setBusy]=useState(false);
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:360}}>
+        <div className="modal-t">🔒 {titulo}</div>
+        <label className="label">{label}</label>
+        <input className="input" type="password" autoFocus value={c} onChange={e=>setC(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&c){setBusy(true);onOk(c);}}}/>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={!c||busy} onClick={()=>{setBusy(true);onOk(c);}}>Entrar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SetClaveModal({existe,onClose,onOk}){
+  const [actual,setActual]=useState(""); const [nueva,setNueva]=useState(""); const [n2,setN2]=useState("");
+  const valido = nueva.length>=4 && nueva===n2 && (!existe || actual.length>0);
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:380}}>
+        <div className="modal-t">🔑 {existe?"Cambiar clave de fórmulas":"Definir clave de fórmulas"}</div>
+        <div className="muted" style={{marginBottom:10}}>Esta clave solo la conoces tú. Se guarda encriptada en el servidor; protege las recetas.</div>
+        {existe && <><label className="label">Clave actual</label><input className="input" type="password" value={actual} onChange={e=>setActual(e.target.value)}/></>}
+        <label className="label">Nueva clave (mín. 4)</label>
+        <input className="input" type="password" value={nueva} onChange={e=>setNueva(e.target.value)}/>
+        <label className="label">Repetir nueva clave</label>
+        <input className="input" type="password" value={n2} onChange={e=>setN2(e.target.value)}/>
+        {nueva && n2 && nueva!==n2 && <div className="muted" style={{color:"var(--red)"}}>No coinciden.</div>}
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={!valido} onClick={()=>onOk(actual,nueva)}>Guardar clave</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Insumos({showToast}){
+  const [items,setItems]=useState(null);
+  const [editing,setEditing]=useState(null);
+  const [carga,setCarga]=useState(null);
+  const load=async()=>{ try{ setItems(await db.listInsumos()); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  useEffect(()=>{ load(); },[]);
+  const guardar=async(i)=>{ try{ await db.saveInsumo(i); setEditing(null); await load(); showToast("Insumo guardado"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const eliminar=async(i)=>{ if(!window.confirm("¿Eliminar \""+i.nombre+"\"?")) return; try{ await db.deleteInsumo(i.id); await load(); showToast("Insumo eliminado"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const cargar=async(c)=>{ try{ await db.entradaInsumo(c.id,Number(c.cantidad),c.costo?Number(c.costo):0,c.nota); setCarga(null); await load(); showToast("Entrada registrada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  if(!items) return <div className="empty">Cargando…</div>;
+  const bajos=items.filter(i=>Number(i.stock)<=Number(i.stock_minimo) && Number(i.stock_minimo)>0).length;
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Insumos <span className="muted">({items.length})</span></div>
+        {bajos>0 && <span className="pill pill-off">⚠ {bajos} bajo mínimo</span>}
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",unidad:"g",costo:0,stock:0,stock_minimo:0,activo:true})}>+ Nuevo insumo</button>
+      </div>
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Insumo</th><th>Unidad</th><th className="num">Costo/u</th><th className="num">Stock</th><th className="num">Mínimo</th><th></th></tr></thead>
+          <tbody>
+            {items.length===0 && <tr><td colSpan="6"><div className="empty">Sin insumos. Crea uno.</div></td></tr>}
+            {items.map(i=>{ const bajo=Number(i.stock)<=Number(i.stock_minimo)&&Number(i.stock_minimo)>0; return (
+              <tr key={i.id} className={i.activo?"":"inactive"}>
+                <td className="row-name">{i.nombre}</td>
+                <td className="muted">{i.unidad}</td>
+                <td className="num">{fmt(i.costo)}</td>
+                <td className="num"><b style={{color:bajo?"var(--amber)":"var(--tb)"}}>{Number(i.stock)}</b></td>
+                <td className="num muted">{Number(i.stock_minimo)}</td>
+                <td><div className="actions">
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setCarga({id:i.id,nombre:i.nombre,unidad:i.unidad,cantidad:"",costo:i.costo,nota:""})}>+ Cargar</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...i})}>Editar</button>
+                  <button className="btn btn-danger btn-sm" onClick={()=>eliminar(i)}>✕</button>
+                </div></td>
+              </tr>
+            );})}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar insumo":"Nuevo insumo"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})}/>
+            <div className="grid2">
+              <div><label className="label">Unidad</label><select className="select" value={editing.unidad} onChange={e=>setEditing({...editing,unidad:e.target.value})}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
+              <div><label className="label">Costo por unidad</label><input className="input" type="number" value={editing.costo} onChange={e=>setEditing({...editing,costo:Number(e.target.value)||0})}/></div>
+            </div>
+            <div className="grid2">
+              <div><label className="label">Stock actual</label><input className="input" type="number" value={editing.stock} onChange={e=>setEditing({...editing,stock:Number(e.target.value)||0})}/></div>
+              <div><label className="label">Stock mínimo (alerta)</label><input className="input" type="number" value={editing.stock_minimo} onChange={e=>setEditing({...editing,stock_minimo:Number(e.target.value)||0})}/></div>
+            </div>
+            <label className="check"><input type="checkbox" checked={editing.activo!==false} onChange={e=>setEditing({...editing,activo:e.target.checked})}/> Activo</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!editing.nombre.trim()} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {carga && (
+        <div className="modal-bg" onClick={()=>setCarga(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Cargar inventario — {carga.nombre}</div>
+            <div className="muted" style={{marginBottom:10}}>Registra una entrada (compra) de este insumo. Suma al stock.</div>
+            <label className="label">Cantidad ({carga.unidad})</label>
+            <input className="input" type="number" value={carga.cantidad} onChange={e=>setCarga({...carga,cantidad:e.target.value})}/>
+            <label className="label">Costo por unidad (opcional, actualiza el costo)</label>
+            <input className="input" type="number" value={carga.costo} onChange={e=>setCarga({...carga,costo:e.target.value})}/>
+            <label className="label">Nota (opcional)</label>
+            <input className="input" value={carga.nota} onChange={e=>setCarga({...carga,nota:e.target.value})} placeholder="Proveedor, factura…"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setCarga(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!(Number(carga.cantidad)>0)} onClick={()=>cargar(carga)}>Cargar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Recetas({showToast,clave,onUnlock}){
+  const [prods,setProds]=useState([]);
+  const [insumos,setInsumos]=useState([]);
+  const [pid,setPid]=useState("");
+  const [items,setItems]=useState([]);
+  const [cargando,setCargando]=useState(false);
+  useEffect(()=>{ db.listProductos().then(setProds).catch(()=>{}); db.listInsumos().then(setInsumos).catch(()=>{}); },[]);
+  useEffect(()=>{ if(!pid||!clave){ setItems([]); return; } setCargando(true); db.getReceta(pid,clave).then(r=>{ setItems(r); setCargando(false); }).catch(e=>{ setCargando(false); showToast(""+(e.message||e),"err"); }); },[pid,clave]);
+  const insNombre=id=>{ const i=insumos.find(x=>x.id===id); return i?i.unidad:""; };
+  const add=()=>setItems(prev=>[...prev,{insumo_id:"",cantidad:0}]);
+  const set=(i,k,v)=>setItems(prev=>{const a=[...prev];a[i]={...a[i],[k]:v};return a;});
+  const del=i=>setItems(prev=>prev.filter((_,j)=>j!==i));
+  const guardar=async()=>{ try{ await db.saveReceta(pid,items,clave); showToast("Receta guardada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const costoUnit=items.reduce((s,it)=>{ const ins=insumos.find(x=>x.id===it.insumo_id); return s+(ins?Number(ins.costo)*Number(it.cantidad||0):0); },0);
+  if(!clave) return (
+    <div className="card" style={{textAlign:"center",padding:"36px 18px"}}>
+      <div style={{fontSize:40,marginBottom:8}}>🔒</div>
+      <div style={{fontWeight:800,color:"var(--tb)"}}>Recetas protegidas</div>
+      <div className="muted" style={{margin:"6px 0 16px"}}>Ingresa tu clave de fórmulas para ver o editar las recetas.</div>
+      <button className="btn btn-amber" onClick={onUnlock}>Desbloquear fórmulas</button>
+    </div>
+  );
+  return (
+    <div>
+      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Recetas de producción</div></div>
+      <div className="muted" style={{marginBottom:10}}>Define qué insumos (y cuánto) lleva <b>1 unidad</b> de cada producto. Al producir, se descuenta automático.</div>
+      <div className="card">
+        <label className="label">Producto</label>
+        <select className="select" value={pid} onChange={e=>setPid(e.target.value)}>
+          <option value="">Seleccionar producto…</option>
+          {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+        </select>
+        {pid && !cargando && (
+          <div>
+            {items.map((it,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+                <select className="select" style={{margin:0,flex:1}} value={it.insumo_id} onChange={e=>set(i,"insumo_id",e.target.value)}>
+                  <option value="">Insumo…</option>
+                  {insumos.map(x=><option key={x.id} value={x.id}>{x.nombre} ({x.unidad})</option>)}
+                </select>
+                <input className="input" type="number" style={{margin:0,width:90,textAlign:"center"}} value={it.cantidad} onChange={e=>set(i,"cantidad",Number(e.target.value)||0)} placeholder="0"/>
+                <span className="muted" style={{width:30}}>{insNombre(it.insumo_id)}</span>
+                <button className="btn btn-danger btn-sm" onClick={()=>del(i)}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={add}>+ Agregar insumo</button>
+            <div className="result-row" style={{marginTop:10,borderTop:"1px solid var(--bd)"}}><span className="result-label">Costo por unidad producida</span><span className="result-value amber">{fmt(Math.round(costoUnit))}</span></div>
+            <button className="btn btn-amber" style={{width:"100%",marginTop:12}} onClick={guardar}>Guardar receta</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Producir({showToast,clave,onUnlock}){
+  const [prods,setProds]=useState([]);
+  const [insumos,setInsumos]=useState([]);
+  const [sedes,setSedes]=useState([]);
+  const [pid,setPid]=useState("");
+  const [cantidad,setCantidad]=useState(1);
+  const [sede,setSede]=useState("");
+  const [nota,setNota]=useState("");
+  const [receta,setReceta]=useState([]);
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{ db.listProductos().then(setProds).catch(()=>{}); db.listInsumos().then(setInsumos).catch(()=>{}); db.listSedes().then(s=>{ setSedes(s); const b=s.find(x=>x.es_bodega)||s[0]; if(b) setSede(b.nombre); }).catch(()=>{}); },[]);
+  useEffect(()=>{ if(pid&&clave) db.getReceta(pid,clave).then(setReceta).catch(()=>setReceta([])); else setReceta([]); },[pid,clave]);
+  const ins=id=>insumos.find(x=>x.id===id)||{};
+  const n=Number(cantidad)||0;
+  const costoTotal=receta.reduce((s,r)=>{ const i=ins(r.insumo_id); return s+(Number(i.costo||0)*r.cantidad*n); },0);
+  const producir=async()=>{
+    setBusy(true);
+    try{ const costo=await db.producir(pid,n,sede,"ADMIN",nota); showToast("Producido "+n+" und. — costo "+fmt(Math.round(costo||0))); setNota(""); setCantidad(1); const ins2=await db.listInsumos(); setInsumos(ins2); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusy(false);
+  };
+  const valido = pid && n>0 && sede;
+  return (
+    <div>
+      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Producir</div></div>
+      <div className="card">
+        <div className="grid2">
+          <div><label className="label">Producto a fabricar</label>
+            <select className="select" value={pid} onChange={e=>setPid(e.target.value)}>
+              <option value="">Seleccionar…</option>
+              {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+            </select>
+          </div>
+          <div><label className="label">Cantidad a producir</label><input className="input" type="number" min="1" value={cantidad} onChange={e=>setCantidad(e.target.value)}/></div>
+        </div>
+        <label className="label">Sede destino (dónde queda el producto)</label>
+        <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}</select>
+        <label className="label">Nota (opcional)</label>
+        <input className="input" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Lote, observación…"/>
+
+        {!clave && pid && (
+          <div className="muted" style={{padding:"10px 0"}}>🔒 Detalle de fórmula oculto. <a style={{color:"var(--amber)",cursor:"pointer"}} onClick={onUnlock}>Desbloquear</a> para ver insumos y costo. Igual puedes producir (consume la receta automáticamente).</div>
+        )}
+        {clave && pid && receta.length===0 && <div className="muted" style={{padding:"8px 0",color:"var(--amber)"}}>Este producto no tiene receta. Defínela en la pestaña Recetas.</div>}
+        {clave && receta.length>0 && (
+          <div className="card" style={{padding:0,overflowX:"auto",marginTop:8}}>
+            <table className="tbl">
+              <thead><tr><th>Insumo</th><th className="num">Necesita</th><th className="num">Disponible</th></tr></thead>
+              <tbody>
+                {receta.map((r,i)=>{ const x=ins(r.insumo_id); const nec=r.cantidad*n; const falta=Number(x.stock||0)<nec; return (
+                  <tr key={i}><td className="row-name">{x.nombre}</td><td className="num">{nec} {x.unidad}</td><td className="num" style={{color:falta?"var(--red)":"var(--green)"}}>{Number(x.stock||0)} {x.unidad}</td></tr>
+                );})}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {clave && <div className="result-row" style={{marginTop:10,borderTop:"1px solid var(--bd)"}}><span className="result-label" style={{fontWeight:800,color:"var(--tb)"}}>Costo del lote</span><span className="result-value amber" style={{fontSize:18}}>{fmt(Math.round(costoTotal))}</span></div>}
+        <button className="btn btn-amber" style={{width:"100%",marginTop:12}} disabled={!valido||busy} onClick={producir}>{busy?"Produciendo…":"✅ Producir"}</button>
+      </div>
+    </div>
+  );
+}
+
+function HistorialProd({showToast,clave,onUnlock}){
+  const [items,setItems]=useState(null);
+  const [det,setDet]=useState(null);
+  useEffect(()=>{ db.listProducciones().then(setItems).catch(()=>setItems([])); },[]);
+  const verDetalle=async(p)=>{
+    if(!clave){ onUnlock(); return; }
+    try{ const ins=await db.getProduccionInsumos(p.id,clave); setDet({...p,insumos:ins}); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  if(!items) return <div className="empty">Cargando…</div>;
+  return (
+    <div>
+      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Historial de producción <span className="muted">({items.length})</span></div></div>
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Fecha</th><th>Producto</th><th className="num">Cantidad</th><th>Sede</th><th className="num">Costo</th><th></th></tr></thead>
+          <tbody>
+            {items.length===0 && <tr><td colSpan="6"><div className="empty">Aún no hay producciones.</div></td></tr>}
+            {items.map(p=>(
+              <tr key={p.id} style={{cursor:"pointer"}} onClick={()=>verDetalle(p)}>
+                <td className="muted">{fLocalDia(p.created_at)} {fLocalHora(p.created_at)}</td>
+                <td className="row-name">{p.producto_nombre}</td>
+                <td className="num">{Number(p.cantidad)}</td>
+                <td>{p.sede}</td>
+                <td className="num">{fmt(p.costo_total)}</td>
+                <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();verDetalle(p);}}>{clave?"Ver":"🔒 Ver"}</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {det && (
+        <div className="modal-bg" onClick={()=>setDet(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{det.producto_nombre} — {Number(det.cantidad)} und.</div>
+            <div className="muted" style={{marginBottom:10}}>{fLocalDia(det.created_at)} {fLocalHora(det.created_at)} · {det.sede} · Costo {fmt(det.costo_total)}</div>
+            <div className="card" style={{padding:0}}>
+              <table className="tbl">
+                <thead><tr><th>Insumo consumido</th><th className="num">Cantidad</th><th className="num">Costo</th></tr></thead>
+                <tbody>{(det.insumos||[]).map((d,i)=>(
+                  <tr key={i}><td className="row-name">{d.insumo_nombre}</td><td className="num">{Number(d.cantidad)}</td><td className="num">{fmt(d.costo)}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

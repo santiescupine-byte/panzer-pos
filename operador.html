@@ -246,9 +246,31 @@ const db = {
       descuadres,  // [{nombre, sistema, contado, diferencia}]
     });
   },
-  // Registrar la liquidación de turno en el sistema de recaudo (mismo formato que la app del tesorero)
+  // Registrar la liquidación de turno en el sistema de recaudo.
+  // El Apps Script espera los campos ANIDADOS en `liquidacion` (igual que la app del tesorero),
+  // con fecha/hora/estado. No mandar plano o responde "Datos incompletos".
   async enviarLiquidacion(payload){
-    return apiPost('guardarLiquidacionOperador', payload);
+    const liquidacion = { ...payload,
+      fecha: new Date().toLocaleDateString('es-CO'),
+      hora: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
+      estado: 'pendiente',
+    };
+    const res = await apiPost('guardarLiquidacionOperador', { liquidacion });
+    if(!res || !res.success) throw new Error((res && res.error) || 'No se pudo registrar la liquidación');
+    return res;
+  },
+  // ¿este operador hizo un chequeo VIGENTE en esta sede? (dentro de las últimas 12 h, = turno más largo)
+  async chequeoVigente(sede, operador){
+    const HORAS = 12;
+    const desde = new Date(Date.now() - HORAS*60*60*1000).toISOString();
+    if(DEMO_MODE){
+      let arr=[]; try{ arr=JSON.parse(localStorage.getItem('panzer_chequeos_demo')||'[]'); }catch(e){}
+      return arr.some(c=>c.sede===sede && c.operador===operador && (c.created_at||c.fecha||'')>=desde);
+    }
+    const { data, error } = await sb.from('chequeos_inventario')
+      .select('id').eq('sede',sede).eq('operador',operador).gte('created_at',desde).limit(1);
+    if(error) return false;
+    return (data||[]).length>0;
   },
   async guardarChequeo(reg){
     if(DEMO_MODE){
@@ -368,6 +390,9 @@ function App(){
       setSede(sedeSel); setOperador(nombre); setTurno(t);
       const prods=await db.getProductos(sedeSel);
       setProductos(prods);
+      // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
+      const vigente = await db.chequeoVigente(sedeSel, nombre);
+      if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok"); }
     }catch(e){ showToast("Error: "+(e.message||e),"err"); }
     setBusy(false);
   };

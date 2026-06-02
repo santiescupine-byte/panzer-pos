@@ -366,7 +366,7 @@ const db = {
         return true;
       });
     }
-    let q=sb.from('ventas').select('*, venta_items(*)').eq('anulada',false).order('created_at');
+    let q=sb.from('ventas').select('*, venta_items(*, productos(categoria))').eq('anulada',false).order('created_at');
     // Convertir los límites del día LOCAL a instantes UTC (created_at se guarda en UTC).
     // Así una venta de la noche (que en UTC cae al día siguiente) no se pierde del informe.
     if(f.desde) q=q.gte('created_at', new Date(f.desde+'T00:00:00').toISOString());
@@ -382,7 +382,7 @@ const db = {
       if(f.tipoPago==='tarjeta') return v.pago_tarjeta>0;
       return true;
     }).map(v=>{
-      const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:i.categoria||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:0,iva:false,subtotal:Number(i.subtotal)}));
+      const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:(i.productos&&i.productos.categoria)||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:0,iva:false,subtotal:Number(i.subtotal)}));
       const bruto=items.reduce((s,i)=>s+i.subtotal,0);
       return {id:v.id,recibo:v.numero_recibo||('#'+v.id.slice(0,6)),fecha:v.created_at,sede:v.sede,operador:v.operador,items,bruto,descuento:Math.max(0,bruto-Number(v.total)),total:Number(v.total),pago_efectivo:Number(v.pago_efectivo),pago_qr:Number(v.pago_qr),pago_tarjeta:Number(v.pago_tarjeta)};
     });

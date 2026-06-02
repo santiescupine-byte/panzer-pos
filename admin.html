@@ -1053,9 +1053,20 @@ function Inventario({showToast}){
     try{ await db.setMinimo(r.id,sede,m); setInv(prev=>prev.map(x=>x.id===r.id?{...x,minimo:m}:x)); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  const abrirTransfer=async()=>{
+    if(!bodega) return;
+    let bodegaStock={};
+    try{ const bi=await db.getInventario(bodega.nombre); bi.forEach(r=>{ bodegaStock[r.id]=r.stock; }); }catch(e){}
+    setTransfer({origen:bodega.nombre, destino: sede!==bodega.nombre?sede:"", cantidades:{}, bodegaStock});
+  };
   const hacerTransfer=async(t)=>{
-    try{ await db.transferirStock(t.producto_id,t.origen,t.destino,t.cantidad); setTransfer(null); await cargar(); showToast("Transferencia realizada"); }
-    catch(e){ showToast(""+(e.message||e),"err"); }
+    const items=Object.entries(t.cantidades||{}).filter(([id,c])=>Number(c)>0);
+    if(!t.destino || !items.length) return;
+    try{
+      for(const [pid,c] of items){ await db.transferirStock(pid, t.origen, t.destino, Number(c)); }
+      setTransfer(null); await cargar();
+      showToast(items.length+" producto(s) transferido(s) a "+t.destino);
+    }catch(e){ showToast(""+(e.message||e),"err"); }
   };
 
   if(inv===null && sede) return (
@@ -1086,7 +1097,7 @@ function Inventario({showToast}){
         </div>
         <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Buscar</label><input className="input" placeholder="Producto…" value={q} onChange={e=>setQ(e.target.value)}/></div>
         <label className="check" style={{alignSelf:"center"}}><input type="checkbox" checked={soloBajo} onChange={e=>setSoloBajo(e.target.checked)}/> Solo stock bajo {nBajo>0&&<span className="pill pill-off" style={{marginLeft:4}}>{nBajo}</span>}</label>
-        {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={()=>setTransfer({producto_id:"",origen:bodega.nombre,destino:sede!==bodega.nombre?sede:"",cantidad:1})}>⇄ Transferir desde {bodega.nombre}</button>}
+        {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Transferir desde {bodega.nombre}</button>}
       </div>
 
       {nBajo>0 && !soloBajo && <div className="muted" style={{marginBottom:12}}>⚠ {nBajo} producto(s) en o por debajo del mínimo en {sede}. <a style={{color:"var(--amber)",cursor:"pointer"}} onClick={()=>setSoloBajo(true)}>Ver solo esos</a></div>}
@@ -1118,35 +1129,34 @@ function Inventario({showToast}){
 }
 
 function TransferModal({t,setT,bodega,sedes,inv,onClose,onConfirm}){
-  const prods=(inv||[]);
-  const set=(k,v)=>setT(prev=>({...prev,[k]:v}));
-  const valido = t.producto_id && t.destino && t.destino!==t.origen && Number(t.cantidad)>0;
+  const [q,setQ]=useState("");
+  const prods=(inv||[]).filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
+  const setCant=(id,v)=>setT(prev=>({...prev,cantidades:{...(prev.cantidades||{}),[id]:v.replace(/[^0-9]/g,"")}}));
+  const nSel=Object.values(t.cantidades||{}).filter(c=>Number(c)>0).length;
+  const valido = t.destino && nSel>0;
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <div className="modal-t">⇄ Transferir desde {t.origen}</div>
-        <div className="muted" style={{marginBottom:14}}>Mueve stock de la bodega central a una sede. Se descuenta de {t.origen} y se suma al destino.</div>
-        <label className="label">Producto</label>
-        <select className="select" value={t.producto_id} onChange={e=>set("producto_id",e.target.value)}>
-          <option value="">Seleccionar producto…</option>
-          {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+        <div className="muted" style={{marginBottom:10}}>Elige la sede destino y escribe cuánto enviar de cada producto. Se descuenta de {t.origen} y se suma al destino.</div>
+        <label className="label">Sede destino</label>
+        <select className="select" value={t.destino} onChange={e=>setT(prev=>({...prev,destino:e.target.value}))}>
+          <option value="">Seleccionar…</option>
+          {sedes.filter(s=>s.nombre!==t.origen).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
         </select>
-        <div className="grid2">
-          <div>
-            <label className="label">Sede destino</label>
-            <select className="select" value={t.destino} onChange={e=>set("destino",e.target.value)}>
-              <option value="">Seleccionar…</option>
-              {sedes.filter(s=>s.nombre!==t.origen).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="label">Cantidad</label>
-            <input className="input" type="number" min="1" value={t.cantidad} onChange={e=>set("cantidad",Number(e.target.value)||0)}/>
-          </div>
+        <input className="input" placeholder="Buscar producto…" value={q} onChange={e=>setQ(e.target.value)}/>
+        <div style={{maxHeight:"40vh",overflowY:"auto",border:"1px solid var(--bd)",borderRadius:10,padding:"4px 8px",marginBottom:12}}>
+          {prods.map(p=>(
+            <div key={p.id} className="stockgrid" style={{gridTemplateColumns:"1fr 78px",padding:"4px 0"}}>
+              <span style={{fontSize:13}}>{p.nombre} <span className="muted">· bodega: {t.bodegaStock?.[p.id]??0}</span></span>
+              <input className="input" type="number" inputMode="numeric" style={{margin:0,textAlign:"center"}} placeholder="0" value={t.cantidades?.[p.id]??""} onChange={e=>setCant(p.id,e.target.value)}/>
+            </div>
+          ))}
+          {prods.length===0 && <div className="muted" style={{padding:"10px 0"}}>Sin productos.</div>}
         </div>
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
-          <button className="btn btn-amber" disabled={!valido} onClick={()=>onConfirm(t)}>Transferir</button>
+          <button className="btn btn-amber" disabled={!valido} onClick={()=>onConfirm(t)}>Transferir{nSel?(" "+nSel):""}</button>
         </div>
       </div>
     </div>

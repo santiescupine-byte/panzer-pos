@@ -105,6 +105,16 @@
     .subnav-btn{padding:8px 13px;border-radius:8px;border:1px solid var(--bd);background:var(--sf2);color:var(--td);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
     .subnav-btn.on{background:var(--green-d);border-color:var(--green);color:var(--green);}
     .num{text-align:right;font-variant-numeric:tabular-nums;}
+    /* Login PIN del back office */
+    .login-wrap{max-width:360px;margin:0 auto;padding:48px 20px;}
+    .pin-dots{display:flex;gap:12px;justify-content:center;margin:8px 0 20px;}
+    .pin-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--bd2);transition:.15s;}
+    .pin-dot.on{background:var(--amber);border-color:var(--amber);}
+    .pinpad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+    .pin-key{padding:18px 0;border-radius:12px;border:1px solid var(--bd);background:var(--sf2);color:var(--tb);font-size:22px;font-weight:700;cursor:pointer;user-select:none;text-align:center;}
+    .pin-key:active{background:var(--sf3);}
+    .pin-key.back{background:transparent;border-color:transparent;color:var(--td);font-size:18px;}
+    .pin-key.zero{grid-column:2;}
     .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:400;padding:12px 18px;border-radius:12px;font-size:13px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.4);}
     .toast.ok{background:var(--green);color:#fff;}
     .toast.err{background:var(--red);color:#fff;}
@@ -166,6 +176,7 @@ let DEMO = {
     {id:"c5", nombre:"SNACKS", orden:5, activo:true},
   ],
   empleados: [
+    {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
     {id:"e1", nombre:"Johan",   rol:"cajero",  activo:true, pin:"1234", sedes:["Toberín"]},
     {id:"e2", nombre:"Camilo",  rol:"cajero",  activo:true, pin:"5678", sedes:["San Felipe"]},
     {id:"e3", nombre:"Andrea",  rol:"tesorero",activo:true, pin:"",     sedes:["San Felipe","Bello"]},
@@ -442,6 +453,16 @@ const db = {
     const {error}=await sb.rpc('anular_venta',{p_venta_id:venta.id, p_operador:null, p_motivo:motivo||'Recibo eliminado'});
     if(error) throw error;
   },
+  // ---- Login del back office (solo rol admin) ----
+  async loginAdmin(pin){
+    if(DEMO_MODE){
+      const e=DEMO.empleados.find(x=>x.pin===pin && x.activo);
+      return e ? {nombre:e.nombre, rol:e.rol} : null;
+    }
+    const {data,error}=await sb.from('empleados').select('nombre,rol').eq('pin',pin).eq('activo',true).maybeSingle();
+    if(error||!data) return null;
+    return {nombre:data.nombre, rol:data.rol};
+  },
 };
 
 // ============================================================
@@ -450,7 +471,52 @@ const db = {
 function App(){
   const [tab,setTab]=useState("informes");
   const [toast,setToast]=useState(null);
+  const [auth,setAuth]=useState(null);   // admin autenticado
+  const [pin,setPin]=useState("");
+  const [busy,setBusy]=useState(false);
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2400); };
+
+  const intentar=async(p)=>{
+    setBusy(true);
+    try{
+      const u=await db.loginAdmin(p);
+      if(!u){ showToast("PIN incorrecto","err"); setPin(""); }
+      else if(u.rol!=='admin'){ showToast("Acceso solo para administradores","err"); setPin(""); }
+      else { setAuth(u); setPin(""); }
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusy(false);
+  };
+  const salir=()=>{ setAuth(null); setPin(""); setTab("informes"); };
+
+  // ---- LOGIN (PIN solo admin) ----
+  if(!auth){
+    const tecla=d=>setPin(prev=>(prev+d).slice(0,4));
+    const borrar=()=>setPin(prev=>prev.slice(0,-1));
+    return (
+      <div className="app">
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — PIN admin de prueba: 6262</div>}
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <div className="login-wrap">
+          <div style={{textAlign:"center",marginBottom:18}}>
+            <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" style={{width:150}} alt="Panzer"/>
+            <p className="muted" style={{marginTop:8,fontSize:13}}>Back Office — Administración</p>
+          </div>
+          <div className="card">
+            <div className="card-t" style={{justifyContent:"center"}}>🔒 PIN de administrador</div>
+            <div className="pin-dots">{[0,1,2,3].map(i=><div key={i} className={"pin-dot"+(i<pin.length?" on":"")}/>)}</div>
+            <div className="pinpad">
+              {["1","2","3","4","5","6","7","8","9"].map(d=>(<div key={d} className="pin-key" onClick={()=>tecla(d)}>{d}</div>))}
+              <div className="pin-key back" onClick={borrar}>⌫</div>
+              <div className="pin-key zero" onClick={()=>tecla("0")}>0</div>
+            </div>
+            <button className="btn btn-amber" style={{width:"100%",marginTop:16}} disabled={pin.length<4||busy} onClick={()=>intentar(pin)}>
+              {busy?"Verificando…":"Entrar"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
@@ -460,9 +526,9 @@ function App(){
         <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" alt="P"/>
         <div>
           <h1>Back Office</h1>
-          <div className="header-sub">Administración Panzer Carwash</div>
+          <div className="header-sub">{auth.nombre} · Administración</div>
         </div>
-        <div className="header-badge">ADMIN</div>
+        <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={salir}>Salir</button>
       </div>
       <div className="tabs">
         {[["informes","Informes"],["inventario","Inventario"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(

@@ -402,7 +402,7 @@ const db = {
   async producir(productoId, cantidad, sede, operador, nota){
     if(DEMO_MODE){
       const rec=DEMO.recetas[productoId]||[]; let costo=0;
-      rec.forEach(r=>{ const ins=DEMO.insumos.find(x=>x.id===r.insumo_id); if(ins){ const c=r.cantidad*cantidad; ins.stock-=c; costo+=(Number(ins.costo)||0)*c; } });
+      rec.forEach(r=>{ const ins=DEMO.insumos.find(x=>x.id===r.insumo_id); if(ins){ const c=(Number(r.cantidad||0)/100)*cantidad*convInsumo(ins.unidad); ins.stock-=c; costo+=(Number(ins.costo)||0)*c; } });
       const p=DEMO.productos.find(x=>x.id===productoId); if(p){ p.stock=p.stock||{}; p.stock[sede]=(Number(p.stock[sede])||0)+cantidad; }
       DEMO.producciones.unshift({id:uid(),created_at:new Date().toISOString(),producto_nombre:p?p.nombre:'',cantidad,sede,operador,costo_total:costo,nota});
       return costo;
@@ -467,7 +467,8 @@ const db = {
       return;
     }
     const row={nombre:p.nombre,tipo:p.tipo,categoria:p.categoria,precio:p.precio,costo:p.costo,
-      codigo_barras:p.codigo_barras||null,controla_stock:p.controla_stock,activo:p.activo};
+      codigo_barras:p.codigo_barras||null,controla_stock:p.controla_stock,activo:p.activo,
+      fabricable:!!p.fabricable, vende_pos:p.vende_pos!==false};
     let prodId=p.id;
     if(prodId){ const {error}=await sb.from('productos').update(row).eq('id',prodId); if(error) throw error; }
     else { const {data,error}=await sb.from('productos').insert(row).select('id').single(); if(error) throw error; prodId=data.id; }
@@ -808,7 +809,9 @@ function ProductoModal({p,cats,sedes,allProds,onClose,onSave}){
         <label className="check"><input type="checkbox" checked={!!f.precio_variable} onChange={e=>set("precio_variable",e.target.checked)}/> Precio variable (se pide al vender)</label>
         <label className="check"><input type="checkbox" checked={!!f.iva} onChange={e=>set("iva",e.target.checked)}/> Aplica IVA (19%)</label>
         <label className="check"><input type="checkbox" checked={!!f.controla_stock} onChange={e=>set("controla_stock",e.target.checked)}/> Controla inventario</label>
-        <label className="check"><input type="checkbox" checked={!!f.activo} onChange={e=>set("activo",e.target.checked)}/> Activo (visible en el POS)</label>
+        <label className="check"><input type="checkbox" checked={!!f.activo} onChange={e=>set("activo",e.target.checked)}/> Activo</label>
+        <label className="check"><input type="checkbox" checked={f.vende_pos!==false} onChange={e=>set("vende_pos",e.target.checked)}/> Se vende en el POS (visible en la caja)</label>
+        <label className="check"><input type="checkbox" checked={!!f.fabricable} onChange={e=>set("fabricable",e.target.checked)}/> Es fabricable (aparece en Producción)</label>
         <div style={{marginTop:10}}>
           <label className="label">Disponibilidad por sede{f.controla_stock?" y stock":""}</label>
           <div className="muted" style={{marginTop:-6,marginBottom:8}}>Marca en qué tiendas se vende este producto.{f.controla_stock?" Y la cantidad en stock de cada una.":""}</div>
@@ -1637,6 +1640,8 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
 // SECCIÓN: PRODUCCIÓN (insumos, recetas, producir, historial)
 // ============================================================
 const UNIDADES=["g","kg","ml","L","unidad"];
+// factor para pasar de "kg equivalente" a la unidad del insumo (g/ml van en milésimas)
+const convInsumo=u=>(u==='g'||u==='ml')?1000:1;
 
 function Produccion({showToast}){
   const [sub,setSub]=useState("insumos");
@@ -1809,7 +1814,23 @@ function Recetas({showToast,clave,onUnlock}){
   const set=(i,k,v)=>setItems(prev=>{const a=[...prev];a[i]={...a[i],[k]:v};return a;});
   const del=i=>setItems(prev=>prev.filter((_,j)=>j!==i));
   const guardar=async()=>{ try{ await db.saveReceta(pid,items,clave); showToast("Receta guardada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
-  const costoUnit=items.reduce((s,it)=>{ const ins=insumos.find(x=>x.id===it.insumo_id); return s+(ins?Number(ins.costo)*Number(it.cantidad||0):0); },0);
+  // cantidad = % en peso. Costo por kg = Σ costo_insumo × (%/100) × conv(unidad)
+  const costoKg=items.reduce((s,it)=>{ const ins=insumos.find(x=>x.id===it.insumo_id); return s+(ins?Number(ins.costo)*(Number(it.cantidad||0)/100)*convInsumo(ins.unidad):0); },0);
+  const totalPct=items.reduce((s,it)=>s+Number(it.cantidad||0),0);
+  const fabricables=prods.filter(p=>p.fabricable);
+  const [nuevoProd,setNuevoProd]=useState("");
+  const [creando,setCreando]=useState(false);
+  const crearProd=async()=>{
+    const nombre=nuevoProd.trim(); if(!nombre) return; setCreando(true);
+    try{
+      await db.saveProducto({nombre,tipo:"producto",categoria:"PRODUCCIÓN",precio:0,costo:0,codigo_barras:null,controla_stock:true,activo:true,fabricable:true,vende_pos:false,stock:{},dispo:{},componentes:[]});
+      const ps=await db.listProductos(); setProds(ps);
+      const nuevo=ps.find(p=>p.nombre===nombre && p.fabricable && p.vende_pos===false);
+      if(nuevo) setPid(nuevo.id);
+      setNuevoProd(""); showToast("Producto de producción creado");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setCreando(false);
+  };
   if(!clave) return (
     <div className="card" style={{textAlign:"center",padding:"36px 18px"}}>
       <div style={{fontSize:40,marginBottom:8}}>🔒</div>
@@ -1821,13 +1842,17 @@ function Recetas({showToast,clave,onUnlock}){
   return (
     <div>
       <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Recetas de producción</div></div>
-      <div className="muted" style={{marginBottom:10}}>Define qué insumos (y cuánto) lleva <b>1 unidad</b> de cada producto. Al producir, se descuenta automático.</div>
+      <div className="muted" style={{marginBottom:10}}>Define el <b>% en peso</b> de cada insumo (deben sumar 100%). Al fabricar, indicas los kilos y el sistema calcula cuánto tomar de cada uno.</div>
       <div className="card">
-        <label className="label">Producto</label>
+        <label className="label">Producto fabricable</label>
         <select className="select" value={pid} onChange={e=>setPid(e.target.value)}>
           <option value="">Seleccionar producto…</option>
-          {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+          {fabricables.map(p=><option key={p.id} value={p.id}>{p.nombre}{p.vende_pos===false?" (solo producción)":""}</option>)}
         </select>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <input className="input" style={{margin:0,flex:1}} placeholder="Nuevo producto de producción (otras industrias)…" value={nuevoProd} onChange={e=>setNuevoProd(e.target.value)}/>
+          <button className="btn btn-ghost" style={{whiteSpace:"nowrap"}} disabled={!nuevoProd.trim()||creando} onClick={crearProd}>+ Crear</button>
+        </div>
         {pid && !cargando && (
           <div>
             {items.map((it,i)=>(
@@ -1836,13 +1861,14 @@ function Recetas({showToast,clave,onUnlock}){
                   <option value="">Insumo…</option>
                   {insumos.map(x=><option key={x.id} value={x.id}>{x.nombre} ({x.unidad})</option>)}
                 </select>
-                <input className="input" type="number" style={{margin:0,width:90,textAlign:"center"}} value={it.cantidad} onChange={e=>set(i,"cantidad",Number(e.target.value)||0)} placeholder="0"/>
-                <span className="muted" style={{width:30}}>{insNombre(it.insumo_id)}</span>
+                <input className="input" type="number" style={{margin:0,width:80,textAlign:"center"}} value={it.cantidad} onChange={e=>set(i,"cantidad",Number(e.target.value)||0)} placeholder="0"/>
+                <span className="muted" style={{width:14}}>%</span>
                 <button className="btn btn-danger btn-sm" onClick={()=>del(i)}>✕</button>
               </div>
             ))}
             <button className="btn btn-ghost btn-sm" onClick={add}>+ Agregar insumo</button>
-            <div className="result-row" style={{marginTop:10,borderTop:"1px solid var(--bd)"}}><span className="result-label">Costo por unidad producida</span><span className="result-value amber">{fmt(Math.round(costoUnit))}</span></div>
+            <div className="result-row" style={{marginTop:10}}><span className="result-label">Suma de porcentajes</span><span className="result-value" style={{color:Math.abs(totalPct-100)<0.01?"var(--green)":"var(--red)"}}>{totalPct}% {Math.abs(totalPct-100)<0.01?"✓":"(debe ser 100%)"}</span></div>
+            <div className="result-row" style={{borderTop:"1px solid var(--bd)"}}><span className="result-label">Costo por kilo producido</span><span className="result-value amber">{fmt(Math.round(costoKg))}</span></div>
             <button className="btn btn-amber" style={{width:"100%",marginTop:12}} onClick={guardar}>Guardar receta</button>
           </div>
         )}
@@ -1865,10 +1891,11 @@ function Producir({showToast,clave,onUnlock}){
   useEffect(()=>{ if(pid&&clave) db.getReceta(pid,clave).then(setReceta).catch(()=>setReceta([])); else setReceta([]); },[pid,clave]);
   const ins=id=>insumos.find(x=>x.id===id)||{};
   const n=Number(cantidad)||0;
-  const costoTotal=receta.reduce((s,r)=>{ const i=ins(r.insumo_id); return s+(Number(i.costo||0)*r.cantidad*n); },0);
+  const consumoDe=r=>{ const i=ins(r.insumo_id); return (Number(r.cantidad||0)/100)*n*convInsumo(i.unidad); };  // r.cantidad = % peso
+  const costoTotal=receta.reduce((s,r)=>{ const i=ins(r.insumo_id); return s+(Number(i.costo||0)*consumoDe(r)); },0);
   const producir=async()=>{
     setBusy(true);
-    try{ const costo=await db.producir(pid,n,sede,"ADMIN",nota); showToast("Producido "+n+" und. — costo "+fmt(Math.round(costo||0))); setNota(""); setCantidad(1); const ins2=await db.listInsumos(); setInsumos(ins2); }
+    try{ const costo=await db.producir(pid,n,sede,"ADMIN",nota); showToast("Producido "+n+" kg — costo "+fmt(Math.round(costo||0))); setNota(""); setCantidad(1); const ins2=await db.listInsumos(); setInsumos(ins2); }
     catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -1881,10 +1908,10 @@ function Producir({showToast,clave,onUnlock}){
           <div><label className="label">Producto a fabricar</label>
             <select className="select" value={pid} onChange={e=>setPid(e.target.value)}>
               <option value="">Seleccionar…</option>
-              {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+              {prods.filter(p=>p.fabricable).map(p=><option key={p.id} value={p.id}>{p.nombre}{p.vende_pos===false?" (solo producción)":""}</option>)}
             </select>
           </div>
-          <div><label className="label">Cantidad a producir</label><input className="input" type="number" min="1" value={cantidad} onChange={e=>setCantidad(e.target.value)}/></div>
+          <div><label className="label">Kilos a fabricar</label><input className="input" type="number" min="0" step="0.1" value={cantidad} onChange={e=>setCantidad(e.target.value)}/></div>
         </div>
         <label className="label">Sede destino (dónde queda el producto)</label>
         <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}</select>
@@ -1900,8 +1927,8 @@ function Producir({showToast,clave,onUnlock}){
             <table className="tbl">
               <thead><tr><th>Insumo</th><th className="num">Necesita</th><th className="num">Disponible</th></tr></thead>
               <tbody>
-                {receta.map((r,i)=>{ const x=ins(r.insumo_id); const nec=r.cantidad*n; const falta=Number(x.stock||0)<nec; return (
-                  <tr key={i}><td className="row-name">{x.nombre}</td><td className="num">{nec} {x.unidad}</td><td className="num" style={{color:falta?"var(--red)":"var(--green)"}}>{Number(x.stock||0)} {x.unidad}</td></tr>
+                {receta.map((r,i)=>{ const x=ins(r.insumo_id); const nec=Math.round(consumoDe(r)*1000)/1000; const falta=Number(x.stock||0)<nec; return (
+                  <tr key={i}><td className="row-name">{x.nombre} <span className="muted">({Number(r.cantidad)}%)</span></td><td className="num">{nec} {x.unidad}</td><td className="num" style={{color:falta?"var(--red)":"var(--green)"}}>{Number(x.stock||0)} {x.unidad}</td></tr>
                 );})}
               </tbody>
             </table>

@@ -331,7 +331,14 @@ const db = {
     if(error) throw error;
     return data;
   },
-  async registrarVenta({turno, sede, operador, items, pago}){
+  // Descuentos predefinidos activos (para el POS)
+  async getDescuentos(){
+    if(DEMO_MODE) return [{id:"d1",nombre:"Empleado 10%",porcentaje:10},{id:"d2",nombre:"Promoción 5%",porcentaje:5}];
+    const { data, error } = await sb.from('descuentos').select('id,nombre,porcentaje').eq('activo',true).order('nombre');
+    if(error) return [];
+    return data||[];
+  },
+  async registrarVenta({turno, sede, operador, items, pago, descuentoTicket}){
     if(DEMO_MODE){
       // descontar stock localmente (Loyverse permite stock negativo / sobreventa)
       const st = demoStock(sede);
@@ -346,8 +353,10 @@ const db = {
       p_items: items.map(it=>({
         producto_id: it.producto_id, nombre: it.nombre, tipo: it.tipo,
         cantidad: it.cantidad, precio_unit: it.precio, controla_stock: it.controla_stock,
+        descuento: it.descuento||0,
       })),
       p_pago_efectivo: pago.efectivo, p_pago_qr: pago.qr, p_pago_tarjeta: pago.tarjeta,
+      p_descuento_ticket: descuentoTicket||0,
     });
     if(error) throw error;
     return { recibo: data };
@@ -385,6 +394,9 @@ function App(){
   const [showCierre,setShowCierre]=useState(false);
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
+  // descuentos
+  const [descuentos,setDescuentos]=useState([]);     // lista de descuentos disponibles
+  const [descTicket,setDescTicket]=useState(null);   // {nombre,porcentaje} aplicado al ticket
 
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2200); };
 
@@ -395,6 +407,7 @@ function App(){
       setSede(sedeSel); setOperador(nombre); setTurno(t);
       const prods=await db.getProductos(sedeSel);
       setProductos(prods);
+      db.getDescuentos().then(setDescuentos).catch(()=>{});
       // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
       const vigente = await db.chequeoVigente(sedeSel, nombre);
       if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok"); }
@@ -418,8 +431,10 @@ function App(){
     setTurno(null); setSede(""); setOperador(""); setProductos([]);
     setCart([]); setShowCart(false); setShowCierre(false);
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
-    setChequeoHecho(false);
+    setChequeoHecho(false); setDescTicket(null);
   };
+  // aplicar/quitar descuento a una línea del carrito (d = {nombre,porcentaje} o null)
+  const setLineDesc=(key,d)=>setCart(prev=>prev.map(c=>(c.key||c.producto_id)===key?{...c,descPct:d?d.porcentaje:0,descNombre:d?d.nombre:null}:c));
 
   const cats=["Todos",...Array.from(new Set(productos.map(p=>p.categoria||"Otros")))];
   const visibles=productos.filter(p=>
@@ -452,20 +467,29 @@ function App(){
     }));
   };
 
-  const totalCart=cart.reduce((s,c)=>s+c.precio*c.cantidad,0);
+  // ---- cálculos con descuentos ----
+  const lineFull = c => c.precio*c.cantidad;
+  const lineDescMonto = c => c.descPct ? Math.round(lineFull(c)*c.descPct/100) : 0;
+  const lineNet = c => lineFull(c) - lineDescMonto(c);
+  const brutoCart = cart.reduce((s,c)=>s+lineFull(c),0);
+  const subNet = cart.reduce((s,c)=>s+lineNet(c),0);                  // tras descuentos de línea
+  const descTicketMonto = descTicket ? Math.round(subNet*descTicket.porcentaje/100) : 0;
+  const totalCart = subNet - descTicketMonto;                          // total NETO a cobrar
+  const descTotal = brutoCart - totalCart;                             // descuento total
   const countCart=cart.reduce((s,c)=>s+c.cantidad,0);
 
   const cobrar=async(pago)=>{
     setBusy(true);
     try{
-      const res=await db.registrarVenta({turno,sede,operador,items:cart,pago});
+      const items=cart.map(c=>({...c, descuento: lineDescMonto(c)}));
+      const res=await db.registrarVenta({turno,sede,operador,items,pago,descuentoTicket:descTicketMonto});
       // refrescar stock
       const prods=await db.getProductos(sede);
       setProductos(prods);
-      const montoTokens=cart.filter(c=>c.tipo==="token").reduce((s,c)=>s+c.precio*c.cantidad,0);
+      const montoTokens=cart.filter(c=>c.tipo==="token").reduce((s,c)=>s+lineNet(c),0);
       const montoProductos=totalCart-montoTokens;
-      setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, recibo:res&&res.recibo, ts:Date.now()}]);
-      setCart([]); setShowCart(false);
+      setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, descuento:descTotal, recibo:res&&res.recibo, ts:Date.now()}]);
+      setCart([]); setShowCart(false); setDescTicket(null);
       showToast("Venta registrada "+fmt(totalCart),"ok");
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
@@ -581,7 +605,9 @@ function App(){
 
       {/* Sheet carrito + cobro */}
       {showCart && (
-        <CartSheet cart={cart} total={totalCart} busy={busy}
+        <CartSheet cart={cart} total={totalCart} bruto={brutoCart} descTotal={descTotal} busy={busy}
+          descuentos={descuentos} descTicket={descTicket} setDescTicket={setDescTicket} onLineDesc={setLineDesc}
+          lineFull={lineFull} lineNet={lineNet}
           onClose={()=>setShowCart(false)} onQty={changeQty} onCobrar={cobrar}/>
       )}
 
@@ -839,8 +865,10 @@ function CierreSheet({ventas,sede,operador,showToast,onClose,onCerrar}){
 // ============================================================
 // SHEET: CARRITO + COBRO
 // ============================================================
-function CartSheet({cart,total,busy,onClose,onQty,onCobrar}){
+function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,onClose,onQty,onCobrar}){
   const [paso,setPaso]=useState("carrito"); // carrito | pago
+  const hayDesc = (descuentos||[]).length>0;
+  const selStyle={background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--blue)",fontSize:11,fontWeight:600,padding:"2px 4px",marginTop:2};
   const [metodo,setMetodo]=useState("efectivo"); // efectivo | qr | tarjeta | mixto
   const [ef,setEf]=useState(""); const [qr,setQr]=useState(""); const [tj,setTj]=useState("");
 
@@ -861,21 +889,59 @@ function CartSheet({cart,total,busy,onClose,onQty,onCobrar}){
         {paso==="carrito" && (
           <div>
             <div className="card-t">🛒 Carrito</div>
-            {cart.map(c=>(
-              <div key={c.key||c.producto_id} className="citem">
+            {cart.map(c=>{
+              const key=c.key||c.producto_id;
+              return (
+              <div key={key} className="citem">
                 <div style={{flex:1}}>
-                  <div className="citem-name">{c.nombre}</div>
+                  <div className="citem-name">
+                    {c.nombre}
+                    {c.descPct>0 && <span style={{marginLeft:6,fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--green-d)",color:"var(--green)"}}>−{c.descPct}%</span>}
+                  </div>
                   <div className="citem-sub">{fmt(c.precio)} c/u</div>
+                  {hayDesc && (
+                    <select value={c.descId||""} style={selStyle}
+                      onChange={e=>{ const d=descuentos.find(x=>x.id===e.target.value)||null; onLineDesc(key,d); }}>
+                      <option value="">Sin descuento</option>
+                      {descuentos.map(d=><option key={d.id} value={d.id}>{d.nombre} ({d.porcentaje}%)</option>)}
+                    </select>
+                  )}
                 </div>
                 <div className="qty">
-                  <button onClick={()=>onQty(c.key||c.producto_id,-1)}>−</button>
+                  <button onClick={()=>onQty(key,-1)}>−</button>
                   <span>{c.cantidad}</span>
-                  <button onClick={()=>onQty(c.key||c.producto_id,1)}>+</button>
+                  <button onClick={()=>onQty(key,1)}>+</button>
                 </div>
-                <div style={{minWidth:74,textAlign:"right",fontWeight:800,color:"var(--tb)"}}>{fmt(c.precio*c.cantidad)}</div>
+                <div style={{minWidth:74,textAlign:"right"}}>
+                  {c.descPct>0
+                    ? <div><div style={{textDecoration:"line-through",color:"var(--td)",fontSize:11}}>{fmt(lineFull(c))}</div><div style={{fontWeight:800,color:"var(--tb)"}}>{fmt(lineNet(c))}</div></div>
+                    : <div style={{fontWeight:800,color:"var(--tb)"}}>{fmt(lineFull(c))}</div>}
+                </div>
               </div>
-            ))}
-            <div className="result-row" style={{marginTop:8,borderTop:"1px solid var(--bd)",borderBottom:"none"}}>
+            );})}
+
+            {hayDesc && (
+              <div style={{marginTop:12}}>
+                <label className="label">Descuento al ticket completo</label>
+                <select className="select" value={descTicket?descTicket.id:""} style={{marginBottom:0}}
+                  onChange={e=>{ const d=descuentos.find(x=>x.id===e.target.value)||null; setDescTicket(d?{id:d.id,nombre:d.nombre,porcentaje:d.porcentaje}:null); }}>
+                  <option value="">Sin descuento</option>
+                  {descuentos.map(d=><option key={d.id} value={d.id}>{d.nombre} ({d.porcentaje}%)</option>)}
+                </select>
+              </div>
+            )}
+
+            {descTotal>0 && (
+              <div className="result-row" style={{marginTop:10}}>
+                <span className="result-label">Subtotal</span><span className="result-value">{fmt(bruto)}</span>
+              </div>
+            )}
+            {descTotal>0 && (
+              <div className="result-row">
+                <span className="result-label">Descuentos</span><span className="result-value" style={{color:"var(--red)"}}>-{fmt(descTotal)}</span>
+              </div>
+            )}
+            <div className="result-row" style={{marginTop:descTotal>0?0:8,borderTop:"1px solid var(--bd)",borderBottom:"none"}}>
               <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Total</span>
               <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(total)}</span>
             </div>

@@ -151,6 +151,9 @@ const DEMO_MODE = !(SUPABASE_URL && SUPABASE_ANON_KEY);
 const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
+// Fecha/hora en zona LOCAL (Colombia) a partir de un timestamp UTC de Supabase
+const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 const uid = () => "tmp-"+Math.random().toString(36).slice(2,9);
 
 // ============================================================
@@ -990,7 +993,7 @@ function Chequeos({showToast}){
             {lista.length===0 && <tr><td colSpan="6"><div className="empty">Sin chequeos en el periodo/filtros.</div></td></tr>}
             {lista.map(c=>(
               <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>setDetalle(c)}>
-                <td className="muted">{(c.created_at||"").slice(0,10)} {(c.created_at||"").slice(11,16)}</td>
+                <td className="muted">{fLocalDia(c.created_at)} {fLocalHora(c.created_at)}</td>
                 <td>{c.sede}</td>
                 <td className="row-name">{c.operador}</td>
                 <td className="num">{fmt(c.base_recibida)}</td>
@@ -1006,7 +1009,7 @@ function Chequeos({showToast}){
         <div className="modal-bg" onClick={()=>setDetalle(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
             <div className="modal-t">Chequeo — {detalle.sede}</div>
-            <div className="muted" style={{marginBottom:12}}>{detalle.operador} · {(detalle.created_at||"").slice(0,10)} {(detalle.created_at||"").slice(11,16)}</div>
+            <div className="muted" style={{marginBottom:12}}>{detalle.operador} · {fLocalDia(detalle.created_at)} {fLocalHora(detalle.created_at)}</div>
             <div className="kpis">
               <div className="kpi"><div className="kpi-label">Base recibida</div><div className="kpi-value green">{fmt(detalle.base_recibida)}</div></div>
               <div className="kpi"><div className="kpi-label">Descuadres</div><div className="kpi-value" style={{color:detalle.n_descuadres>0?"var(--red)":"var(--green)"}}>{detalle.n_descuadres}</div></div>
@@ -1270,7 +1273,7 @@ function ReporteVista({sub,ventas,showToast,recargar}){
   if(sub==='resumen'){
     // agrupar bruto por día
     const porDia={};
-    ventas.forEach(v=>{ const d=v.fecha.slice(0,10); porDia[d]=(porDia[d]||0)+v.bruto; });
+    ventas.forEach(v=>{ const d=fLocalDia(v.fecha); porDia[d]=(porDia[d]||0)+v.bruto; });
     const dias=Object.keys(porDia).sort();
     const max=Math.max(...dias.map(d=>porDia[d]),1);
     return (
@@ -1367,7 +1370,7 @@ function ReporteVista({sub,ventas,showToast,recargar}){
             <tbody>{rows.map(v=>(
               <tr key={v.id} style={{cursor:"pointer"}} onClick={()=>setDetalle(v)}>
                 <td className="row-name" style={{color:"var(--green)"}}>{v.recibo}</td>
-                <td className="muted">{v.fecha.slice(0,10)} {v.fecha.slice(11,16)}</td>
+                <td className="muted">{fLocalDia(v.fecha)} {fLocalHora(v.fecha)}</td>
                 <td>{v.sede}</td><td className="muted">{v.operador}</td>
                 <td className="num">{fmt(v.total)}</td>
                 <td><span className="chip">{metodo(v)}</span></td>
@@ -1391,7 +1394,7 @@ function ReporteVista({sub,ventas,showToast,recargar}){
           <table className="tbl">
             <thead><tr><th>Recibo</th><th>Fecha</th><th>Sede</th><th className="num">Bruto</th><th className="num">Descuento</th></tr></thead>
             <tbody>{conDesc.slice(0,200).map(v=>(
-              <tr key={v.id}><td className="row-name">{v.recibo}</td><td className="muted">{v.fecha.slice(0,10)}</td><td>{v.sede}</td><td className="num">{fmt(v.bruto)}</td><td className="num" style={{color:"var(--red)"}}>-{fmt(v.descuento)}</td></tr>
+              <tr key={v.id}><td className="row-name">{v.recibo}</td><td className="muted">{fLocalDia(v.fecha)}</td><td>{v.sede}</td><td className="num">{fmt(v.bruto)}</td><td className="num" style={{color:"var(--red)"}}>-{fmt(v.descuento)}</td></tr>
             ))}</tbody>
           </table>
         </div>
@@ -1461,7 +1464,7 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
           <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",color:"var(--td)"}}><span>IVA 19%</span><span>{fmt(Math.round(iva))}</span></div>
           <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",color:"var(--td)"}}><span>{pagoLabel}</span><span>{fmt(v.total)}</span></div>
         </div>
-        <div className="muted" style={{marginBottom:14}}>{v.fecha.slice(0,10)} {v.fecha.slice(11,16)} · {v.recibo}</div>
+        <div className="muted" style={{marginBottom:14}}>{fLocalDia(v.fecha)} {fLocalHora(v.fecha)} · {v.recibo}</div>
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
           <button className="btn btn-danger" disabled={borrando} onClick={onEliminar}>{borrando?"Eliminando…":"🗑 Eliminar recibo"}</button>

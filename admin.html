@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panzer — Back Office</title>
+  <link rel="manifest" href="data:application/json,{&quot;name&quot;:&quot;Panzer Back Office&quot;,&quot;short_name&quot;:&quot;Panzer Admin&quot;,&quot;start_url&quot;:&quot;.&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#080c14&quot;,&quot;theme_color&quot;:&quot;#f59e0b&quot;}">
+  <meta name="theme-color" content="#080c14">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#080c14;--sf:#0f1520;--sf2:#161e2e;--sf3:#1c2640;
+      --bd:#243049;--bd2:#2d3d5a;
+      --amber:#f59e0b;--amber-d:rgba(245,158,11,0.12);
+      --blue:#3b82f6;--blue-d:rgba(59,130,246,0.12);
+      --green:#10b981;--green-d:rgba(16,185,129,0.10);
+      --red:#ef4444;--red-d:rgba(239,68,68,0.10);
+      --purple:#8b5cf6;
+      --t:#e2e8f0;--td:#64748b;--tb:#f8fafc;
+      --font:'Outfit',system-ui,sans-serif;--r:14px;
+    }
+    *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{background:var(--bg);font-family:var(--font);color:var(--t);}
+    input,select,button,textarea{font-family:inherit;}
+    input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;}
+    input[type="number"]{-moz-appearance:textfield;}
+    ::selection{background:rgba(245,158,11,0.25);}
+    #loading{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;transition:opacity .4s;}
+    #loading.hide{opacity:0;pointer-events:none;}
+    .loader{width:40px;height:40px;border:3px solid var(--bd);border-top-color:var(--amber);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:16px;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    .app{max-width:1000px;margin:0 auto;min-height:100vh;}
+    .header{background:linear-gradient(135deg,var(--sf),var(--sf2));border-bottom:1px solid var(--bd);padding:14px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:50;}
+    .header img{height:28px;}
+    .header h1{font-size:17px;font-weight:800;color:var(--tb);}
+    .header-sub{font-size:11px;color:var(--td);}
+    .header-badge{margin-left:auto;padding:4px 12px;border-radius:20px;font-size:10px;font-weight:800;background:var(--amber-d);color:var(--amber);letter-spacing:.5px;}
+    .demo-banner{background:var(--amber-d);border-bottom:1px solid rgba(245,158,11,.25);color:var(--amber);font-size:11px;font-weight:600;text-align:center;padding:6px;}
+    /* Tabs */
+    .tabs{display:flex;gap:6px;padding:12px 20px 0;overflow-x:auto;scrollbar-width:none;}
+    .tabs::-webkit-scrollbar{display:none;}
+    .tab{flex-shrink:0;padding:10px 18px;border-radius:10px 10px 0 0;font-size:14px;font-weight:700;border:1px solid transparent;background:transparent;color:var(--td);cursor:pointer;white-space:nowrap;}
+    .tab.active{background:var(--sf);border-color:var(--bd);border-bottom-color:var(--sf);color:var(--amber);}
+    .page{padding:20px;}
+    .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap;}
+    .toolbar .input{margin-bottom:0;flex:1;min-width:160px;}
+    .toolbar .select{margin-bottom:0;width:auto;min-width:140px;}
+    .card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:12px;}
+    .label{font-size:12px;font-weight:600;color:var(--td);margin-bottom:6px;display:block;letter-spacing:.3px;}
+    .input,.select,.textarea{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:11px 13px;color:var(--tb);font-size:14px;outline:none;margin-bottom:12px;}
+    .select{-webkit-appearance:none;}
+    .input:focus,.select:focus,.textarea:focus{border-color:var(--amber);}
+    .btn{border:none;border-radius:10px;padding:11px 18px;font-size:14px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;}
+    .btn-amber{background:linear-gradient(135deg,var(--amber),#d97706);color:#fff;}
+    .btn-ghost{background:var(--sf2);border:1px solid var(--bd);color:var(--t);}
+    .btn-danger{background:var(--red-d);border:1px solid rgba(239,68,68,.3);color:var(--red);}
+    .btn:disabled{opacity:.4;cursor:default;}
+    .btn-sm{padding:7px 11px;font-size:12px;border-radius:8px;}
+    /* Tabla */
+    .tbl{width:100%;border-collapse:collapse;}
+    .tbl th{text-align:left;font-size:11px;font-weight:700;color:var(--td);text-transform:uppercase;letter-spacing:.5px;padding:10px 12px;border-bottom:1px solid var(--bd);}
+    .tbl td{padding:11px 12px;border-bottom:1px solid var(--bd);font-size:14px;color:var(--t);vertical-align:middle;}
+    .tbl tr:last-child td{border-bottom:none;}
+    .tbl tr.inactive{opacity:.45;}
+    .row-name{font-weight:700;color:var(--tb);}
+    .pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700;}
+    .pill-token{background:var(--amber-d);color:var(--amber);}
+    .pill-serv{background:rgba(139,92,246,.15);color:var(--purple);}
+    .pill-prod{background:var(--blue-d);color:var(--blue);}
+    .pill-bodega{background:var(--green-d);color:var(--green);}
+    .pill-off{background:var(--red-d);color:var(--red);}
+    .chip{display:inline-block;padding:3px 9px;border-radius:8px;font-size:11px;font-weight:600;background:var(--sf2);border:1px solid var(--bd);color:var(--t);margin:2px;}
+    .actions{display:flex;gap:6px;justify-content:flex-end;}
+    .empty{text-align:center;padding:48px 20px;color:var(--td);}
+    .sec-title{font-size:18px;font-weight:800;color:var(--tb);}
+    .muted{color:var(--td);font-size:12px;}
+    /* Modal */
+    .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px;}
+    .modal{background:var(--sf);width:100%;max-width:520px;max-height:90vh;overflow-y:auto;border:1px solid var(--bd);border-radius:18px;padding:22px;}
+    .modal-t{font-size:18px;font-weight:800;color:var(--tb);margin-bottom:16px;}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;}
+    .check{display:flex;align-items:center;gap:9px;padding:10px 0;cursor:pointer;font-size:14px;color:var(--t);}
+    .check input{width:18px;height:18px;accent-color:var(--amber);}
+    .multi{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+    .multi-opt{padding:8px 13px;border-radius:9px;border:1px solid var(--bd);background:var(--sf2);color:var(--td);font-size:13px;font-weight:600;cursor:pointer;}
+    .multi-opt.on{background:var(--amber-d);border-color:var(--amber);color:var(--amber);}
+    .stockgrid{display:grid;grid-template-columns:1fr 90px;gap:8px;align-items:center;margin-bottom:8px;}
+    .stockgrid .input{margin-bottom:0;}
+    /* Informes */
+    .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px;margin-bottom:16px;}
+    .filterbar .fld{display:flex;flex-direction:column;}
+    .filterbar .fld .label{margin-bottom:4px;}
+    .filterbar .select,.filterbar .input{margin-bottom:0;width:auto;min-width:130px;}
+    .kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;}
+    .kpi{flex:1;min-width:160px;background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:16px 18px;}
+    .kpi-label{font-size:12px;color:var(--td);font-weight:600;margin-bottom:6px;}
+    .kpi-value{font-size:24px;font-weight:800;color:var(--tb);line-height:1.1;}
+    .kpi-value.green{color:var(--green);} .kpi-value.red{color:var(--red);} .kpi-value.amber{color:var(--amber);}
+    .chart-wrap{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:16px;}
+    .chart{display:flex;align-items:flex-end;gap:3px;height:200px;overflow-x:auto;scrollbar-width:thin;}
+    .bar{flex:1;min-width:10px;background:linear-gradient(180deg,#34d399,#059669);border-radius:3px 3px 0 0;position:relative;cursor:default;transition:opacity .15s;}
+    .bar:hover{opacity:.75;}
+    .bar-lbl{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--td);white-space:nowrap;}
+    .subnav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
+    .subnav-btn{padding:8px 13px;border-radius:8px;border:1px solid var(--bd);background:var(--sf2);color:var(--td);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+    .subnav-btn.on{background:var(--green-d);border-color:var(--green);color:var(--green);}
+    .num{text-align:right;font-variant-numeric:tabular-nums;}
+    .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:400;padding:12px 18px;border-radius:12px;font-size:13px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.4);}
+    .toast.ok{background:var(--green);color:#fff;}
+    .toast.err{background:var(--red);color:#fff;}
+    .modal-actions{display:flex;gap:10px;margin-top:18px;}
+    .modal-actions .btn{flex:1;}
+  </style>
+</head>
+<body>
+  <div id="loading"><div class="loader"></div>
+    <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" style="width:150px;margin-bottom:10px;" alt="Panzer">
+    <div style="font-size:13px;color:#64748b;">Cargando back office...</div>
+  </div>
+  <div id="root"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Catálogo real (semilla del modo demo) -->
+  <script src="catalogo_demo.js"></script>
+
+  <script type="text/babel">
+const {useState,useEffect} = React;
+
+// ============================================================
+// CONFIGURACIÓN (igual que operador.html)
+// ============================================================
+const SUPABASE_URL = 'https://gmwqxqeiocjcpablxjcn.supabase.co';        // pega aquí cuando crees el proyecto
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdtd3F4cWVpb2NqY3BhYmx4amNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzYwMDksImV4cCI6MjA5NTkxMjAwOX0.O_fSFAHUiZtDNIRShumewEqkPExITBRuxVO2qbMuzxY';
+const DEMO_MODE = !(SUPABASE_URL && SUPABASE_ANON_KEY);
+const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
+const uid = () => "tmp-"+Math.random().toString(36).slice(2,9);
+
+// ============================================================
+// DATOS DEMO (en memoria, editables) — sembrados del catálogo real
+// ============================================================
+const CAT = (typeof window!=="undefined" && window.PANZER_CATALOGO) ? window.PANZER_CATALOGO : {sedes:[],productos:[]};
+
+// Mínimos de stock por (sede|producto) para alertas — solo demo (en Supabase viven en inventario.stock_minimo)
+const DEMO_MIN = {};
+
+let DEMO = {
+  sedes: [
+    {id:"s1", nombre:"Kemilabo",    es_bodega:true,  activo:true, orden:1},
+    {id:"s2", nombre:"Bolivariana", es_bodega:false, activo:true, orden:2},
+    {id:"s3", nombre:"Bello",       es_bodega:false, activo:true, orden:3},
+    {id:"s4", nombre:"Toberín",     es_bodega:false, activo:true, orden:4},
+    {id:"s5", nombre:"San Felipe",  es_bodega:false, activo:true, orden:5},
+    {id:"s6", nombre:"Perdomo",     es_bodega:false, activo:true, orden:6},
+    {id:"s7", nombre:"Marly",       es_bodega:false, activo:true, orden:7},
+  ],
+  categorias: [
+    {id:"c1", nombre:"ADMINISTRATIVO", orden:1, activo:true},
+    {id:"c2", nombre:"TOKENS", orden:2, activo:true},
+    {id:"c3", nombre:"PRODUCTOS PANZER CARWASH", orden:3, activo:true},
+    {id:"c4", nombre:"PRODUCTOS COMPLEMENTARIOS DE LAVADO", orden:4, activo:true},
+    {id:"c5", nombre:"SNACKS", orden:5, activo:true},
+  ],
+  empleados: [
+    {id:"e1", nombre:"Johan",   rol:"cajero",  activo:true, pin:"1234", sedes:["Toberín"]},
+    {id:"e2", nombre:"Camilo",  rol:"cajero",  activo:true, pin:"5678", sedes:["San Felipe"]},
+    {id:"e3", nombre:"Andrea",  rol:"tesorero",activo:true, pin:"",     sedes:["San Felipe","Bello"]},
+    {id:"e4", nombre:"Gerente", rol:"gerente", activo:true, pin:"",     sedes:[]},
+  ],
+  productos: CAT.productos.map((p,i)=>({
+    id:"p"+(p.ref||i), nombre:p.nombre, tipo:p.tipo, categoria:p.categoria,
+    precio:p.precio, precio_variable:p.precio_variable, costo:p.costo,
+    codigo_barras:p.codigo_barras, controla_stock:p.controla_stock, iva:p.iva,
+    activo:true, orden:i, stock:{...p.stock},
+  })),
+};
+
+// ---- Generador de ventas DEMO (últimos 30 días) para que los informes muestren datos ----
+let _demoVentas = null;
+function demoVentas(){
+  if(_demoVentas) return _demoVentas;
+  const out=[];
+  const vendibles = DEMO.productos.filter(p=>p.activo);
+  const sedesVenta = DEMO.sedes.filter(s=>!s.es_bodega && s.activo).map(s=>s.nombre);
+  const opsBySede={};
+  DEMO.empleados.filter(e=>e.rol==='cajero'||e.rol==='tesorero').forEach(e=>e.sedes.forEach(s=>{(opsBySede[s]=opsBySede[s]||[]).push(e.nombre);}));
+  const hoy=new Date(); hoy.setHours(12,0,0,0);
+  let recibo=1000;
+  const rnd=(a,b)=>a+Math.floor(Math.random()*(b-a+1));
+  for(let d=29; d>=0; d--){
+    const fecha=new Date(hoy); fecha.setDate(hoy.getDate()-d);
+    for(const sede of sedesVenta){
+      const nV=rnd(3,8);
+      for(let v=0; v<nV; v++){
+        const ops=opsBySede[sede]||['Operador'];
+        const operador=ops[rnd(0,ops.length-1)];
+        const items=[];
+        const nItems=rnd(1,3);
+        for(let it=0; it<nItems; it++){
+          const p=vendibles[rnd(0,vendibles.length-1)];
+          const precio=p.precio_variable?rnd(15,45)*1000:p.precio;
+          if(precio<=0) continue;
+          const cant=rnd(1,2);
+          items.push({producto_id:p.id,nombre:p.nombre,categoria:p.categoria,tipo:p.tipo,cantidad:cant,precio_unit:precio,costo:p.costo||0,iva:!!p.iva,subtotal:precio*cant});
+        }
+        if(!items.length) continue;
+        const bruto=items.reduce((s,i)=>s+i.subtotal,0);
+        const descuento=Math.random()<0.15?Math.round(bruto*0.1/500)*500:0;
+        const total=bruto-descuento;
+        const r=Math.random();
+        let ef=0,qr=0,tj=0;
+        if(r<0.5) ef=total; else if(r<0.8) qr=total; else tj=total;
+        out.push({id:'v'+recibo,recibo:'R-'+String(recibo).padStart(6,'0'),fecha:fecha.toISOString(),sede,operador,items,bruto,descuento,total,pago_efectivo:ef,pago_qr:qr,pago_tarjeta:tj});
+        recibo++;
+      }
+    }
+  }
+  _demoVentas=out;
+  return out;
+}
+
+// ---- Chequeos de inventario demo: semilla histórica + los que guarda el operador (localStorage) ----
+let _demoChequeosSeed = null;
+function demoChequeosSeed(){
+  if(_demoChequeosSeed) return _demoChequeosSeed;
+  const out=[]; const rnd=(a,b)=>a+Math.floor(Math.random()*(b-a+1));
+  const sedesVenta=DEMO.sedes.filter(s=>!s.es_bodega).map(s=>s.nombre);
+  const opsBySede={}; DEMO.empleados.filter(e=>e.rol==='cajero'||e.rol==='tesorero').forEach(e=>e.sedes.forEach(s=>{(opsBySede[s]=opsBySede[s]||[]).push(e.nombre);}));
+  const prods=DEMO.productos.filter(p=>p.controla_stock);
+  const hoy=new Date(); hoy.setHours(8,0,0,0); let id=5000;
+  for(let d=13; d>=0; d--){
+    const fecha=new Date(hoy); fecha.setDate(hoy.getDate()-d);
+    for(const sede of sedesVenta){
+      const ops=opsBySede[sede]||['Operador']; const operador=ops[rnd(0,ops.length-1)];
+      const nDesc=rnd(0,4); const descuadres=[];
+      for(let i=0;i<nDesc;i++){ const p=prods[rnd(0,prods.length-1)]; const sistema=rnd(0,30); const dif=rnd(-5,3)||-1; descuadres.push({nombre:p.nombre,sistema,contado:sistema+dif,diferencia:dif}); }
+      out.push({id:'cqs-'+(id++), created_at:fecha.toISOString(), sede, operador, base_recibida:rnd(900,1100)*1000, total_items:prods.length, n_descuadres:descuadres.length, descuadres});
+    }
+  }
+  _demoChequeosSeed=out; return out;
+}
+function demoChequeosAll(){
+  let ls=[]; try{ ls=JSON.parse(localStorage.getItem('panzer_chequeos_demo')||'[]'); }catch(e){}
+  return [...demoChequeosSeed(), ...ls];
+}
+
+// ============================================================
+// CAPA DE DATOS (Supabase o demo)
+// ============================================================
+const db = {
+  // ---- SEDES ----
+  async listSedes(){
+    if(DEMO_MODE) return [...DEMO.sedes].sort((a,b)=>a.orden-b.orden);
+    const {data,error}=await sb.from('sedes').select('*').order('orden');
+    if(error) throw error; return data;
+  },
+  async saveSede(s){
+    if(DEMO_MODE){
+      if(s.id){ DEMO.sedes=DEMO.sedes.map(x=>x.id===s.id?{...x,...s}:x); }
+      else { DEMO.sedes.push({...s,id:uid()}); }
+      return;
+    }
+    const row={nombre:s.nombre,es_bodega:s.es_bodega,activo:s.activo,orden:s.orden};
+    if(s.id) { const {error}=await sb.from('sedes').update(row).eq('id',s.id); if(error) throw error; }
+    else { const {error}=await sb.from('sedes').insert(row); if(error) throw error; }
+  },
+  async deleteSede(id){
+    if(DEMO_MODE){ DEMO.sedes=DEMO.sedes.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('sedes').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- CATEGORÍAS ----
+  async listCategorias(){
+    if(DEMO_MODE) return [...DEMO.categorias].sort((a,b)=>a.orden-b.orden);
+    const {data,error}=await sb.from('categorias').select('*').order('orden');
+    if(error) throw error; return data;
+  },
+  async saveCategoria(c){
+    if(DEMO_MODE){
+      if(c.id){ DEMO.categorias=DEMO.categorias.map(x=>x.id===c.id?{...x,...c}:x); }
+      else { DEMO.categorias.push({...c,id:uid()}); }
+      return;
+    }
+    const row={nombre:c.nombre,orden:c.orden,activo:c.activo};
+    if(c.id){ const {error}=await sb.from('categorias').update(row).eq('id',c.id); if(error) throw error; }
+    else { const {error}=await sb.from('categorias').insert(row); if(error) throw error; }
+  },
+  async deleteCategoria(id){
+    if(DEMO_MODE){ DEMO.categorias=DEMO.categorias.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('categorias').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- EMPLEADOS ----
+  async listEmpleados(){
+    if(DEMO_MODE) return DEMO.empleados.map(e=>({...e,sedes:[...e.sedes]}));
+    const {data:emps,error}=await sb.from('empleados').select('*').order('nombre');
+    if(error) throw error;
+    const {data:rel}=await sb.from('empleado_sedes').select('empleado_id,sedes(nombre)');
+    const bySede={}; (rel||[]).forEach(r=>{ (bySede[r.empleado_id]=bySede[r.empleado_id]||[]).push(r.sedes.nombre); });
+    return emps.map(e=>({...e,sedes:bySede[e.id]||[]}));
+  },
+  async saveEmpleado(e, sedesObjs){
+    if(DEMO_MODE){
+      if(e.id){ DEMO.empleados=DEMO.empleados.map(x=>x.id===e.id?{...x,...e}:x); }
+      else { DEMO.empleados.push({...e,id:uid()}); }
+      return;
+    }
+    const row={nombre:e.nombre,rol:e.rol,activo:e.activo,pin:e.pin||null};
+    let empId=e.id;
+    if(empId){ const {error}=await sb.from('empleados').update(row).eq('id',empId); if(error) throw error; }
+    else { const {data,error}=await sb.from('empleados').insert(row).select('id').single(); if(error) throw error; empId=data.id; }
+    // reasignar sedes
+    await sb.from('empleado_sedes').delete().eq('empleado_id',empId);
+    const ids = sedesObjs.filter(s=>e.sedes.includes(s.nombre)).map(s=>({empleado_id:empId,sede_id:s.id}));
+    if(ids.length){ const {error}=await sb.from('empleado_sedes').insert(ids); if(error) throw error; }
+  },
+  async deleteEmpleado(id){
+    if(DEMO_MODE){ DEMO.empleados=DEMO.empleados.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('empleados').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- PRODUCTOS ----
+  async listProductos(){
+    if(DEMO_MODE) return DEMO.productos.map(p=>({...p,stock:{...p.stock}}));
+    const {data:prods,error}=await sb.from('productos').select('*').order('orden');
+    if(error) throw error;
+    const {data:inv}=await sb.from('inventario').select('producto_id,sede,cantidad');
+    const byProd={}; (inv||[]).forEach(i=>{ (byProd[i.producto_id]=byProd[i.producto_id]||{})[i.sede]=i.cantidad; });
+    return prods.map(p=>({...p, stock:byProd[p.id]||{}}));
+  },
+  async saveProducto(p){
+    if(DEMO_MODE){
+      if(p.id && DEMO.productos.some(x=>x.id===p.id)){ DEMO.productos=DEMO.productos.map(x=>x.id===p.id?{...x,...p,stock:{...p.stock}}:x); }
+      else { DEMO.productos.push({...p,id:p.id||uid(),stock:{...p.stock}}); }
+      return;
+    }
+    const row={nombre:p.nombre,tipo:p.tipo,categoria:p.categoria,precio:p.precio,costo:p.costo,
+      codigo_barras:p.codigo_barras||null,controla_stock:p.controla_stock,activo:p.activo};
+    let prodId=p.id;
+    if(prodId){ const {error}=await sb.from('productos').update(row).eq('id',prodId); if(error) throw error; }
+    else { const {data,error}=await sb.from('productos').insert(row).select('id').single(); if(error) throw error; prodId=data.id; }
+    // stock por sede (upsert absoluto — el admin define la cantidad exacta)
+    if(p.controla_stock){
+      const rows=Object.entries(p.stock||{}).filter(([s,v])=>v!=null&&v!=="").map(([sede,cant])=>({producto_id:prodId,sede,cantidad:Number(cant)}));
+      if(rows.length){ const {error}=await sb.from('inventario').upsert(rows,{onConflict:'producto_id,sede'}); if(error) throw error; }
+    }
+  },
+  async deleteProducto(id){
+    if(DEMO_MODE){ DEMO.productos=DEMO.productos.filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('productos').delete().eq('id',id); if(error) throw error;
+  },
+  // ---- VENTAS (para informes) ----
+  // f = {desde, hasta (ISO date), sede, operador, tipoPago}
+  async getVentas(f){
+    if(DEMO_MODE){
+      return demoVentas().filter(v=>{
+        const d=v.fecha.slice(0,10);
+        if(f.desde && d<f.desde) return false;
+        if(f.hasta && d>f.hasta) return false;
+        if(f.sede && v.sede!==f.sede) return false;
+        if(f.operador && v.operador!==f.operador) return false;
+        if(f.tipoPago==='efectivo' && v.pago_efectivo<=0) return false;
+        if(f.tipoPago==='qr' && v.pago_qr<=0) return false;
+        if(f.tipoPago==='tarjeta' && v.pago_tarjeta<=0) return false;
+        return true;
+      });
+    }
+    let q=sb.from('ventas').select('*, venta_items(*)').eq('anulada',false).order('created_at');
+    if(f.desde) q=q.gte('created_at', f.desde);
+    if(f.hasta) q=q.lte('created_at', f.hasta+'T23:59:59');
+    if(f.sede) q=q.eq('sede', f.sede);
+    if(f.operador) q=q.eq('operador', f.operador);
+    const {data,error}=await q;
+    if(error) throw error;
+    // normalizar a la forma que usan los informes
+    return (data||[]).filter(v=>{
+      if(f.tipoPago==='efectivo') return v.pago_efectivo>0;
+      if(f.tipoPago==='qr') return v.pago_qr>0;
+      if(f.tipoPago==='tarjeta') return v.pago_tarjeta>0;
+      return true;
+    }).map(v=>{
+      const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:i.categoria||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:0,iva:false,subtotal:Number(i.subtotal)}));
+      const bruto=items.reduce((s,i)=>s+i.subtotal,0);
+      return {id:v.id,recibo:v.numero_recibo||('#'+v.id.slice(0,6)),fecha:v.created_at,sede:v.sede,operador:v.operador,items,bruto,descuento:Math.max(0,bruto-Number(v.total)),total:Number(v.total),pago_efectivo:Number(v.pago_efectivo),pago_qr:Number(v.pago_qr),pago_tarjeta:Number(v.pago_tarjeta)};
+    });
+  },
+  // ---- INVENTARIO ----
+  async getInventario(sede){
+    if(DEMO_MODE){
+      return DEMO.productos.filter(p=>p.controla_stock).map(p=>({
+        id:p.id, nombre:p.nombre, categoria:p.categoria,
+        stock:Number(p.stock?.[sede])||0,
+        minimo:Number(DEMO_MIN[sede+'|'+p.id])||0,
+      })).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+    }
+    const {data:prods,error}=await sb.from('productos').select('id,nombre,categoria,controla_stock').eq('controla_stock',true).eq('activo',true);
+    if(error) throw error;
+    const {data:inv}=await sb.from('inventario').select('producto_id,cantidad,stock_minimo').eq('sede',sede);
+    const m={}; (inv||[]).forEach(i=>m[i.producto_id]=i);
+    return prods.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+  },
+  async setMinimo(producto_id, sede, minimo){
+    if(DEMO_MODE){ DEMO_MIN[sede+'|'+producto_id]=minimo; return; }
+    const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_minimo:minimo},{onConflict:'producto_id,sede'}); if(error) throw error;
+  },
+  async transferirStock(producto_id, origen, destino, cantidad){
+    if(DEMO_MODE){
+      const p=DEMO.productos.find(x=>x.id===producto_id);
+      if(p){ p.stock=p.stock||{}; p.stock[origen]=(Number(p.stock[origen])||0)-cantidad; p.stock[destino]=(Number(p.stock[destino])||0)+cantidad; }
+      return;
+    }
+    const {error}=await sb.rpc('transferir_stock',{p_producto_id:producto_id,p_origen:origen,p_destino:destino,p_cantidad:cantidad,p_operador:null});
+    if(error) throw error;
+  },
+  // ---- CHEQUEOS DE INVENTARIO ----
+  async listChequeos(f={}){
+    if(DEMO_MODE){
+      return demoChequeosAll()
+        .filter(c=>(!f.sede||c.sede===f.sede) && (!f.operador||c.operador===f.operador))
+        .sort((a,b)=>b.created_at.localeCompare(a.created_at));
+    }
+    let q=sb.from('chequeos_inventario').select('*').order('created_at',{ascending:false});
+    if(f.sede) q=q.eq('sede',f.sede);
+    if(f.operador) q=q.eq('operador',f.operador);
+    const {data,error}=await q; if(error) throw error; return data;
+  },
+  // ---- Eliminar recibo (solo back office): devuelve artículos al stock ----
+  async anularVenta(venta, motivo){
+    if(DEMO_MODE){
+      // devolver stock a los productos de la sede
+      venta.items.forEach(it=>{
+        if(!it.controla_stock && it.tipo!=='producto') return;
+        const p=DEMO.productos.find(x=>x.id===it.producto_id);
+        if(p && p.controla_stock && p.stock){ p.stock[venta.sede]=(Number(p.stock[venta.sede])||0)+it.cantidad; }
+      });
+      _demoVentas=demoVentas().filter(v=>v.id!==venta.id);
+      return;
+    }
+    const {error}=await sb.rpc('anular_venta',{p_venta_id:venta.id, p_operador:null, p_motivo:motivo||'Recibo eliminado'});
+    if(error) throw error;
+  },
+};
+
+// ============================================================
+// APP
+// ============================================================
+function App(){
+  const [tab,setTab]=useState("informes");
+  const [toast,setToast]=useState(null);
+  const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2400); };
+
+  return (
+    <div className="app">
+      {DEMO_MODE && <div className="demo-banner">MODO DEMO — los cambios no se guardan (conecta Supabase para que persistan)</div>}
+      {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+      <div className="header">
+        <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" alt="P"/>
+        <div>
+          <h1>Back Office</h1>
+          <div className="header-sub">Administración Panzer Carwash</div>
+        </div>
+        <div className="header-badge">ADMIN</div>
+      </div>
+      <div className="tabs">
+        {[["informes","Informes"],["inventario","Inventario"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
+          <div key={k} className={"tab"+(tab===k?" active":"")} onClick={()=>setTab(k)}>{l}</div>
+        ))}
+      </div>
+      <div className="page">
+        {tab==="informes"   && <Informes showToast={showToast}/>}
+        {tab==="inventario" && <Inventario showToast={showToast}/>}
+        {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
+        {tab==="productos"  && <Productos showToast={showToast}/>}
+        {tab==="categorias" && <Categorias showToast={showToast}/>}
+        {tab==="sedes"      && <Sedes showToast={showToast}/>}
+        {tab==="empleados"  && <Empleados showToast={showToast}/>}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: PRODUCTOS
+// ============================================================
+function Productos({showToast}){
+  const [prods,setProds]=useState(null);
+  const [cats,setCats]=useState([]);
+  const [sedes,setSedes]=useState([]);
+  const [q,setQ]=useState("");
+  const [filtroCat,setFiltroCat]=useState("");
+  const [editing,setEditing]=useState(null);
+
+  const load=async()=>{
+    try{
+      const [p,c,s]=await Promise.all([db.listProductos(),db.listCategorias(),db.listSedes()]);
+      setProds(p); setCats(c); setSedes(s);
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  useEffect(()=>{ load(); },[]);
+
+  const guardar=async(p)=>{
+    try{ await db.saveProducto(p); setEditing(null); await load(); showToast("Producto guardado"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const eliminar=async(p)=>{
+    if(!window.confirm("¿Eliminar \""+p.nombre+"\"?")) return;
+    try{ await db.deleteProducto(p.id); await load(); showToast("Producto eliminado"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  if(!prods) return <div className="empty">Cargando…</div>;
+  const filtrados=prods.filter(p=>
+    (!filtroCat||p.categoria===filtroCat) &&
+    (!q||p.nombre.toLowerCase().includes(q.toLowerCase()) || (p.codigo_barras||"").includes(q))
+  );
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Productos <span className="muted">({prods.length})</span></div>
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",tipo:"producto",categoria:cats[0]?.nombre||"",precio:0,costo:0,codigo_barras:"",controla_stock:true,precio_variable:false,iva:true,activo:true,stock:{}})}>+ Nuevo producto</button>
+      </div>
+      <div className="toolbar">
+        <input className="input" placeholder="Buscar por nombre o código…" value={q} onChange={e=>setQ(e.target.value)}/>
+        <select className="select" value={filtroCat} onChange={e=>setFiltroCat(e.target.value)}>
+          <option value="">Todas las categorías</option>
+          {cats.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+        </select>
+      </div>
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Producto</th><th>Categoría</th><th>Tipo</th><th>Precio</th><th>Stock total</th><th></th></tr></thead>
+          <tbody>
+            {filtrados.length===0 && <tr><td colSpan="6"><div className="empty">Sin productos.</div></td></tr>}
+            {filtrados.map(p=>{
+              const stockTotal=p.controla_stock?Object.values(p.stock||{}).reduce((s,v)=>s+(Number(v)||0),0):null;
+              return (
+                <tr key={p.id} className={p.activo?"":"inactive"}>
+                  <td><div className="row-name">{p.nombre}</div>{p.codigo_barras&&<div className="muted">#{p.codigo_barras}</div>}</td>
+                  <td className="muted">{p.categoria}</td>
+                  <td><span className={"pill pill-"+(p.tipo==="token"?"token":p.tipo==="servicio"?"serv":"prod")}>{p.tipo}</span></td>
+                  <td>{p.precio_variable?<span className="muted">Variable</span>:fmt(p.precio)}</td>
+                  <td>{stockTotal==null?<span className="muted">—</span>:<b style={{color:stockTotal<=0?"var(--red)":"var(--tb)"}}>{stockTotal}</b>}</td>
+                  <td><div className="actions">
+                    <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...p,stock:{...p.stock}})}>Editar</button>
+                    <button className="btn btn-danger btn-sm" onClick={()=>eliminar(p)}>✕</button>
+                  </div></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {editing && <ProductoModal p={editing} cats={cats} sedes={sedes} onClose={()=>setEditing(null)} onSave={guardar}/>}
+    </div>
+  );
+}
+
+function ProductoModal({p,cats,sedes,onClose,onSave}){
+  const [f,setF]=useState(p);
+  const set=(k,v)=>setF(prev=>({...prev,[k]:v}));
+  const setStock=(sede,v)=>setF(prev=>({...prev,stock:{...prev.stock,[sede]:v===""?null:Number(v)}}));
+  const valido=f.nombre.trim().length>0;
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-t">{p.id?"Editar producto":"Nuevo producto"}</div>
+        <label className="label">Nombre</label>
+        <input className="input" value={f.nombre} onChange={e=>set("nombre",e.target.value)}/>
+        <div className="grid2">
+          <div>
+            <label className="label">Categoría</label>
+            <select className="select" value={f.categoria} onChange={e=>set("categoria",e.target.value)}>
+              {cats.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label">Tipo</label>
+            <select className="select" value={f.tipo} onChange={e=>set("tipo",e.target.value)}>
+              <option value="producto">Producto</option>
+              <option value="servicio">Servicio</option>
+              <option value="token">Token</option>
+              <option value="combo">Combo</option>
+            </select>
+          </div>
+        </div>
+        <div className="grid2">
+          <div>
+            <label className="label">Precio</label>
+            <input className="input" type="number" value={f.precio} disabled={f.precio_variable} onChange={e=>set("precio",Number(e.target.value)||0)}/>
+          </div>
+          <div>
+            <label className="label">Costo</label>
+            <input className="input" type="number" value={f.costo} onChange={e=>set("costo",Number(e.target.value)||0)}/>
+          </div>
+        </div>
+        <label className="label">Código de barras</label>
+        <input className="input" value={f.codigo_barras||""} onChange={e=>set("codigo_barras",e.target.value)}/>
+        <label className="check"><input type="checkbox" checked={!!f.precio_variable} onChange={e=>set("precio_variable",e.target.checked)}/> Precio variable (se pide al vender)</label>
+        <label className="check"><input type="checkbox" checked={!!f.iva} onChange={e=>set("iva",e.target.checked)}/> Aplica IVA (19%)</label>
+        <label className="check"><input type="checkbox" checked={!!f.controla_stock} onChange={e=>set("controla_stock",e.target.checked)}/> Controla inventario</label>
+        <label className="check"><input type="checkbox" checked={!!f.activo} onChange={e=>set("activo",e.target.checked)}/> Activo (visible en el POS)</label>
+        {f.controla_stock && (
+          <div style={{marginTop:10}}>
+            <label className="label">Stock por sede</label>
+            {sedes.map(s=>(
+              <div key={s.id} className="stockgrid">
+                <span style={{fontSize:14}}>{s.nombre}{s.es_bodega&&<span className="pill pill-bodega" style={{marginLeft:6}}>bodega</span>}</span>
+                <input className="input" type="number" value={f.stock?.[s.nombre]??""} placeholder="0" onChange={e=>setStock(s.nombre,e.target.value)}/>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={!valido} onClick={()=>onSave(f)}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: CATEGORÍAS
+// ============================================================
+function Categorias({showToast}){
+  const [cats,setCats]=useState(null);
+  const [editing,setEditing]=useState(null);
+  const load=async()=>{ try{ setCats(await db.listCategorias()); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  useEffect(()=>{ load(); },[]);
+  const guardar=async(c)=>{ try{ await db.saveCategoria(c); setEditing(null); await load(); showToast("Categoría guardada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const eliminar=async(c)=>{ if(!window.confirm("¿Eliminar \""+c.nombre+"\"?")) return; try{ await db.deleteCategoria(c.id); await load(); showToast("Categoría eliminada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  if(!cats) return <div className="empty">Cargando…</div>;
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Categorías <span className="muted">({cats.length})</span></div>
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",orden:(cats.length+1),activo:true})}>+ Nueva categoría</button>
+      </div>
+      <div className="card" style={{padding:0}}>
+        <table className="tbl">
+          <thead><tr><th>Orden</th><th>Nombre</th><th></th></tr></thead>
+          <tbody>
+            {cats.map(c=>(
+              <tr key={c.id} className={c.activo?"":"inactive"}>
+                <td className="muted">{c.orden}</td>
+                <td className="row-name">{c.nombre}</td>
+                <td><div className="actions">
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...c})}>Editar</button>
+                  <button className="btn btn-danger btn-sm" onClick={()=>eliminar(c)}>✕</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar categoría":"Nueva categoría"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})}/>
+            <div className="grid2">
+              <div><label className="label">Orden</label><input className="input" type="number" value={editing.orden} onChange={e=>setEditing({...editing,orden:Number(e.target.value)||0})}/></div>
+            </div>
+            <label className="check"><input type="checkbox" checked={!!editing.activo} onChange={e=>setEditing({...editing,activo:e.target.checked})}/> Activa</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!editing.nombre.trim()} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: SEDES
+// ============================================================
+function Sedes({showToast}){
+  const [sedes,setSedes]=useState(null);
+  const [editing,setEditing]=useState(null);
+  const load=async()=>{ try{ setSedes(await db.listSedes()); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  useEffect(()=>{ load(); },[]);
+  const guardar=async(s)=>{ try{ await db.saveSede(s); setEditing(null); await load(); showToast("Sede guardada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const eliminar=async(s)=>{ if(!window.confirm("¿Eliminar la sede \""+s.nombre+"\"?")) return; try{ await db.deleteSede(s.id); await load(); showToast("Sede eliminada"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  if(!sedes) return <div className="empty">Cargando…</div>;
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Sedes <span className="muted">({sedes.length})</span></div>
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",es_bodega:false,activo:true,orden:(sedes.length+1)})}>+ Nueva sede</button>
+      </div>
+      <div className="card" style={{padding:0}}>
+        <table className="tbl">
+          <thead><tr><th>Orden</th><th>Nombre</th><th>Tipo</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {sedes.map(s=>(
+              <tr key={s.id} className={s.activo?"":"inactive"}>
+                <td className="muted">{s.orden}</td>
+                <td className="row-name">{s.nombre}</td>
+                <td>{s.es_bodega?<span className="pill pill-bodega">Bodega central</span>:<span className="muted">Tienda</span>}</td>
+                <td>{s.activo?<span className="pill pill-prod">Activa</span>:<span className="pill pill-off">Inactiva</span>}</td>
+                <td><div className="actions">
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...s})}>Editar</button>
+                  <button className="btn btn-danger btn-sm" onClick={()=>eliminar(s)}>✕</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar sede":"Nueva sede"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})}/>
+            <div className="grid2">
+              <div><label className="label">Orden</label><input className="input" type="number" value={editing.orden} onChange={e=>setEditing({...editing,orden:Number(e.target.value)||0})}/></div>
+            </div>
+            <label className="check"><input type="checkbox" checked={!!editing.es_bodega} onChange={e=>setEditing({...editing,es_bodega:e.target.checked})}/> Es bodega central (de aquí sale el inventario)</label>
+            <label className="check"><input type="checkbox" checked={!!editing.activo} onChange={e=>setEditing({...editing,activo:e.target.checked})}/> Activa</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!editing.nombre.trim()} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: EMPLEADOS
+// ============================================================
+function Empleados({showToast}){
+  const [emps,setEmps]=useState(null);
+  const [sedes,setSedes]=useState([]);
+  const [editing,setEditing]=useState(null);
+  const load=async()=>{ try{ const [e,s]=await Promise.all([db.listEmpleados(),db.listSedes()]); setEmps(e); setSedes(s); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  useEffect(()=>{ load(); },[]);
+  const guardar=async(e)=>{ try{ await db.saveEmpleado(e,sedes); setEditing(null); await load(); showToast("Empleado guardado"); }catch(er){ showToast(""+(er.message||er),"err"); } };
+  const eliminar=async(e)=>{ if(!window.confirm("¿Eliminar a "+e.nombre+"?")) return; try{ await db.deleteEmpleado(e.id); await load(); showToast("Empleado eliminado"); }catch(er){ showToast(""+(er.message||er),"err"); } };
+  if(!emps) return <div className="empty">Cargando…</div>;
+  const toggleSede=(nombre)=>setEditing(prev=>({...prev,sedes:prev.sedes.includes(nombre)?prev.sedes.filter(x=>x!==nombre):[...prev.sedes,nombre]}));
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Empleados <span className="muted">({emps.length})</span></div>
+        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",rol:"cajero",activo:true,pin:"",sedes:[]})}>+ Nuevo empleado</button>
+      </div>
+      <div className="card" style={{padding:0}}>
+        <table className="tbl">
+          <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Sedes asignadas</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {emps.map(e=>(
+              <tr key={e.id} className={e.activo?"":"inactive"}>
+                <td className="row-name">{e.nombre}</td>
+                <td className="muted">{e.rol}</td>
+                <td>{e.pin?<span className="pill pill-prod">••••</span>:<span className="pill pill-off">Sin PIN</span>}</td>
+                <td>{e.sedes.length?e.sedes.map(s=><span key={s} className="chip">{s}</span>):<span className="muted">—</span>}</td>
+                <td>{e.activo?<span className="pill pill-prod">Activo</span>:<span className="pill pill-off">Inactivo</span>}</td>
+                <td><div className="actions">
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...e,sedes:[...e.sedes]})}>Editar</button>
+                  <button className="btn btn-danger btn-sm" onClick={()=>eliminar(e)}>✕</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar empleado":"Nuevo empleado"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})}/>
+            <label className="label">Rol</label>
+            <select className="select" value={editing.rol} onChange={e=>setEditing({...editing,rol:e.target.value})}>
+              <option value="cajero">Cajero (operador)</option>
+              <option value="tesorero">Tesorero</option>
+              <option value="gerente">Gerente</option>
+              <option value="admin">Administrador</option>
+            </select>
+            <label className="label">PIN de acceso (4 dígitos)</label>
+            <input className="input" type="text" inputMode="numeric" maxLength={4} placeholder="ej: 1234"
+              value={editing.pin||""}
+              onChange={e=>setEditing({...editing,pin:e.target.value.replace(/[^0-9]/g,"").slice(0,4)})}/>
+            <div className="muted" style={{marginTop:-6,marginBottom:12}}>Con este PIN el empleado entra al POS. Déjalo vacío si aún no lo asignas.</div>
+            <label className="label">Sedes asignadas</label>
+            <div className="multi">
+              {sedes.map(s=><div key={s.id} className={"multi-opt"+(editing.sedes.includes(s.nombre)?" on":"")} onClick={()=>toggleSede(s.nombre)}>{s.nombre}</div>)}
+            </div>
+            <label className="check"><input type="checkbox" checked={!!editing.activo} onChange={e=>setEditing({...editing,activo:e.target.checked})}/> Activo</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={!editing.nombre.trim() || (!!editing.pin && editing.pin.length<4)} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: CHEQUEOS DE INVENTARIO (historial + ranking de descuadres)
+// ============================================================
+function Chequeos({showToast}){
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [sede,setSede]=useState("");
+  const [operador,setOperador]=useState("");
+  const [lista,setLista]=useState(null);
+  const [detalle,setDetalle]=useState(null);
+
+  useEffect(()=>{ db.listSedes().then(setSedes).catch(()=>{}); db.listEmpleados().then(setEmps).catch(()=>{}); },[]);
+  const cargar=async()=>{ setLista(null); try{ setLista(await db.listChequeos({sede,operador})); }catch(e){ showToast(""+(e.message||e),"err"); setLista([]); } };
+  useEffect(()=>{ cargar(); },[sede,operador]);
+
+  if(lista===null) return (
+    <div><div className="filterbar"><div className="fld"><label className="label">Sede</label><select className="select" value={sede} onChange={e=>setSede(e.target.value)}><option value="">Todas</option>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}</select></div></div><div className="empty">Cargando…</div></div>
+  );
+
+  // ranking de operadores con más descuadres (suma de n_descuadres)
+  const rank={};
+  lista.forEach(c=>{ const o=rank[c.operador]||(rank[c.operador]={operador:c.operador,desc:0,chequeos:0}); o.desc+=c.n_descuadres; o.chequeos++; });
+  const ranking=Object.values(rank).sort((a,b)=>b.desc-a.desc).slice(0,5);
+
+  return (
+    <div>
+      <div className="filterbar">
+        <div className="fld"><label className="label">Sede</label>
+          <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
+            <option value="">Todas las tiendas</option>
+            {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+          </select>
+        </div>
+        <div className="fld"><label className="label">Colaborador</label>
+          <select className="select" value={operador} onChange={e=>setOperador(e.target.value)}>
+            <option value="">Todos</option>
+            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {ranking.length>0 && (
+        <div className="card" style={{marginBottom:14}}>
+          <div className="sec-title" style={{fontSize:15,marginBottom:10}}>⚠ Operadores con más descuadres</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {ranking.map((r,i)=>(
+              <div key={r.operador} style={{flex:"1 1 150px",background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:10,padding:"10px 14px"}}>
+                <div style={{fontWeight:700,color:"var(--tb)"}}>{i===0?"🥇 ":""}{r.operador}</div>
+                <div className="muted"><b style={{color:r.desc>0?"var(--red)":"var(--green)"}}>{r.desc}</b> descuadres · {r.chequeos} chequeos</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Fecha</th><th>Sede</th><th>Colaborador</th><th className="num">Base recibida</th><th className="num">Descuadres</th><th></th></tr></thead>
+          <tbody>
+            {lista.length===0 && <tr><td colSpan="6"><div className="empty">Sin chequeos en el periodo/filtros.</div></td></tr>}
+            {lista.map(c=>(
+              <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>setDetalle(c)}>
+                <td className="muted">{(c.created_at||"").slice(0,10)} {(c.created_at||"").slice(11,16)}</td>
+                <td>{c.sede}</td>
+                <td className="row-name">{c.operador}</td>
+                <td className="num">{fmt(c.base_recibida)}</td>
+                <td className="num">{c.n_descuadres>0 ? <span className="pill pill-off">{c.n_descuadres}</span> : <span className="pill pill-prod">0</span>}</td>
+                <td><div className="actions"><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();setDetalle(c);}}>Ver</button></div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {detalle && (
+        <div className="modal-bg" onClick={()=>setDetalle(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Chequeo — {detalle.sede}</div>
+            <div className="muted" style={{marginBottom:12}}>{detalle.operador} · {(detalle.created_at||"").slice(0,10)} {(detalle.created_at||"").slice(11,16)}</div>
+            <div className="kpis">
+              <div className="kpi"><div className="kpi-label">Base recibida</div><div className="kpi-value green">{fmt(detalle.base_recibida)}</div></div>
+              <div className="kpi"><div className="kpi-label">Descuadres</div><div className="kpi-value" style={{color:detalle.n_descuadres>0?"var(--red)":"var(--green)"}}>{detalle.n_descuadres}</div></div>
+            </div>
+            {detalle.n_descuadres>0 ? (
+              <div className="card" style={{padding:0,overflowX:"auto",marginTop:6}}>
+                <table className="tbl">
+                  <thead><tr><th>Producto</th><th className="num">Sistema</th><th className="num">Contado</th><th className="num">Dif.</th></tr></thead>
+                  <tbody>{(detalle.descuadres||[]).map((d,i)=>(
+                    <tr key={i}><td className="row-name">{d.nombre}</td><td className="num">{d.sistema}</td><td className="num">{d.contado}</td><td className="num" style={{color:d.diferencia<0?"var(--red)":"var(--green)",fontWeight:800}}>{d.diferencia>0?"+":""}{d.diferencia}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <div className="empty">Todo cuadró en este chequeo.</div>}
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDetalle(null)}>Cerrar</button></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: INVENTARIO (stock por sede, alertas, transferencias)
+// ============================================================
+function Inventario({showToast}){
+  const [sedes,setSedes]=useState([]);
+  const [cats,setCats]=useState([]);
+  const [sede,setSede]=useState("");
+  const [inv,setInv]=useState(null);
+  const [q,setQ]=useState("");
+  const [cat,setCat]=useState("");
+  const [soloBajo,setSoloBajo]=useState(false);
+  const [transfer,setTransfer]=useState(null);
+
+  useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); db.listCategorias().then(setCats).catch(()=>{}); },[]);
+  const cargar=async()=>{ if(!sede) return; setInv(null); try{ setInv(await db.getInventario(sede)); }catch(e){ showToast(""+(e.message||e),"err"); setInv([]); } };
+  useEffect(()=>{ cargar(); },[sede]);
+
+  const bodega = sedes.find(s=>s.es_bodega);
+  const estado = r => r.stock<=0 ? "agotado" : (r.minimo>0 && r.stock<=r.minimo) ? "bajo" : "ok";
+  const guardarMin=async(r,val)=>{
+    const m=Math.max(0,Number(val)||0);
+    try{ await db.setMinimo(r.id,sede,m); setInv(prev=>prev.map(x=>x.id===r.id?{...x,minimo:m}:x)); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const hacerTransfer=async(t)=>{
+    try{ await db.transferirStock(t.producto_id,t.origen,t.destino,t.cantidad); setTransfer(null); await cargar(); showToast("Transferencia realizada"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  if(inv===null && sede) return (
+    <div>
+      <div className="filterbar"><div className="fld"><label className="label">Sede</label><select className="select" value={sede} onChange={e=>setSede(e.target.value)}>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}</select></div></div>
+      <div className="empty">Cargando inventario…</div>
+    </div>
+  );
+
+  const rows=(inv||[]).filter(r=>(!q||r.nombre.toLowerCase().includes(q.toLowerCase())) && (!cat||r.categoria===cat) && (!soloBajo||estado(r)!=="ok"));
+  const nBajo=(inv||[]).filter(r=>(!cat||r.categoria===cat) && estado(r)!=="ok").length;
+
+  return (
+    <div>
+      <div className="filterbar">
+        <div className="fld">
+          <label className="label">Sede</label>
+          <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
+            {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+          </select>
+        </div>
+        <div className="fld">
+          <label className="label">Categoría</label>
+          <select className="select" value={cat} onChange={e=>setCat(e.target.value)}>
+            <option value="">Todas las categorías</option>
+            {cats.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+          </select>
+        </div>
+        <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Buscar</label><input className="input" placeholder="Producto…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+        <label className="check" style={{alignSelf:"center"}}><input type="checkbox" checked={soloBajo} onChange={e=>setSoloBajo(e.target.checked)}/> Solo stock bajo {nBajo>0&&<span className="pill pill-off" style={{marginLeft:4}}>{nBajo}</span>}</label>
+        {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={()=>setTransfer({producto_id:"",origen:bodega.nombre,destino:sede!==bodega.nombre?sede:"",cantidad:1})}>⇄ Transferir desde {bodega.nombre}</button>}
+      </div>
+
+      {nBajo>0 && !soloBajo && <div className="muted" style={{marginBottom:12}}>⚠ {nBajo} producto(s) en o por debajo del mínimo en {sede}. <a style={{color:"var(--amber)",cursor:"pointer"}} onClick={()=>setSoloBajo(true)}>Ver solo esos</a></div>}
+
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th>Estado</th></tr></thead>
+          <tbody>
+            {rows.length===0 && <tr><td colSpan="5"><div className="empty">Sin productos.</div></td></tr>}
+            {rows.map(r=>{
+              const st=estado(r);
+              return (
+                <tr key={r.id}>
+                  <td className="row-name">{r.nombre}</td>
+                  <td className="muted">{r.categoria}</td>
+                  <td className="num"><b style={{color:st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"}}>{r.stock}</b></td>
+                  <td className="num"><input className="input" type="number" style={{margin:0,width:80,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
+                  <td>{st==="agotado"?<span className="pill pill-off">Agotado</span>:st==="bajo"?<span className="pill pill-token">Stock bajo</span>:<span className="pill pill-prod">OK</span>}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {transfer && <TransferModal t={transfer} setT={setTransfer} bodega={bodega} sedes={sedes} inv={inv} onClose={()=>setTransfer(null)} onConfirm={hacerTransfer}/>}
+    </div>
+  );
+}
+
+function TransferModal({t,setT,bodega,sedes,inv,onClose,onConfirm}){
+  const prods=(inv||[]);
+  const set=(k,v)=>setT(prev=>({...prev,[k]:v}));
+  const valido = t.producto_id && t.destino && t.destino!==t.origen && Number(t.cantidad)>0;
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-t">⇄ Transferir desde {t.origen}</div>
+        <div className="muted" style={{marginBottom:14}}>Mueve stock de la bodega central a una sede. Se descuenta de {t.origen} y se suma al destino.</div>
+        <label className="label">Producto</label>
+        <select className="select" value={t.producto_id} onChange={e=>set("producto_id",e.target.value)}>
+          <option value="">Seleccionar producto…</option>
+          {prods.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+        </select>
+        <div className="grid2">
+          <div>
+            <label className="label">Sede destino</label>
+            <select className="select" value={t.destino} onChange={e=>set("destino",e.target.value)}>
+              <option value="">Seleccionar…</option>
+              {sedes.filter(s=>s.nombre!==t.origen).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label">Cantidad</label>
+            <input className="input" type="number" min="1" value={t.cantidad} onChange={e=>set("cantidad",Number(e.target.value)||0)}/>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={!valido} onClick={()=>onConfirm(t)}>Transferir</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: INFORMES
+// ============================================================
+const isoDay = d => d.toISOString().slice(0,10);
+function rangoPreset(preset){
+  const hoy=new Date(); hoy.setHours(0,0,0,0);
+  const d=new Date(hoy);
+  if(preset==='hoy') return {desde:isoDay(hoy),hasta:isoDay(hoy)};
+  if(preset==='ayer'){ d.setDate(d.getDate()-1); return {desde:isoDay(d),hasta:isoDay(d)}; }
+  if(preset==='semana'){ d.setDate(d.getDate()-d.getDay()); return {desde:isoDay(d),hasta:isoDay(hoy)}; }
+  if(preset==='mes'){ const x=new Date(hoy.getFullYear(),hoy.getMonth(),1); return {desde:isoDay(x),hasta:isoDay(hoy)}; }
+  if(preset==='mes_pasado'){ const a=new Date(hoy.getFullYear(),hoy.getMonth()-1,1); const b=new Date(hoy.getFullYear(),hoy.getMonth(),0); return {desde:isoDay(a),hasta:isoDay(b)}; }
+  if(preset==='30dias'){ d.setDate(d.getDate()-29); return {desde:isoDay(d),hasta:isoDay(hoy)}; }
+  return {desde:isoDay(hoy),hasta:isoDay(hoy)};
+}
+
+function Informes({showToast}){
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [preset,setPreset]=useState('30dias');
+  const ini=rangoPreset('30dias');
+  const [desde,setDesde]=useState(ini.desde);
+  const [hasta,setHasta]=useState(ini.hasta);
+  const [sede,setSede]=useState('');
+  const [operador,setOperador]=useState('');
+  const [tipoPago,setTipoPago]=useState('');
+  const [ventas,setVentas]=useState(null);
+  const [sub,setSub]=useState('resumen');
+
+  useEffect(()=>{ (async()=>{ try{ const [s,e]=await Promise.all([db.listSedes(),db.listEmpleados()]); setSedes(s); setEmps(e); }catch(err){} })(); },[]);
+
+  const cargar=async()=>{
+    setVentas(null);
+    try{ setVentas(await db.getVentas({desde,hasta,sede,operador,tipoPago})); }
+    catch(e){ showToast(""+(e.message||e),"err"); setVentas([]); }
+  };
+  useEffect(()=>{ cargar(); },[desde,hasta,sede,operador,tipoPago]);
+
+  const aplicarPreset=p=>{ setPreset(p); if(p!=='custom'){ const r=rangoPreset(p); setDesde(r.desde); setHasta(r.hasta); } };
+
+  return (
+    <div>
+      <div className="filterbar">
+        <div className="fld">
+          <label className="label">Periodo</label>
+          <select className="select" value={preset} onChange={e=>aplicarPreset(e.target.value)}>
+            <option value="hoy">Hoy</option>
+            <option value="ayer">Ayer</option>
+            <option value="semana">Esta semana</option>
+            <option value="mes">Este mes</option>
+            <option value="mes_pasado">Mes pasado</option>
+            <option value="30dias">Últimos 30 días</option>
+            <option value="custom">Personalizado</option>
+          </select>
+        </div>
+        <div className="fld"><label className="label">Desde</label><input className="input" type="date" value={desde} onChange={e=>{setPreset('custom');setDesde(e.target.value);}}/></div>
+        <div className="fld"><label className="label">Hasta</label><input className="input" type="date" value={hasta} onChange={e=>{setPreset('custom');setHasta(e.target.value);}}/></div>
+        <div className="fld">
+          <label className="label">Sede</label>
+          <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
+            <option value="">Todas las tiendas</option>
+            {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+          </select>
+        </div>
+        <div className="fld">
+          <label className="label">Colaborador</label>
+          <select className="select" value={operador} onChange={e=>setOperador(e.target.value)}>
+            <option value="">Todos los colaboradores</option>
+            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+          </select>
+        </div>
+        <div className="fld">
+          <label className="label">Tipo de pago</label>
+          <select className="select" value={tipoPago} onChange={e=>setTipoPago(e.target.value)}>
+            <option value="">Todos</option>
+            <option value="efectivo">Efectivo</option>
+            <option value="qr">QR / Transferencia</option>
+            <option value="tarjeta">Tarjeta</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="subnav">
+        {[["resumen","Resumen"],["articulo","Por artículo"],["categoria","Por categoría"],["empleado","Por empleado"],["pago","Por tipo de pago"],["recibos","Recibos"],["descuentos","Descuentos"],["impuestos","Impuestos"],["caja","Caja"]].map(([k,l])=>(
+          <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
+        ))}
+      </div>
+
+      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar}/>}
+    </div>
+  );
+}
+
+function ReporteVista({sub,ventas,showToast,recargar}){
+  const [detalle,setDetalle]=useState(null);   // recibo abierto en el panel de detalle
+  const [borrando,setBorrando]=useState(false);
+  if(!ventas.length) return <div className="empty">No hay ventas en el periodo/filtros seleccionados.</div>;
+  const allItems=ventas.flatMap(v=>v.items.map(i=>({...i,sede:v.sede,operador:v.operador})));
+  const bruto=ventas.reduce((s,v)=>s+v.bruto,0);
+  const descuentos=ventas.reduce((s,v)=>s+v.descuento,0);
+  const netas=bruto-descuentos;
+  const costo=allItems.reduce((s,i)=>s+i.costo*i.cantidad,0);
+  const beneficio=netas-costo;
+
+  if(sub==='resumen'){
+    // agrupar bruto por día
+    const porDia={};
+    ventas.forEach(v=>{ const d=v.fecha.slice(0,10); porDia[d]=(porDia[d]||0)+v.bruto; });
+    const dias=Object.keys(porDia).sort();
+    const max=Math.max(...dias.map(d=>porDia[d]),1);
+    return (
+      <div>
+        <div className="kpis">
+          <div className="kpi"><div className="kpi-label">Ventas brutas</div><div className="kpi-value">{fmt(bruto)}</div></div>
+          <div className="kpi"><div className="kpi-label">Descuentos</div><div className="kpi-value red">-{fmt(descuentos)}</div></div>
+          <div className="kpi"><div className="kpi-label">Ventas netas</div><div className="kpi-value green">{fmt(netas)}</div></div>
+          <div className="kpi"><div className="kpi-label">Beneficio bruto</div><div className="kpi-value amber">{fmt(beneficio)}</div></div>
+          <div className="kpi"><div className="kpi-label">Nº de ventas</div><div className="kpi-value">{ventas.length}</div></div>
+        </div>
+        <div className="chart-wrap">
+          <div className="label" style={{marginBottom:14}}>Ventas brutas por día</div>
+          <div className="chart" style={{paddingBottom:20}}>
+            {dias.map(d=>(
+              <div key={d} className="bar" style={{height:(porDia[d]/max*100)+"%"}} title={d+": "+fmt(porDia[d])}>
+                <span className="bar-lbl">{d.slice(8,10)}/{d.slice(5,7)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if(sub==='articulo' || sub==='categoria'){
+    const key = sub==='articulo' ? 'nombre' : 'categoria';
+    const g={};
+    allItems.forEach(i=>{ const k=i[key]||'—'; const o=g[k]||(g[k]={nombre:k,cant:0,neto:0,costo:0}); o.cant+=i.cantidad; o.neto+=i.subtotal; o.costo+=i.costo*i.cantidad; });
+    const rows=Object.values(g).sort((a,b)=>b.neto-a.neto);
+    return (
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>{sub==='articulo'?'Artículo':'Categoría'}</th><th className="num">Cantidad</th><th className="num">Ventas netas</th><th className="num">Beneficio</th></tr></thead>
+          <tbody>{rows.map(r=>(
+            <tr key={r.nombre}><td className="row-name">{r.nombre}</td><td className="num">{r.cant}</td><td className="num">{fmt(r.neto)}</td><td className="num">{fmt(r.neto-r.costo)}</td></tr>
+          ))}</tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if(sub==='empleado'){
+    const g={};
+    ventas.forEach(v=>{ const o=g[v.operador]||(g[v.operador]={nombre:v.operador,n:0,total:0}); o.n++; o.total+=v.total; });
+    const rows=Object.values(g).sort((a,b)=>b.total-a.total);
+    return (
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Colaborador</th><th className="num">Nº ventas</th><th className="num">Total vendido</th><th className="num">Ticket prom.</th></tr></thead>
+          <tbody>{rows.map(r=>(
+            <tr key={r.nombre}><td className="row-name">{r.nombre}</td><td className="num">{r.n}</td><td className="num">{fmt(r.total)}</td><td className="num">{fmt(Math.round(r.total/r.n))}</td></tr>
+          ))}</tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if(sub==='pago'){
+    const ef=ventas.reduce((s,v)=>s+v.pago_efectivo,0);
+    const qr=ventas.reduce((s,v)=>s+v.pago_qr,0);
+    const tj=ventas.reduce((s,v)=>s+v.pago_tarjeta,0);
+    const tot=ef+qr+tj||1;
+    const row=(l,v)=>(<tr><td className="row-name">{l}</td><td className="num">{fmt(v)}</td><td className="num">{(v/tot*100).toFixed(1)}%</td></tr>);
+    return (
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Tipo de pago</th><th className="num">Total</th><th className="num">%</th></tr></thead>
+          <tbody>{row("Efectivo",ef)}{row("QR / Transferencia",qr)}{row("Tarjeta",tj)}</tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if(sub==='recibos'){
+    const rows=[...ventas].sort((a,b)=>b.fecha.localeCompare(a.fecha)).slice(0,200);
+    const metodo=v=>v.pago_efectivo>0?"Efectivo":v.pago_qr>0?"QR":"Tarjeta";
+    const eliminar=async(v)=>{
+      if(!window.confirm("¿Eliminar el recibo "+v.recibo+" por "+fmt(v.total)+"?\n\nLos artículos volverán al stock de "+v.sede+" y la venta se quitará de los informes.")) return;
+      setBorrando(true);
+      try{ await db.anularVenta(v,"Recibo eliminado desde back office"); setDetalle(null); await recargar(); showToast("Recibo eliminado y stock devuelto"); }
+      catch(e){ showToast(""+(e.message||e),"err"); }
+      setBorrando(false);
+    };
+    return (
+      <div>
+        <div className="kpis">
+          <div className="kpi"><div className="kpi-label">Recibos</div><div className="kpi-value">{ventas.length}</div></div>
+          <div className="kpi"><div className="kpi-label">Total facturado</div><div className="kpi-value green">{fmt(ventas.reduce((s,v)=>s+v.total,0))}</div></div>
+        </div>
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Recibo</th><th>Fecha</th><th>Sede</th><th>Colaborador</th><th className="num">Total</th><th>Pago</th><th></th></tr></thead>
+            <tbody>{rows.map(v=>(
+              <tr key={v.id} style={{cursor:"pointer"}} onClick={()=>setDetalle(v)}>
+                <td className="row-name" style={{color:"var(--green)"}}>{v.recibo}</td>
+                <td className="muted">{v.fecha.slice(0,10)} {v.fecha.slice(11,16)}</td>
+                <td>{v.sede}</td><td className="muted">{v.operador}</td>
+                <td className="num">{fmt(v.total)}</td>
+                <td><span className="chip">{metodo(v)}</span></td>
+                <td><div className="actions"><button className="btn btn-danger btn-sm" onClick={e=>{e.stopPropagation();eliminar(v);}}>Eliminar</button></div></td>
+              </tr>
+            ))}</tbody>
+          </table>
+          {ventas.length>200 && <div className="muted" style={{padding:12}}>Mostrando los 200 más recientes de {ventas.length}.</div>}
+        </div>
+        {detalle && <ReciboDetalle v={detalle} metodo={metodo} borrando={borrando} onClose={()=>setDetalle(null)} onEliminar={()=>eliminar(detalle)}/>}
+      </div>
+    );
+  }
+
+  if(sub==='descuentos'){
+    const conDesc=ventas.filter(v=>v.descuento>0).sort((a,b)=>b.descuento-a.descuento);
+    return (
+      <div>
+        <div className="kpis"><div className="kpi"><div className="kpi-label">Total descuentos</div><div className="kpi-value red">-{fmt(descuentos)}</div></div><div className="kpi"><div className="kpi-label">Ventas con descuento</div><div className="kpi-value">{conDesc.length}</div></div></div>
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Recibo</th><th>Fecha</th><th>Sede</th><th className="num">Bruto</th><th className="num">Descuento</th></tr></thead>
+            <tbody>{conDesc.slice(0,200).map(v=>(
+              <tr key={v.id}><td className="row-name">{v.recibo}</td><td className="muted">{v.fecha.slice(0,10)}</td><td>{v.sede}</td><td className="num">{fmt(v.bruto)}</td><td className="num" style={{color:"var(--red)"}}>-{fmt(v.descuento)}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  if(sub==='impuestos'){
+    // IVA incluido en el precio: base = subtotal/1.19, iva = subtotal - base
+    let base=0,iva=0,exento=0;
+    allItems.forEach(i=>{ if(i.iva){ const b=i.subtotal/1.19; base+=b; iva+=i.subtotal-b; } else { exento+=i.subtotal; } });
+    return (
+      <div>
+        <div className="kpis">
+          <div className="kpi"><div className="kpi-label">Base gravable</div><div className="kpi-value">{fmt(Math.round(base))}</div></div>
+          <div className="kpi"><div className="kpi-label">IVA 19% recaudado</div><div className="kpi-value amber">{fmt(Math.round(iva))}</div></div>
+          <div className="kpi"><div className="kpi-label">Ventas exentas</div><div className="kpi-value">{fmt(Math.round(exento))}</div></div>
+        </div>
+      </div>
+    );
+  }
+
+  if(sub==='caja'){
+    // efectivo recibido por sede y por día
+    const g={};
+    ventas.forEach(v=>{ if(v.pago_efectivo>0){ const o=g[v.sede]||(g[v.sede]={sede:v.sede,efectivo:0,n:0}); o.efectivo+=v.pago_efectivo; o.n++; } });
+    const rows=Object.values(g).sort((a,b)=>b.efectivo-a.efectivo);
+    const totalEf=rows.reduce((s,r)=>s+r.efectivo,0);
+    return (
+      <div>
+        <div className="kpis"><div className="kpi"><div className="kpi-label">Efectivo recaudado</div><div className="kpi-value green">{fmt(totalEf)}</div></div></div>
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Sede</th><th className="num">Ventas en efectivo</th><th className="num">Efectivo recaudado</th></tr></thead>
+            <tbody>{rows.map(r=>(
+              <tr key={r.sede}><td className="row-name">{r.sede}</td><td className="num">{r.n}</td><td className="num">{fmt(r.efectivo)}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+// Panel de detalle de un recibo (estilo Loyverse) con opción de eliminar
+function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
+  const iva = v.items.reduce((s,i)=> s + (i.iva ? (i.subtotal - i.subtotal/1.19) : 0), 0);
+  const pagoLabel = v.pago_efectivo>0?"Efectivo":v.pago_qr>0?"QR / Transferencia":"Tarjeta";
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div style={{textAlign:"center",marginBottom:6}}>
+          <div className="kpi-value" style={{fontSize:30}}>{fmt(v.total)}</div>
+          <div className="muted">Total</div>
+        </div>
+        <div className="muted" style={{marginBottom:14}}>Colaborador: <b style={{color:"var(--t)"}}>{v.operador}</b> · Sede: <b style={{color:"var(--t)"}}>{v.sede}</b></div>
+        <div className="card" style={{padding:14,marginBottom:14}}>
+          {v.items.map((i,idx)=>(
+            <div key={idx} className="result-row" style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid var(--bd)"}}>
+              <div><div style={{fontWeight:600,color:"var(--tb)"}}>{i.nombre}</div><div className="muted">{i.cantidad} × {fmt(i.precio_unit)}</div></div>
+              <div style={{fontWeight:700}}>{fmt(i.subtotal)}</div>
+            </div>
+          ))}
+          <div style={{display:"flex",justifyContent:"space-between",padding:"10px 0 0",fontWeight:800,color:"var(--tb)"}}><span>Total</span><span>{fmt(v.total)}</span></div>
+          {v.descuento>0 && <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",color:"var(--red)"}}><span>Descuento</span><span>-{fmt(v.descuento)}</span></div>}
+          <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",color:"var(--td)"}}><span>IVA 19%</span><span>{fmt(Math.round(iva))}</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",color:"var(--td)"}}><span>{pagoLabel}</span><span>{fmt(v.total)}</span></div>
+        </div>
+        <div className="muted" style={{marginBottom:14}}>{v.fecha.slice(0,10)} {v.fecha.slice(11,16)} · {v.recibo}</div>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
+          <button className="btn btn-danger" disabled={borrando} onClick={onEliminar}>{borrando?"Eliminando…":"🗑 Eliminar recibo"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+setTimeout(()=>document.getElementById('loading').classList.add('hide'),400);
+  </script>
+</body>
+</html>

@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Panzer — POS Cajero</title>
+  <link rel="manifest" href="data:application/json,{&quot;name&quot;:&quot;Panzer POS&quot;,&quot;short_name&quot;:&quot;Panzer POS&quot;,&quot;start_url&quot;:&quot;.&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#080c14&quot;,&quot;theme_color&quot;:&quot;#3b82f6&quot;}">
+  <meta name="theme-color" content="#080c14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#080c14;--sf:#0f1520;--sf2:#161e2e;--sf3:#1c2640;
+      --bd:#243049;--bd2:#2d3d5a;
+      --blue:#3b82f6;--blue-d:rgba(59,130,246,0.12);
+      --amber:#f59e0b;--amber-d:rgba(245,158,11,0.12);
+      --green:#10b981;--green-d:rgba(16,185,129,0.10);
+      --red:#ef4444;--red-d:rgba(239,68,68,0.10);
+      --purple:#8b5cf6;
+      --t:#e2e8f0;--td:#64748b;--tb:#f8fafc;
+      --font:'Outfit',system-ui,sans-serif;--r:14px;
+    }
+    *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{background:var(--bg);overflow-x:hidden;font-family:var(--font);color:var(--t);}
+    input,select,button,textarea{font-family:inherit;}
+    input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;}
+    input[type="number"]{-moz-appearance:textfield;}
+    ::selection{background:rgba(59,130,246,0.25);}
+    #loading{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;transition:opacity .4s;}
+    #loading.hide{opacity:0;pointer-events:none;}
+    .loader{width:40px;height:40px;border:3px solid var(--bd);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:16px;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    .app{max-width:480px;margin:0 auto;min-height:100vh;position:relative;padding-bottom:96px;}
+    .header{background:linear-gradient(135deg,var(--sf),var(--sf2));border-bottom:1px solid var(--bd);padding:14px 18px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:50;}
+    .header img{height:26px;}
+    .header h1{font-size:16px;font-weight:700;color:var(--tb);}
+    .header-sub{font-size:11px;color:var(--td);}
+    .header-badge{margin-left:auto;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;background:var(--blue-d);color:var(--blue);}
+    .page{padding:14px;}
+    .card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:12px;}
+    .card-t{font-size:15px;font-weight:700;color:var(--tb);margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+    .label{font-size:12px;font-weight:600;color:var(--td);margin-bottom:6px;display:block;letter-spacing:.3px;}
+    .input,.select{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;color:var(--tb);font-size:15px;outline:none;margin-bottom:12px;}
+    .select{-webkit-appearance:none;}
+    .input:focus,.select:focus{border-color:var(--blue);}
+    .btn-primary{width:100%;background:linear-gradient(135deg,var(--blue),#2563eb);border:none;border-radius:12px;padding:14px 20px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;}
+    .btn-primary:disabled{opacity:.4;cursor:default;}
+    .btn-secondary{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:12px;padding:13px 20px;color:var(--t);font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;}
+    .demo-banner{background:var(--amber-d);border-bottom:1px solid rgba(245,158,11,.25);color:var(--amber);font-size:11px;font-weight:600;text-align:center;padding:6px;}
+    /* PIN pad */
+    .pin-dots{display:flex;gap:12px;justify-content:center;margin:8px 0 20px;}
+    .pin-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--bd2);transition:.15s;}
+    .pin-dot.on{background:var(--blue);border-color:var(--blue);}
+    .pinpad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+    .pin-key{padding:18px 0;border-radius:12px;border:1px solid var(--bd);background:var(--sf2);color:var(--tb);font-size:22px;font-weight:700;cursor:pointer;user-select:none;text-align:center;}
+    .pin-key:active{background:var(--sf3);}
+    .pin-key.zero{grid-column:2;}
+    .pin-key.back{background:transparent;border-color:transparent;color:var(--td);font-size:18px;}
+    .search{position:relative;margin-bottom:10px;}
+    .search input{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:11px 14px 11px 38px;color:var(--tb);font-size:14px;outline:none;}
+    .search input:focus{border-color:var(--blue);}
+    .search .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--td);font-size:15px;}
+    .header-x{background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:8px 12px;color:var(--t);font-size:12px;font-weight:700;cursor:pointer;}
+    /* Categorías */
+    .cats{display:flex;gap:8px;overflow-x:auto;padding:4px 0 10px;scrollbar-width:none;}
+    .cats::-webkit-scrollbar{display:none;}
+    .cat{flex-shrink:0;padding:8px 14px;border-radius:20px;font-size:13px;font-weight:600;border:1px solid var(--bd);background:var(--sf2);color:var(--td);cursor:pointer;white-space:nowrap;}
+    .cat.active{background:var(--blue-d);border-color:var(--blue);color:var(--blue);}
+    /* Grid productos */
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    .prod{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:6px;min-height:96px;justify-content:space-between;position:relative;transition:border-color .15s,transform .05s;}
+    .prod:active{transform:scale(.97);}
+    .prod.disabled{opacity:.45;cursor:not-allowed;}
+    .prod-name{font-size:14px;font-weight:700;color:var(--tb);line-height:1.25;}
+    .prod-price{font-size:15px;font-weight:800;color:var(--blue);}
+    .prod-tag{position:absolute;top:8px;right:8px;font-size:9px;font-weight:700;padding:2px 7px;border-radius:10px;}
+    .tag-token{background:var(--amber-d);color:var(--amber);}
+    .tag-serv{background:rgba(139,92,246,.15);color:var(--purple);}
+    .prod-stock{font-size:10px;font-weight:600;color:var(--td);}
+    .prod-stock.low{color:var(--red);}
+    .prod-stock.out{color:var(--red);font-weight:800;}
+    /* Carrito flotante */
+    .cartbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:var(--sf);border-top:1px solid var(--bd);padding:12px 16px calc(12px + env(safe-area-inset-bottom));z-index:80;display:flex;gap:12px;align-items:center;}
+    .cartbar-info{flex:1;}
+    .cartbar-count{font-size:11px;color:var(--td);font-weight:600;}
+    .cartbar-total{font-size:22px;font-weight:800;color:var(--tb);}
+    .cartbar-btn{background:linear-gradient(135deg,var(--green),#059669);border:none;border-radius:12px;padding:14px 22px;color:#fff;font-size:15px;font-weight:800;cursor:pointer;}
+    .cartbar-btn:disabled{opacity:.4;}
+    /* Sheet (modal inferior) */
+    .sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:150;display:flex;align-items:flex-end;justify-content:center;}
+    .sheet{background:var(--sf);width:100%;max-width:480px;border-radius:20px 20px 0 0;border-top:1px solid var(--bd);max-height:88vh;overflow-y:auto;padding:18px 16px calc(18px + env(safe-area-inset-bottom));animation:up .25s ease;}
+    @keyframes up{from{transform:translateY(100%);}to{transform:translateY(0);}}
+    .sheet-handle{width:40px;height:4px;background:var(--bd2);border-radius:2px;margin:0 auto 14px;}
+    .citem{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd);}
+    .citem:last-child{border-bottom:none;}
+    .citem-name{flex:1;font-size:14px;font-weight:600;color:var(--tb);}
+    .citem-sub{font-size:11px;color:var(--td);}
+    .qty{display:flex;align-items:center;gap:10px;}
+    .qty button{width:30px;height:30px;border-radius:8px;border:1px solid var(--bd);background:var(--sf2);color:var(--tb);font-size:18px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+    .qty span{min-width:22px;text-align:center;font-weight:700;font-size:15px;}
+    .pay-opts{display:flex;gap:8px;margin-bottom:12px;}
+    .pay-opt{flex:1;padding:12px;border-radius:10px;border:1px solid var(--bd);background:var(--sf2);color:var(--td);font-size:13px;font-weight:700;cursor:pointer;text-align:center;}
+    .pay-opt.active{background:var(--blue-d);border-color:var(--blue);color:var(--blue);}
+    .result-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--bd);}
+    .result-row:last-child{border-bottom:none;}
+    .result-label{font-size:13px;color:var(--td);}
+    .result-value{font-size:15px;font-weight:700;color:var(--tb);}
+    .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:300;padding:12px 18px;border-radius:12px;font-size:13px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.4);}
+    .toast.ok{background:var(--green);color:#fff;}
+    .toast.err{background:var(--red);color:#fff;}
+    .empty{text-align:center;padding:40px 20px;color:var(--td);}
+  </style>
+</head>
+<body>
+  <div id="loading"><div class="loader"></div>
+    <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" style="width:150px;margin-bottom:10px;" alt="Panzer">
+    <div style="font-size:13px;color:#64748b;">Cargando POS...</div>
+  </div>
+  <div id="root"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <!-- Cliente de Supabase por CDN (no requiere build) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Catálogo real importado de Loyverse (define window.PANZER_CATALOGO) -->
+  <script src="catalogo_demo.js"></script>
+
+  <script type="text/babel">
+const {useState,useEffect} = React;
+
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
+// 1) Pega aquí los datos de tu proyecto Supabase (Project Settings → API).
+//    Mientras estén vacíos, la app funciona en MODO DEMO (datos de prueba).
+const SUPABASE_URL = 'https://gmwqxqeiocjcpablxjcn.supabase.co';        // ej: https://xxxx.supabase.co
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdtd3F4cWVpb2NqY3BhYmx4amNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzYwMDksImV4cCI6MjA5NTkxMjAwOX0.O_fSFAHUiZtDNIRShumewEqkPExITBRuxVO2qbMuzxY';   // la clave "anon public"
+
+// 2) URL del Apps Script del sistema de recaudo (para enviar la liquidación al cerrar turno
+//    y el reporte de chequeo de inventario).
+const API_URL = 'https://script.google.com/macros/s/AKfycbyANxSp6rnaIY9UZxHlT3TzENnxpmbS8oDtUSxYZ5TTmgvDdhshQS2KZ2XAaS7AmnAq/exec';
+
+// 3) Correo fijo de administración que recibe el reporte de descuadres del chequeo de inventario.
+const CORREO_REPORTES = 'info@kemilabo.com';
+
+const DEMO_MODE = !(SUPABASE_URL && SUPABASE_ANON_KEY);
+const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ---- Datos demo (sedes/operadores y productos de ejemplo) ----
+const DEMO_CONFIG = {
+  tesoreros: [],
+  sedes: {
+    "Toberín":   { operadores:["Johan","Kevin","Nicolas","Rodrigo"] },
+    "San Felipe":{ operadores:["Camilo","Andrea","Luis","Sergio"] },
+    "Suba":      { operadores:["Pedro","María","Felipe"] },
+  },
+};
+// Empleados demo con PIN y sedes (en Supabase viven en la tabla empleados/empleado_sedes,
+// se administran desde el back office). PINs de prueba.
+const DEMO_EMPLEADOS = [
+  { nombre:"Johan",  pin:"1234", sedes:["Toberín"] },
+  { nombre:"Camilo", pin:"5678", sedes:["San Felipe"] },
+  { nombre:"Andrea", pin:"4321", sedes:["San Felipe","Bello"] },
+];
+// Catálogo real de Loyverse (lo carga catalogo_demo.js). Si no está, usamos ejemplos.
+const CATALOGO = (typeof window!=="undefined" && window.PANZER_CATALOGO) ? window.PANZER_CATALOGO : null;
+
+// Normaliza nombres de sede para cruzar recaudo (getConfig) con tiendas Loyverse.
+// "Toberín" → "TOBERIN", "San Felipe" → "SAN FELIPE".
+const normSede = s => (s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").trim().toUpperCase();
+
+// Devuelve los productos del catálogo real con el stock de la sede pedida.
+function productosDeSede(sede){
+  if(!CATALOGO) return DEMO_PRODUCTOS_FALLBACK.map(p=>({...p}));
+  const ns = normSede(sede);
+  // mapa stock por sede normalizada
+  const sedeKey = CATALOGO.sedes.find(k=>normSede(k)===ns) || null;
+  return CATALOGO.productos.map((p,i)=>{
+    const stock = (sedeKey!=null) ? p.stock[sedeKey] : null;
+    return {
+      id: "lv-"+(p.ref||i),
+      nombre: p.nombre,
+      tipo: p.tipo,
+      categoria: p.categoria,
+      precio: p.precio,
+      precio_variable: p.precio_variable,
+      costo: p.costo,
+      codigo_barras: p.codigo_barras,
+      controla_stock: p.controla_stock,
+      iva: p.iva,
+      stock: p.controla_stock ? (stock ?? 0) : null,
+      stock_minimo: 0,
+    };
+  });
+}
+
+// Stock en memoria por sede (para descontar en demo sin perder el original).
+const DEMO_STOCK = {}; // sede → { id → cantidad }
+function demoStock(sede){
+  const ns = normSede(sede);
+  if(!DEMO_STOCK[ns]){
+    DEMO_STOCK[ns] = {};
+    productosDeSede(sede).forEach(p=>{ if(p.controla_stock) DEMO_STOCK[ns][p.id]=p.stock; });
+  }
+  return DEMO_STOCK[ns];
+}
+
+const DEMO_PRODUCTOS_FALLBACK = [
+  { id:"d1", nombre:"Token de lavado", tipo:"token",    categoria:"TOKENS",     precio:5000,  controla_stock:false, stock:null },
+  { id:"d4", nombre:"Ambientador",     tipo:"producto", categoria:"SNACKS",     precio:8000,  controla_stock:true,  stock:12 },
+];
+
+// ============================================================
+// CAPA DE DATOS (Supabase o demo)
+// ============================================================
+async function apiGet(action, params={}){
+  const url=new URL(API_URL); url.searchParams.set('action',action);
+  for(const [k,v] of Object.entries(params)) url.searchParams.set(k,v);
+  try{ const r=await fetch(url.toString()); return await r.json(); }catch(e){ return null; }
+}
+// POST al Apps Script (header text/plain como en el sistema de recaudo)
+async function apiPost(action, body){
+  try{
+    const r=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,...body})});
+    return await r.json();
+  }catch(e){ return {ok:false,error:String(e)}; }
+}
+
+const db = {
+  async getConfig(){
+    const data = await apiGet('getConfig');
+    if(data && data.sedes) return data;
+    return DEMO_CONFIG; // fallback si no hay conexión
+  },
+  // Enviar reporte de chequeo de inventario: lo GUARDA (back office) y manda el correo
+  async enviarChequeo({sede, operador, items, descuadres, base}){
+    const fecha = new Date().toISOString();
+    // 1) Guardar el chequeo para verlo en el back office
+    try{ await this.guardarChequeo({sede, operador, fecha, base_recibida: base||0, total_items: items.length, n_descuadres: descuadres.length, descuadres}); }catch(e){}
+    // 2) Enviar el correo a administración vía Apps Script
+    return apiPost('chequeoInventario', {
+      sede, operador, correo: CORREO_REPORTES, fecha,
+      total_items: items.length, base_recibida: base || 0,
+      descuadres,  // [{nombre, sistema, contado, diferencia}]
+    });
+  },
+  // Registrar la liquidación de turno en el sistema de recaudo (mismo formato que la app del tesorero)
+  async enviarLiquidacion(payload){
+    return apiPost('guardarLiquidacionOperador', payload);
+  },
+  async guardarChequeo(reg){
+    if(DEMO_MODE){
+      const arr = JSON.parse(localStorage.getItem('panzer_chequeos_demo')||'[]');
+      arr.push({ id:'cq-'+Date.now(), created_at:reg.fecha, ...reg });
+      localStorage.setItem('panzer_chequeos_demo', JSON.stringify(arr));
+      return;
+    }
+    const { error } = await sb.from('chequeos_inventario').insert({
+      sede:reg.sede, operador:reg.operador, base_recibida:reg.base_recibida,
+      total_items:reg.total_items, n_descuadres:reg.n_descuadres, descuadres:reg.descuadres,
+    });
+    if(error) throw error;
+  },
+  // Login por PIN → devuelve {nombre, sedes:[...]} o null si no existe
+  async loginPin(pin){
+    if(DEMO_MODE){
+      const e = DEMO_EMPLEADOS.find(x=>x.pin===pin);
+      return e ? { nombre:e.nombre, sedes:[...e.sedes] } : null;
+    }
+    const { data, error } = await sb.from('empleados')
+      .select('nombre, empleado_sedes(sedes(nombre))')
+      .eq('pin', pin).eq('activo', true).maybeSingle();
+    if(error || !data) return null;
+    const sedes = (data.empleado_sedes||[]).map(r=>r.sedes?.nombre).filter(Boolean);
+    return { nombre:data.nombre, sedes };
+  },
+  async getProductos(sede){
+    if(DEMO_MODE){
+      const st = demoStock(sede);
+      return productosDeSede(sede).map(p=>({
+        ...p,
+        stock: p.controla_stock ? (st[p.id] ?? p.stock) : null,
+      }));
+    }
+    // productos + stock de la sede
+    const { data:prods, error } = await sb.from('productos').select('*').eq('activo',true).order('orden');
+    if(error) throw error;
+    const { data:inv } = await sb.from('inventario').select('producto_id,cantidad,stock_minimo').eq('sede',sede);
+    const invMap = {}; (inv||[]).forEach(i=>invMap[i.producto_id]=i);
+    return prods.map(p=>({
+      ...p,
+      stock: p.controla_stock ? (invMap[p.id]?.cantidad ?? 0) : null,
+      stock_minimo: invMap[p.id]?.stock_minimo ?? 0,
+    }));
+  },
+  async abrirTurno(sede, operador){
+    if(DEMO_MODE) return { id:"demo-turno", sede, operador };
+    // ¿hay turno abierto?
+    const { data:abierto } = await sb.from('turnos').select('*').eq('sede',sede).eq('operador',operador).eq('estado','abierto').maybeSingle();
+    if(abierto) return abierto;
+    const { data, error } = await sb.from('turnos').insert({sede,operador}).select().single();
+    if(error) throw error;
+    return data;
+  },
+  async registrarVenta({turno, sede, operador, items, pago}){
+    if(DEMO_MODE){
+      // descontar stock localmente (Loyverse permite stock negativo / sobreventa)
+      const st = demoStock(sede);
+      items.forEach(it=>{ if(it.controla_stock && it.producto_id in st) st[it.producto_id]-=it.cantidad; });
+      return { recibo: nextReciboDemo() };
+    }
+    // registrar_venta devuelve el número de recibo asignado por el sistema (mismo que se ve en el back office)
+    const { data, error } = await sb.rpc('registrar_venta',{
+      p_turno_id: turno.id,
+      p_sede: sede,
+      p_operador: operador,
+      p_items: items.map(it=>({
+        producto_id: it.producto_id, nombre: it.nombre, tipo: it.tipo,
+        cantidad: it.cantidad, precio_unit: it.precio, controla_stock: it.controla_stock,
+      })),
+      p_pago_efectivo: pago.efectivo, p_pago_qr: pago.qr, p_pago_tarjeta: pago.tarjeta,
+    });
+    if(error) throw error;
+    return { recibo: data };
+  },
+};
+
+const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
+// Nº de recibo secuencial para demo (en Supabase lo asigna el sistema y es el mismo que ve el back office)
+function nextReciboDemo(){
+  let n=0; try{ n=Number(localStorage.getItem('panzer_recibo_seq')||'0'); }catch(e){}
+  n+=1; try{ localStorage.setItem('panzer_recibo_seq',String(n)); }catch(e){}
+  return 'R-'+String(n).padStart(6,'0');
+}
+
+// ============================================================
+// APP
+// ============================================================
+function App(){
+  const [sede,setSede]=useState("");
+  const [operador,setOperador]=useState("");
+  const [turno,setTurno]=useState(null);
+  const [productos,setProductos]=useState([]);
+  const [cat,setCat]=useState("Todos");
+  const [q,setQ]=useState("");                 // buscador de productos
+  const [cart,setCart]=useState([]); // {producto_id,nombre,tipo,precio,controla_stock,cantidad}
+  const [showCart,setShowCart]=useState(false);
+  const [precioModal,setPrecioModal]=useState(null); // producto de precio variable esperando monto
+  const [busy,setBusy]=useState(false);
+  const [toast,setToast]=useState(null);
+  // login por PIN
+  const [pin,setPin]=useState("");
+  const [pinEmp,setPinEmp]=useState(null);      // empleado con >1 sede, esperando elegir sede
+  // resumen del turno
+  const [ventasTurno,setVentasTurno]=useState([]);
+  const [showCierre,setShowCierre]=useState(false);
+  // chequeo de inventario obligatorio al iniciar turno
+  const [chequeoHecho,setChequeoHecho]=useState(false);
+
+  const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2200); };
+
+  const abrir=async(sedeSel, nombre)=>{
+    setBusy(true);
+    try{
+      const t=await db.abrirTurno(sedeSel,nombre);
+      setSede(sedeSel); setOperador(nombre); setTurno(t);
+      const prods=await db.getProductos(sedeSel);
+      setProductos(prods);
+    }catch(e){ showToast("Error: "+(e.message||e),"err"); }
+    setBusy(false);
+  };
+
+  const intentarPin=async(p)=>{
+    setBusy(true);
+    try{
+      const emp=await db.loginPin(p);
+      if(!emp){ showToast("PIN incorrecto","err"); setPin(""); setBusy(false); return; }
+      if(!emp.sedes.length){ showToast("Sin sede asignada","err"); setPin(""); setBusy(false); return; }
+      if(emp.sedes.length===1){ await abrir(emp.sedes[0], emp.nombre); }
+      else { setPinEmp(emp); }   // elegir sede
+    }catch(e){ showToast("Error: "+(e.message||e),"err"); }
+    setBusy(false);
+  };
+
+  const cerrarCaja=()=>{
+    setTurno(null); setSede(""); setOperador(""); setProductos([]);
+    setCart([]); setShowCart(false); setShowCierre(false);
+    setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
+    setChequeoHecho(false);
+  };
+
+  const cats=["Todos",...Array.from(new Set(productos.map(p=>p.categoria||"Otros")))];
+  const visibles=productos.filter(p=>
+    (cat==="Todos"||p.categoria===cat) &&
+    (!q || p.nombre.toLowerCase().includes(q.toLowerCase()) || (p.codigo_barras||"").includes(q))
+  );
+
+  const agregarAlCarrito=(p,precio)=>{
+    setCart(prev=>{
+      const ex=prev.find(c=>c.producto_id===p.id && !p.precio_variable);
+      if(ex) return prev.map(c=>c===ex?{...c,cantidad:c.cantidad+1}:c);
+      const key = p.precio_variable ? p.id+"-"+Date.now() : p.id;
+      return [...prev,{producto_id:p.id,key,nombre:p.nombre,tipo:p.tipo,precio,controla_stock:p.controla_stock,cantidad:1}];
+    });
+  };
+  const addToCart=p=>{
+    if(p.precio_variable){ setPrecioModal(p); return; }  // abre teclado numérico
+    agregarAlCarrito(p, p.precio);
+  };
+  const confirmarPrecio=(monto)=>{
+    if(precioModal && monto>0) agregarAlCarrito(precioModal, monto);
+    setPrecioModal(null);
+  };
+  const changeQty=(key,delta)=>{
+    setCart(prev=>prev.flatMap(c=>{
+      if((c.key||c.producto_id)!==key) return [c];
+      const nueva=c.cantidad+delta;
+      if(nueva<=0) return [];
+      return [{...c,cantidad:nueva}];
+    }));
+  };
+
+  const totalCart=cart.reduce((s,c)=>s+c.precio*c.cantidad,0);
+  const countCart=cart.reduce((s,c)=>s+c.cantidad,0);
+
+  const cobrar=async(pago)=>{
+    setBusy(true);
+    try{
+      const res=await db.registrarVenta({turno,sede,operador,items:cart,pago});
+      // refrescar stock
+      const prods=await db.getProductos(sede);
+      setProductos(prods);
+      const montoTokens=cart.filter(c=>c.tipo==="token").reduce((s,c)=>s+c.precio*c.cantidad,0);
+      const montoProductos=totalCart-montoTokens;
+      setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, recibo:res&&res.recibo, ts:Date.now()}]);
+      setCart([]); setShowCart(false);
+      showToast("Venta registrada "+fmt(totalCart),"ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusy(false);
+  };
+
+  // -------- LOGIN (PIN) --------
+  if(!turno){
+    const tecla=d=>{ setPin(prev=>(prev+d).slice(0,4)); };
+    const borrar=()=>setPin(prev=>prev.slice(0,-1));
+    return (
+      <div className="app">
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — PINs de prueba: 1234 (Johan), 5678 (Camilo), 4321 (Andrea)</div>}
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <div className="page">
+          <div style={{textAlign:"center",padding:"28px 0 16px"}}>
+            <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" style={{width:150,marginBottom:10}} alt="Panzer"/>
+            <p style={{fontSize:14,color:"var(--td)"}}>Punto de venta — Cajero</p>
+          </div>
+
+          {!pinEmp ? (
+            <div className="card">
+              <div className="card-t" style={{justifyContent:"center"}}>🔒 Ingresa tu PIN</div>
+              <div className="pin-dots">
+                {[0,1,2,3].map(i=><div key={i} className={"pin-dot"+(i<pin.length?" on":"")}/>)}
+              </div>
+              <div className="pinpad">
+                {["1","2","3","4","5","6","7","8","9"].map(d=>(
+                  <div key={d} className="pin-key" onClick={()=>tecla(d)}>{d}</div>
+                ))}
+                <div className="pin-key back" onClick={borrar}>⌫</div>
+                <div className="pin-key zero" onClick={()=>tecla("0")}>0</div>
+              </div>
+              <button className="btn-primary" style={{marginTop:16}} disabled={pin.length<4||busy} onClick={()=>intentarPin(pin)}>
+                {busy?"Verificando...":"Entrar"}
+              </button>
+            </div>
+          ) : (
+            <div className="card">
+              <div className="card-t">Hola, {pinEmp.nombre} 👋</div>
+              <label className="label">¿En qué sede vas a trabajar?</label>
+              {pinEmp.sedes.map(s=>(
+                <button key={s} className="btn-secondary" style={{marginBottom:10}} disabled={busy} onClick={()=>abrir(s,pinEmp.nombre)}>{s}</button>
+              ))}
+              <button className="btn-secondary" style={{marginTop:6,opacity:.7}} onClick={()=>{setPinEmp(null);setPin("");}}>← Volver</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // -------- CHEQUEO DE INVENTARIO (obligatorio antes de vender) --------
+  if(!chequeoHecho){
+    return (
+      <div className="app">
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — datos de prueba (sin Supabase)</div>}
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <ChequeoInventario
+          productos={productos.filter(p=>p.controla_stock)}
+          sede={sede} operador={operador} showToast={showToast}
+          onCancelar={cerrarCaja}
+          onListo={()=>setChequeoHecho(true)}/>
+      </div>
+    );
+  }
+
+  // -------- POS --------
+  return (
+    <div className="app">
+      {DEMO_MODE && <div className="demo-banner">MODO DEMO — datos de prueba (sin Supabase)</div>}
+      {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+      <div className="header">
+        <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" alt="P"/>
+        <div>
+          <h1>{sede}</h1>
+          <div className="header-sub">{operador} · Caja abierta</div>
+        </div>
+        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowCierre(true)}>Cerrar caja</button>
+      </div>
+
+      <div className="page">
+        <div className="search">
+          <span className="ico">🔍</span>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto o código de barras…"/>
+        </div>
+        <div className="cats">
+          {cats.map(c=><div key={c} className={"cat"+(c===cat?" active":"")} onClick={()=>setCat(c)}>{c}</div>)}
+        </div>
+
+        {visibles.length===0 && <div className="empty">No hay productos en esta categoría.</div>}
+        <div className="grid">
+          {visibles.map(p=>(
+            <div key={p.id} className="prod" onClick={()=>addToCart(p)}>
+              {p.tipo==="token" && <span className="prod-tag tag-token">TOKEN</span>}
+              {p.tipo==="servicio" && <span className="prod-tag tag-serv">SERVICIO</span>}
+              <div className="prod-name">{p.nombre}</div>
+              <div className="prod-price">{p.precio_variable?"Precio variable":fmt(p.precio)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Barra de carrito */}
+      {countCart>0 && (
+        <div className="cartbar">
+          <div className="cartbar-info">
+            <div className="cartbar-count">{countCart} artículo{countCart!==1?"s":""}</div>
+            <div className="cartbar-total">{fmt(totalCart)}</div>
+          </div>
+          <button className="cartbar-btn" onClick={()=>setShowCart(true)}>Ver carrito →</button>
+        </div>
+      )}
+
+      {/* Sheet carrito + cobro */}
+      {showCart && (
+        <CartSheet cart={cart} total={totalCart} busy={busy}
+          onClose={()=>setShowCart(false)} onQty={changeQty} onCobrar={cobrar}/>
+      )}
+
+      {/* Sheet cierre de caja → liquidación */}
+      {showCierre && (
+        <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} showToast={showToast}
+          onClose={()=>setShowCierre(false)} onCerrar={cerrarCaja}/>
+      )}
+
+      {/* Teclado para precio variable */}
+      {precioModal && (
+        <PrecioSheet producto={precioModal} onClose={()=>setPrecioModal(null)} onConfirm={confirmarPrecio}/>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// PANTALLA: CHEQUEO DE INVENTARIO (al iniciar turno)
+// ============================================================
+function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo}){
+  const [counts,setCounts]=useState({});       // id → string
+  const [base,setBase]=useState("");           // valor de base recibida (efectivo del turno anterior)
+  const [q,setQ]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  const set=(id,v)=>setCounts(prev=>({...prev,[id]:v.replace(/[^0-9-]/g,"")}));
+  const contados=productos.filter(p=>counts[p.id]!==undefined && counts[p.id]!=="").length;
+  const total=productos.length;
+  const visibles=productos.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
+  const baseNum=Number(base)||0;
+  const listo = contados===total && base!=="";
+
+  // El operador NO ve el resultado de la comparación (para poder detectar fraudes).
+  // Solo cuenta, se compara en silencio y se envía el reporte a administración.
+  const enviarYAbrir=async()=>{
+    setBusy(true);
+    const descuadres=[];
+    productos.forEach(p=>{
+      const contado=Number(counts[p.id]); const sistema=Number(p.stock)||0;
+      if(contado!==sistema) descuadres.push({nombre:p.nombre, sistema, contado, diferencia:contado-sistema});
+    });
+    try{
+      const items=productos.map(p=>({nombre:p.nombre, sistema:Number(p.stock)||0, contado:Number(counts[p.id])}));
+      await db.enviarChequeo({sede, operador, items, descuadres, base:baseNum});
+    }catch(e){ /* no bloquear la apertura si el envío falla */ }
+    setBusy(false);
+    showToast("Inventario enviado","ok");
+    onListo();
+  };
+
+  const btnTxt = busy ? "Enviando…"
+    : base==="" ? "Ingresa la base recibida"
+    : contados<total ? ("Faltan "+(total-contados)+" por contar")
+    : "Enviar y abrir caja";
+
+  return (
+    <div className="page">
+      <div className="header" style={{borderRadius:14,marginBottom:14}}>
+        <div>
+          <h1>Chequeo de inventario</h1>
+          <div className="header-sub">{sede} · {operador}</div>
+        </div>
+        <div className="header-badge" style={{background:contados===total?"var(--green-d)":"var(--amber-d)",color:contados===total?"var(--green)":"var(--amber)"}}>{contados}/{total}</div>
+      </div>
+
+      <div className="card">
+        <label className="label">💵 Valor de base recibida</label>
+        <input className="input" type="number" inputMode="numeric" placeholder="$0" style={{marginBottom:4}}
+          value={base} onChange={e=>setBase(e.target.value.replace(/[^0-9]/g,""))}/>
+        <div style={{fontSize:12,color:"var(--td)"}}>Efectivo que recibes del turno anterior. {baseNum>0 && <b style={{color:"var(--tb)"}}>{fmt(baseNum)}</b>}</div>
+      </div>
+
+      <p style={{fontSize:13,color:"var(--td)",marginBottom:12}}>Cuenta físicamente cada producto y escribe la cantidad. Debes contar todos para abrir la caja.</p>
+      <div className="search">
+        <span className="ico">🔍</span>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
+      </div>
+      <div className="card" style={{padding:"4px 0"}}>
+        {visibles.map(p=>(
+          <div key={p.id} className="citem" style={{padding:"10px 14px"}}>
+            <div style={{flex:1}}><div className="citem-name">{p.nombre}</div></div>
+            <input className="input" type="number" inputMode="numeric" style={{margin:0,width:90,textAlign:"center"}}
+              placeholder="—" value={counts[p.id]??""} onChange={e=>set(p.id,e.target.value)}/>
+          </div>
+        ))}
+      </div>
+
+      <button className="btn-primary" style={{marginTop:14}} disabled={!listo||busy} onClick={enviarYAbrir}>{btnTxt}</button>
+      <button className="btn-secondary" style={{marginTop:10}} onClick={onCancelar}>Cancelar y salir</button>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: TECLADO PARA PRECIO VARIABLE
+// ============================================================
+function PrecioSheet({producto,onClose,onConfirm}){
+  const [val,setVal]=useState("");
+  const tecla=d=>setVal(prev=>(prev+d).replace(/^0+/,"").slice(0,9));
+  const borrar=()=>setVal(prev=>prev.slice(0,-1));
+  const monto=Number(val)||0;
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t" style={{justifyContent:"center"}}>{producto.nombre}</div>
+        <div style={{textAlign:"center",fontSize:36,fontWeight:800,color:monto>0?"var(--tb)":"var(--td)",margin:"4px 0 18px"}}>{fmt(monto)}</div>
+        <div className="pinpad">
+          {["1","2","3","4","5","6","7","8","9"].map(d=>(
+            <div key={d} className="pin-key" onClick={()=>tecla(d)}>{d}</div>
+          ))}
+          <div className="pin-key back" onClick={borrar}>⌫</div>
+          <div className="pin-key" onClick={()=>tecla("0")}>0</div>
+          <div className="pin-key" onClick={()=>tecla("000")}>000</div>
+        </div>
+        <button className="btn-primary" style={{marginTop:16}} disabled={monto<=0} onClick={()=>onConfirm(monto)}>
+          Agregar {monto>0?fmt(monto):""}
+        </button>
+        <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: CIERRE DE CAJA → LIQUIDACIÓN (formato del recaudo)
+// Auto: sede, operador, Nº recibo, valor total, QR/tarjeta, efectivo esperado.
+// Manual: control de tokens, devoluciones $, observaciones.
+// ============================================================
+function CierreSheet({ventas,sede,operador,showToast,onClose,onCerrar}){
+  // Nº de recibo = el de la última venta del turno (el mismo que se ve en el back office)
+  const numRecibo = ventas.length ? (ventas[ventas.length-1].recibo || '—') : '—';
+  // manuales (control de tokens + devoluciones + observaciones)
+  const [tokensBase,setTokensBase]=useState("");
+  const [tokensVendidos,setTokensVendidos]=useState("");
+  const [devTokens,setDevTokens]=useState("");
+  const [tokensMembresia,setTokensMembresia]=useState("");
+  const [devoluciones,setDevoluciones]=useState("");
+  const [observaciones,setObservaciones]=useState("");
+  const [sending,setSending]=useState(false);
+
+  // automáticos desde las ventas del turno
+  const productosVal=ventas.reduce((s,v)=>s+(v.productos||0),0);  // todo lo vendido que NO son tokens
+  const tokensVal=ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens
+  const valor=productosVal+tokensVal;                              // total
+  const qr=ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
+  const efectivo=ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
+  const dev=Number(devoluciones)||0;
+  const efectivoEsperado=efectivo-dev;
+  const tokensRestantes=(Number(tokensBase)||0)-(Number(tokensVendidos)||0)-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
+  const listo=tokensBase!=="" && tokensVendidos!=="";
+
+  const payload=()=>({
+    sede, operador, numRecibo,
+    tokensBase:Number(tokensBase)||0, tokensVendidos:Number(tokensVendidos)||0,
+    devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
+    valor, valorProductos:productosVal, valorTokens:tokensVal,
+    qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado, observaciones,
+  });
+
+  const mensajeWA=()=>{
+    const p=payload();
+    return '*Liquidación Panzer — '+sede+'*\n'+
+      'Operador: '+operador+'\n'+
+      'Recibo: '+numRecibo+'\n'+
+      'Fecha: '+new Date().toLocaleString('es-CO')+'\n'+
+      '———\n'+
+      'Productos: '+fmt(productosVal)+'\n'+
+      'Tokens: '+fmt(tokensVal)+'\n'+
+      'Total vendido: '+fmt(valor)+'\n'+
+      'QR/Tarjeta: '+fmt(qr)+'\n'+
+      'Efectivo: '+fmt(efectivo)+'\n'+
+      '———\n'+
+      'Tokens vendidos: '+p.tokensVendidos+' · Dev: '+p.devTokens+' · Membresía: '+p.tokensMembresia+'\n'+
+      'Tokens restantes: '+p.tokensRestantes+'\n'+
+      'Devoluciones: '+fmt(dev)+'\n'+
+      '*Efectivo esperado: '+fmt(efectivoEsperado)+'*'+
+      (observaciones?('\nObs: '+observaciones):'');
+  };
+  const enviarWhatsApp=()=>{
+    // Sin número: abre WhatsApp y el operador elige el chat/grupo destino.
+    const url='https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA());
+    window.open(url,'_blank');
+  };
+
+  const registrarYCerrar=async()=>{
+    setSending(true);
+    try{
+      await db.enviarLiquidacion(payload());
+      showToast("Liquidación registrada","ok");
+      onCerrar();
+    }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setSending(false); }
+  };
+
+  const tokenInput=(lbl,val,setter,extra)=>(
+    <div style={{flex:1}}>
+      <label className="label">{lbl}</label>
+      <input className="input" type="number" inputMode="numeric" placeholder="0" value={val} onChange={e=>setter(e.target.value.replace(/[^0-9]/g,""))} style={extra}/>
+    </div>
+  );
+  const row=(l,v,color,bold)=>(<div className="result-row"><span className="result-label" style={bold?{fontWeight:800,color:"var(--tb)"}:null}>{l}</span><span className="result-value" style={color?{color}:null}>{fmt(v)}</span></div>);
+
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🧾 Liquidación de turno</div>
+        <div className="header-sub" style={{marginBottom:6}}>{sede} · {operador} · Recibo {numRecibo}</div>
+
+        {/* Desglose automático */}
+        <div className="result-row"><span className="result-label">Nº de ventas</span><span className="result-value">{ventas.length}</span></div>
+        {row("Productos", productosVal)}
+        {row("Tokens", tokensVal, "var(--amber)")}
+        {row("Total vendido", valor, "var(--tb)", true)}
+        {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
+        {row("Efectivo", efectivo, "var(--green)")}
+
+        {/* Tokens (manual) */}
+        <div className="card-t" style={{fontSize:14,marginTop:14}}>🪙 Control de tokens</div>
+        <div style={{display:"flex",gap:10}}>
+          {tokenInput("Base", tokensBase, setTokensBase)}
+          {tokenInput("Vendidos", tokensVendidos, setTokensVendidos)}
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          {tokenInput("Dev. tokens", devTokens, setDevTokens)}
+          {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
+        </div>
+        <div style={{fontSize:12,color:"var(--amber)",fontWeight:700,marginBottom:10}}>🪙 Tokens restantes: {tokensRestantes}</div>
+
+        {/* Devoluciones + observaciones (manual) */}
+        <label className="label">Devoluciones $</label>
+        <input className="input" type="number" inputMode="numeric" placeholder="$0" value={devoluciones} onChange={e=>setDevoluciones(e.target.value.replace(/[^0-9]/g,""))}/>
+        <label className="label">Observaciones</label>
+        <textarea className="input" style={{minHeight:60,resize:"vertical"}} placeholder="Notas del turno…" value={observaciones} onChange={e=>setObservaciones(e.target.value)}/>
+
+        {/* Efectivo esperado */}
+        <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:4}}>
+          <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Efectivo esperado</span>
+          <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>
+        </div>
+
+        {/* WhatsApp: abre el selector de chat para enviar al grupo */}
+        <button className="btn-secondary" style={{marginTop:14,background:"#25D366",color:"#fff",border:"none"}} onClick={enviarWhatsApp}>📱 Enviar por WhatsApp (elegir grupo)</button>
+
+        <button className="btn-primary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
+          {sending?"Registrando…":(listo?"Registrar liquidación y cerrar caja":"Completa el control de tokens")}
+        </button>
+        <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Seguir vendiendo</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: CARRITO + COBRO
+// ============================================================
+function CartSheet({cart,total,busy,onClose,onQty,onCobrar}){
+  const [paso,setPaso]=useState("carrito"); // carrito | pago
+  const [metodo,setMetodo]=useState("efectivo"); // efectivo | qr | tarjeta | mixto
+  const [ef,setEf]=useState(""); const [qr,setQr]=useState(""); const [tj,setTj]=useState("");
+
+  const pago = ()=>{
+    if(metodo==="efectivo") return {efectivo:total,qr:0,tarjeta:0};
+    if(metodo==="qr") return {efectivo:0,qr:total,tarjeta:0};
+    if(metodo==="tarjeta") return {efectivo:0,qr:0,tarjeta:total};
+    return {efectivo:Number(ef)||0,qr:Number(qr)||0,tarjeta:Number(tj)||0};
+  };
+  const p=pago();
+  const sumaMixto=p.efectivo+p.qr+p.tarjeta;
+  const mixtoOk = metodo!=="mixto" || sumaMixto===total;
+
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        {paso==="carrito" && (
+          <div>
+            <div className="card-t">🛒 Carrito</div>
+            {cart.map(c=>(
+              <div key={c.key||c.producto_id} className="citem">
+                <div style={{flex:1}}>
+                  <div className="citem-name">{c.nombre}</div>
+                  <div className="citem-sub">{fmt(c.precio)} c/u</div>
+                </div>
+                <div className="qty">
+                  <button onClick={()=>onQty(c.key||c.producto_id,-1)}>−</button>
+                  <span>{c.cantidad}</span>
+                  <button onClick={()=>onQty(c.key||c.producto_id,1)}>+</button>
+                </div>
+                <div style={{minWidth:74,textAlign:"right",fontWeight:800,color:"var(--tb)"}}>{fmt(c.precio*c.cantidad)}</div>
+              </div>
+            ))}
+            <div className="result-row" style={{marginTop:8,borderTop:"1px solid var(--bd)",borderBottom:"none"}}>
+              <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Total</span>
+              <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(total)}</span>
+            </div>
+            <button className="btn-primary" style={{marginTop:14}} onClick={()=>setPaso("pago")}>Cobrar →</button>
+            <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Seguir vendiendo</button>
+          </div>
+        )}
+        {paso==="pago" && (
+          <div>
+            <div className="card-t">💵 Método de pago</div>
+            <div className="pay-opts">
+              {[["efectivo","Efectivo"],["qr","QR/Transf."],["tarjeta","Tarjeta"]].map(([k,l])=>(
+                <div key={k} className={"pay-opt"+(metodo===k?" active":"")} onClick={()=>setMetodo(k)}>{l}</div>
+              ))}
+            </div>
+            <div className={"pay-opt"+(metodo==="mixto"?" active":"")} style={{marginBottom:12}} onClick={()=>setMetodo("mixto")}>Pago mixto</div>
+            {metodo==="mixto" && (
+              <div>
+                <label className="label">Efectivo</label>
+                <input className="input" type="number" inputMode="numeric" value={ef} onChange={e=>setEf(e.target.value)} placeholder="$0"/>
+                <label className="label">QR / Transferencia</label>
+                <input className="input" type="number" inputMode="numeric" value={qr} onChange={e=>setQr(e.target.value)} placeholder="$0"/>
+                <label className="label">Tarjeta</label>
+                <input className="input" type="number" inputMode="numeric" value={tj} onChange={e=>setTj(e.target.value)} placeholder="$0"/>
+                <div className="result-row">
+                  <span className="result-label">Suma</span>
+                  <span className="result-value" style={{color:sumaMixto===total?"var(--green)":"var(--red)"}}>{fmt(sumaMixto)} / {fmt(total)}</span>
+                </div>
+              </div>
+            )}
+            <div className="result-row" style={{marginTop:6}}>
+              <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>A cobrar</span>
+              <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(total)}</span>
+            </div>
+            <button className="btn-primary" style={{marginTop:14}} disabled={busy||!mixtoOk}
+              onClick={()=>onCobrar(p)}>
+              {busy?"Registrando...":"✅ Confirmar venta"}
+            </button>
+            <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setPaso("carrito")}>← Volver al carrito</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+setTimeout(()=>document.getElementById('loading').classList.add('hide'),400);
+  </script>
+</body>
+</html>

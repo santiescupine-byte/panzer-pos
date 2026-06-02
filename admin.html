@@ -157,6 +157,8 @@ const CAT = (typeof window!=="undefined" && window.PANZER_CATALOGO) ? window.PAN
 
 // Mínimos de stock por (sede|producto) para alertas — solo demo (en Supabase viven en inventario.stock_minimo)
 const DEMO_MIN = {};
+// Disponibilidad por sede en demo (producto_id → {sede: bool}) — en Supabase vive en producto_sede
+const DEMO_DISP = {};
 
 let DEMO = {
   sedes: [
@@ -333,17 +335,21 @@ const db = {
   },
   // ---- PRODUCTOS ----
   async listProductos(){
-    if(DEMO_MODE) return DEMO.productos.map(p=>({...p,stock:{...p.stock}}));
+    if(DEMO_MODE) return DEMO.productos.map(p=>({...p,stock:{...p.stock},dispo:{...(DEMO_DISP[p.id]||{})}}));
     const {data:prods,error}=await sb.from('productos').select('*').order('orden');
     if(error) throw error;
     const {data:inv}=await sb.from('inventario').select('producto_id,sede,cantidad');
     const byProd={}; (inv||[]).forEach(i=>{ (byProd[i.producto_id]=byProd[i.producto_id]||{})[i.sede]=i.cantidad; });
-    return prods.map(p=>({...p, stock:byProd[p.id]||{}}));
+    const {data:ps}=await sb.from('producto_sede').select('producto_id,sede,disponible');
+    const dispoMap={}; (ps||[]).forEach(r=>{ (dispoMap[r.producto_id]=dispoMap[r.producto_id]||{})[r.sede]=r.disponible; });
+    return prods.map(p=>({...p, stock:byProd[p.id]||{}, dispo:dispoMap[p.id]||{}}));
   },
   async saveProducto(p){
     if(DEMO_MODE){
+      const pid=p.id||uid();
       if(p.id && DEMO.productos.some(x=>x.id===p.id)){ DEMO.productos=DEMO.productos.map(x=>x.id===p.id?{...x,...p,stock:{...p.stock}}:x); }
-      else { DEMO.productos.push({...p,id:p.id||uid(),stock:{...p.stock}}); }
+      else { DEMO.productos.push({...p,id:pid,stock:{...p.stock}}); }
+      DEMO_DISP[pid]={...(p.dispo||{})};
       return;
     }
     const row={nombre:p.nombre,tipo:p.tipo,categoria:p.categoria,precio:p.precio,costo:p.costo,
@@ -355,6 +361,11 @@ const db = {
     if(p.controla_stock){
       const rows=Object.entries(p.stock||{}).filter(([s,v])=>v!=null&&v!=="").map(([sede,cant])=>({producto_id:prodId,sede,cantidad:Number(cant)}));
       if(rows.length){ const {error}=await sb.from('inventario').upsert(rows,{onConflict:'producto_id,sede'}); if(error) throw error; }
+    }
+    // disponibilidad por sede (una fila por sede con el valor del checkbox)
+    if(p.dispo){
+      const drows=Object.entries(p.dispo).map(([sede,disp])=>({producto_id:prodId,sede,disponible:!!disp}));
+      if(drows.length){ const {error}=await sb.from('producto_sede').upsert(drows,{onConflict:'producto_id,sede'}); if(error) throw error; }
     }
   },
   async deleteProducto(id){
@@ -629,6 +640,8 @@ function ProductoModal({p,cats,sedes,onClose,onSave}){
   const [f,setF]=useState(p);
   const set=(k,v)=>setF(prev=>({...prev,[k]:v}));
   const setStock=(sede,v)=>setF(prev=>({...prev,stock:{...prev.stock,[sede]:v===""?null:Number(v)}}));
+  const isDispo=s=>(f.dispo?.[s])!==false;   // disponible por defecto (si no hay dato)
+  const setDispo=(sede,v)=>setF(prev=>({...prev,dispo:{...(prev.dispo||{}),[sede]:v}}));
   const valido=f.nombre.trim().length>0;
   return (
     <div className="modal-bg" onClick={onClose}>
@@ -669,17 +682,19 @@ function ProductoModal({p,cats,sedes,onClose,onSave}){
         <label className="check"><input type="checkbox" checked={!!f.iva} onChange={e=>set("iva",e.target.checked)}/> Aplica IVA (19%)</label>
         <label className="check"><input type="checkbox" checked={!!f.controla_stock} onChange={e=>set("controla_stock",e.target.checked)}/> Controla inventario</label>
         <label className="check"><input type="checkbox" checked={!!f.activo} onChange={e=>set("activo",e.target.checked)}/> Activo (visible en el POS)</label>
-        {f.controla_stock && (
-          <div style={{marginTop:10}}>
-            <label className="label">Stock por sede</label>
-            {sedes.map(s=>(
-              <div key={s.id} className="stockgrid">
-                <span style={{fontSize:14}}>{s.nombre}{s.es_bodega&&<span className="pill pill-bodega" style={{marginLeft:6}}>bodega</span>}</span>
-                <input className="input" type="number" value={f.stock?.[s.nombre]??""} placeholder="0" onChange={e=>setStock(s.nombre,e.target.value)}/>
-              </div>
-            ))}
-          </div>
-        )}
+        <div style={{marginTop:10}}>
+          <label className="label">Disponibilidad por sede{f.controla_stock?" y stock":""}</label>
+          <div className="muted" style={{marginTop:-6,marginBottom:8}}>Marca en qué tiendas se vende este producto.{f.controla_stock?" Y la cantidad en stock de cada una.":""}</div>
+          {sedes.map(s=>(
+            <div key={s.id} className="stockgrid" style={{gridTemplateColumns:f.controla_stock?"1fr 90px":"1fr"}}>
+              <label className="check" style={{padding:"4px 0"}}>
+                <input type="checkbox" checked={isDispo(s.nombre)} onChange={e=>setDispo(s.nombre,e.target.checked)}/>
+                {s.nombre}{s.es_bodega&&<span className="pill pill-bodega" style={{marginLeft:6}}>bodega</span>}
+              </label>
+              {f.controla_stock && <input className="input" type="number" value={f.stock?.[s.nombre]??""} placeholder="0" disabled={!isDispo(s.nombre)} onChange={e=>setStock(s.nombre,e.target.value)}/>}
+            </div>
+          ))}
+        </div>
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
           <button className="btn btn-amber" disabled={!valido} onClick={()=>onSave(f)}>Guardar</button>

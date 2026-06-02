@@ -162,6 +162,8 @@ const CAT = (typeof window!=="undefined" && window.PANZER_CATALOGO) ? window.PAN
 const DEMO_MIN = {};
 // Disponibilidad por sede en demo (producto_id → {sede: bool}) — en Supabase vive en producto_sede
 const DEMO_DISP = {};
+// Componentes de combos en demo (producto_id → [{componente_id,cantidad}]) — en Supabase vive en producto_componentes
+const DEMO_COMP = {};
 
 let DEMO = {
   sedes: [
@@ -338,14 +340,16 @@ const db = {
   },
   // ---- PRODUCTOS ----
   async listProductos(){
-    if(DEMO_MODE) return DEMO.productos.map(p=>({...p,stock:{...p.stock},dispo:{...(DEMO_DISP[p.id]||{})}}));
+    if(DEMO_MODE) return DEMO.productos.map(p=>({...p,stock:{...p.stock},dispo:{...(DEMO_DISP[p.id]||{})},componentes:[...(DEMO_COMP[p.id]||[])]}));
     const {data:prods,error}=await sb.from('productos').select('*').order('orden');
     if(error) throw error;
     const {data:inv}=await sb.from('inventario').select('producto_id,sede,cantidad');
     const byProd={}; (inv||[]).forEach(i=>{ (byProd[i.producto_id]=byProd[i.producto_id]||{})[i.sede]=i.cantidad; });
     const {data:ps}=await sb.from('producto_sede').select('producto_id,sede,disponible');
     const dispoMap={}; (ps||[]).forEach(r=>{ (dispoMap[r.producto_id]=dispoMap[r.producto_id]||{})[r.sede]=r.disponible; });
-    return prods.map(p=>({...p, stock:byProd[p.id]||{}, dispo:dispoMap[p.id]||{}}));
+    const {data:comps}=await sb.from('producto_componentes').select('combo_id,componente_id,cantidad');
+    const compMap={}; (comps||[]).forEach(c=>{ (compMap[c.combo_id]=compMap[c.combo_id]||[]).push({componente_id:c.componente_id,cantidad:Number(c.cantidad)}); });
+    return prods.map(p=>({...p, stock:byProd[p.id]||{}, dispo:dispoMap[p.id]||{}, componentes:compMap[p.id]||[]}));
   },
   async saveProducto(p){
     if(DEMO_MODE){
@@ -353,6 +357,7 @@ const db = {
       if(p.id && DEMO.productos.some(x=>x.id===p.id)){ DEMO.productos=DEMO.productos.map(x=>x.id===p.id?{...x,...p,stock:{...p.stock}}:x); }
       else { DEMO.productos.push({...p,id:pid,stock:{...p.stock}}); }
       DEMO_DISP[pid]={...(p.dispo||{})};
+      DEMO_COMP[pid]=[...(p.componentes||[])];
       return;
     }
     const row={nombre:p.nombre,tipo:p.tipo,categoria:p.categoria,precio:p.precio,costo:p.costo,
@@ -370,6 +375,10 @@ const db = {
       const drows=Object.entries(p.dispo).map(([sede,disp])=>({producto_id:prodId,sede,disponible:!!disp}));
       if(drows.length){ const {error}=await sb.from('producto_sede').upsert(drows,{onConflict:'producto_id,sede'}); if(error) throw error; }
     }
+    // componentes (combo): reemplazar la lista completa
+    await sb.from('producto_componentes').delete().eq('combo_id',prodId);
+    const crows=(p.componentes||[]).filter(c=>c.componente_id).map(c=>({combo_id:prodId,componente_id:c.componente_id,cantidad:Number(c.cantidad)||1}));
+    if(crows.length){ const {error}=await sb.from('producto_componentes').insert(crows); if(error) throw error; }
   },
   async deleteProducto(id){
     if(DEMO_MODE){ DEMO.productos=DEMO.productos.filter(x=>x.id!==id); return; }
@@ -634,17 +643,24 @@ function Productos({showToast}){
           </tbody>
         </table>
       </div>
-      {editing && <ProductoModal p={editing} cats={cats} sedes={sedes} onClose={()=>setEditing(null)} onSave={guardar}/>}
+      {editing && <ProductoModal p={editing} cats={cats} sedes={sedes} allProds={prods} onClose={()=>setEditing(null)} onSave={guardar}/>}
     </div>
   );
 }
 
-function ProductoModal({p,cats,sedes,onClose,onSave}){
+function ProductoModal({p,cats,sedes,allProds,onClose,onSave}){
   const [f,setF]=useState(p);
   const set=(k,v)=>setF(prev=>({...prev,[k]:v}));
   const setStock=(sede,v)=>setF(prev=>({...prev,stock:{...prev.stock,[sede]:v===""?null:Number(v)}}));
   const isDispo=s=>(f.dispo?.[s])!==false;   // disponible por defecto (si no hay dato)
   const setDispo=(sede,v)=>setF(prev=>({...prev,dispo:{...(prev.dispo||{}),[sede]:v}}));
+  // ---- artículo compuesto (combo) ----
+  const [esCompuesto,setEsCompuesto]=useState((p.componentes||[]).length>0);
+  const comps=f.componentes||[];
+  const addComp=()=>setF(prev=>({...prev,componentes:[...(prev.componentes||[]),{componente_id:"",cantidad:1}]}));
+  const setComp=(i,k,v)=>setF(prev=>{const arr=[...(prev.componentes||[])];arr[i]={...arr[i],[k]:v};return {...prev,componentes:arr};});
+  const delComp=i=>setF(prev=>({...prev,componentes:(prev.componentes||[]).filter((_,j)=>j!==i)}));
+  const toggleCompuesto=on=>{ setEsCompuesto(on); if(!on){ setF(prev=>({...prev,componentes:[]})); } else if(!(f.componentes||[]).length){ addComp(); } };
   const valido=f.nombre.trim().length>0;
   return (
     <div className="modal-bg" onClick={onClose}>
@@ -698,6 +714,25 @@ function ProductoModal({p,cats,sedes,onClose,onSave}){
             </div>
           ))}
         </div>
+
+        <label className="check" style={{marginTop:12}}><input type="checkbox" checked={esCompuesto} onChange={e=>toggleCompuesto(e.target.checked)}/> Artículo compuesto (combo)</label>
+        {esCompuesto && (
+          <div style={{marginTop:4}}>
+            <div className="muted" style={{marginBottom:8}}>Al vender este combo se descuentan del inventario sus componentes (no el combo).</div>
+            {comps.map((c,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+                <select className="select" style={{margin:0,flex:1}} value={c.componente_id} onChange={e=>setComp(i,"componente_id",e.target.value)}>
+                  <option value="">Componente…</option>
+                  {(allProds||[]).filter(x=>x.id!==f.id).map(x=><option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+                <input className="input" type="number" style={{margin:0,width:70,textAlign:"center"}} value={c.cantidad} onChange={e=>setComp(i,"cantidad",Number(e.target.value)||1)}/>
+                <button className="btn btn-danger btn-sm" onClick={()=>delComp(i)}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addComp}>+ Agregar componente</button>
+          </div>
+        )}
+
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
           <button className="btn btn-amber" disabled={!valido} onClick={()=>onSave(f)}>Guardar</button>

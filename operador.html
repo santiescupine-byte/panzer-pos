@@ -316,7 +316,8 @@ const db = {
     // disponibilidad por sede: ocultar los marcados como NO disponibles en esta sede
     const { data:ps } = await sb.from('producto_sede').select('producto_id,disponible').eq('sede',sede).eq('disponible',false);
     const ocultos = new Set((ps||[]).map(r=>r.producto_id));
-    return prods.filter(p=>!ocultos.has(p.id)).map(p=>({
+    // excluir productos que NO se venden en el POS (ej. producción para otras industrias)
+    return prods.filter(p=>!ocultos.has(p.id) && p.vende_pos!==false).map(p=>({
       ...p,
       stock: p.controla_stock ? (invMap[p.id]?.cantidad ?? 0) : null,
       stock_minimo: invMap[p.id]?.stock_minimo ?? 0,

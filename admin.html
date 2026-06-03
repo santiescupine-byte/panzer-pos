@@ -165,6 +165,8 @@ const CAT = (typeof window!=="undefined" && window.PANZER_CATALOGO) ? window.PAN
 const DEMO_MIN = {};
 // Disponibilidad por sede en demo (producto_id → {sede: bool}) — en Supabase vive en producto_sede
 const DEMO_DISP = {};
+// Stock ideal por (sede|producto) — solo demo (en Supabase vive en inventario.stock_ideal)
+const DEMO_IDEAL = {};
 // Componentes de combos en demo (producto_id → [{componente_id,cantidad}]) — en Supabase vive en producto_componentes
 const DEMO_COMP = {};
 
@@ -196,8 +198,11 @@ let DEMO = {
   ],
   recetas: {},        // producto_id → [{insumo_id, cantidad}]
   producciones: [],   // historial demo
+  equipos: [],        // mantenimiento demo
+  mant: [],           // reportes de mantenimiento demo
   empleados: [
     {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
+    {id:"es", nombre:"Supervisor", rol:"supervisor", activo:true, pin:"7777", sedes:[]},
     {id:"e1", nombre:"Johan",   rol:"cajero",  activo:true, pin:"1234", sedes:["Toberín"]},
     {id:"e2", nombre:"Camilo",  rol:"cajero",  activo:true, pin:"5678", sedes:["San Felipe"]},
     {id:"e3", nombre:"Andrea",  rol:"tesorero",activo:true, pin:"",     sedes:["San Felipe","Bello"]},
@@ -416,6 +421,36 @@ const db = {
     const {data,error}=await sb.from('producciones').select('id,producto_nombre,cantidad,sede,costo_total,operador,created_at').order('created_at',{ascending:false}).limit(200);
     if(error) return []; return data||[];
   },
+  // ---- MANTENIMIENTO ----
+  async listEquipos(sede){
+    if(DEMO_MODE) return (DEMO.equipos||[]).filter(e=>!sede||e.sede===sede);
+    let q=sb.from('equipos').select('*').eq('activo',true).order('nombre'); if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async saveEquipo(e){
+    if(DEMO_MODE){ DEMO.equipos=DEMO.equipos||[]; if(e.id&&DEMO.equipos.some(x=>x.id===e.id)){DEMO.equipos=DEMO.equipos.map(x=>x.id===e.id?{...x,...e}:x);} else {DEMO.equipos.push({...e,id:e.id||uid(),estado:e.estado||'operativa'});} return; }
+    const row={sede:e.sede,nombre:e.nombre,activo:e.activo!==false};
+    if(e.id){ const {error}=await sb.from('equipos').update(row).eq('id',e.id); if(error) throw error; }
+    else { const {error}=await sb.from('equipos').insert({...row,estado:'operativa'}); if(error) throw error; }
+  },
+  async deleteEquipo(id){
+    if(DEMO_MODE){ DEMO.equipos=(DEMO.equipos||[]).filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('equipos').delete().eq('id',id); if(error) throw error;
+  },
+  async mantAbiertos(sede){
+    if(DEMO_MODE) return (DEMO.mant||[]).filter(m=>m.estado==='abierto'&&(!sede||m.sede===sede));
+    let q=sb.from('mantenimientos').select('*').eq('estado','abierto'); if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async repararEquipo(equipoId, supervisor, nota){
+    if(DEMO_MODE){ const m=(DEMO.mant||[]).find(x=>x.equipo_id===equipoId&&x.estado==='abierto'); if(m){m.estado='cerrado';m.reparado_at=new Date().toISOString();m.supervisor=supervisor;m.nota_reparacion=nota;} const e=(DEMO.equipos||[]).find(x=>x.id===equipoId); if(e)e.estado='operativa'; return; }
+    const {error}=await sb.rpc('reparar_equipo',{p_equipo_id:equipoId,p_supervisor:supervisor||null,p_nota:nota||null}); if(error) throw error;
+  },
+  async listMantenimientos(sede){
+    if(DEMO_MODE) return (DEMO.mant||[]).filter(m=>!sede||m.sede===sede);
+    let q=sb.from('mantenimientos').select('*').order('reportado_at',{ascending:false}).limit(200); if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
   // ---- EMPLEADOS ----
   async listEmpleados(){
     if(DEMO_MODE) return DEMO.empleados.map(e=>({...e,sedes:[...e.sedes]}));
@@ -535,17 +570,22 @@ const db = {
         id:p.id, nombre:p.nombre, categoria:p.categoria,
         stock:Number(p.stock?.[sede])||0,
         minimo:Number(DEMO_MIN[sede+'|'+p.id])||0,
+        ideal:Number(DEMO_IDEAL[sede+'|'+p.id])||0,
       })).sort((a,b)=>a.nombre.localeCompare(b.nombre));
     }
     const {data:prods,error}=await sb.from('productos').select('id,nombre,categoria,controla_stock').eq('controla_stock',true).eq('activo',true);
     if(error) throw error;
-    const {data:inv}=await sb.from('inventario').select('producto_id,cantidad,stock_minimo').eq('sede',sede);
+    const {data:inv}=await sb.from('inventario').select('producto_id,cantidad,stock_minimo,stock_ideal').eq('sede',sede);
     const m={}; (inv||[]).forEach(i=>m[i.producto_id]=i);
-    return prods.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+    return prods.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0,ideal:Number(m[p.id]?.stock_ideal)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
   },
   async setMinimo(producto_id, sede, minimo){
     if(DEMO_MODE){ DEMO_MIN[sede+'|'+producto_id]=minimo; return; }
     const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_minimo:minimo},{onConflict:'producto_id,sede'}); if(error) throw error;
+  },
+  async setIdeal(producto_id, sede, ideal){
+    if(DEMO_MODE){ DEMO_IDEAL[sede+'|'+producto_id]=ideal; return; }
+    const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_ideal:ideal},{onConflict:'producto_id,sede'}); if(error) throw error;
   },
   async transferirStock(producto_id, origen, destino, cantidad){
     if(DEMO_MODE){
@@ -611,8 +651,8 @@ function App(){
     try{
       const u=await db.loginAdmin(p);
       if(!u){ showToast("PIN incorrecto","err"); setPin(""); }
-      else if(u.rol!=='admin'){ showToast("Acceso solo para administradores","err"); setPin(""); }
-      else { setAuth(u); setPin(""); }
+      else if(u.rol!=='admin' && u.rol!=='supervisor'){ showToast("Sin acceso al back office","err"); setPin(""); }
+      else { setAuth(u); setTab(u.rol==='supervisor'?'mantenimiento':'informes'); setPin(""); }
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -624,7 +664,7 @@ function App(){
     const borrar=()=>setPin(prev=>prev.slice(0,-1));
     return (
       <div className="app">
-        {DEMO_MODE && <div className="demo-banner">MODO DEMO — PIN admin de prueba: 6262</div>}
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — admin: 6262 · supervisor: 7777</div>}
         {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
         <div className="login-wrap">
           <div style={{textAlign:"center",marginBottom:18}}>
@@ -656,12 +696,15 @@ function App(){
         <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" alt="P"/>
         <div>
           <h1>Back Office</h1>
-          <div className="header-sub">{auth.nombre} · Administración</div>
+          <div className="header-sub">{auth.nombre} · {auth.rol==='supervisor'?'Supervisor de mantenimiento':'Administración'}</div>
         </div>
         <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={salir}>Salir</button>
       </div>
       <div className="tabs">
-        {[["informes","Informes"],["inventario","Inventario"],["produccion","Producción"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["descuentos","Descuentos"],["sedes","Sedes"],["empleados","Empleados"]].map(([k,l])=>(
+        {(auth.rol==='supervisor'
+          ? [["mantenimiento","Mantenimiento"]]
+          : [["informes","Informes"],["inventario","Inventario"],["produccion","Producción"],["mantenimiento","Mantenimiento"],["chequeos","Chequeos"],["productos","Productos"],["categorias","Categorías"],["descuentos","Descuentos"],["sedes","Sedes"],["empleados","Empleados"]]
+        ).map(([k,l])=>(
           <div key={k} className={"tab"+(tab===k?" active":"")} onClick={()=>setTab(k)}>{l}</div>
         ))}
       </div>
@@ -669,6 +712,7 @@ function App(){
         {tab==="informes"   && <Informes showToast={showToast}/>}
         {tab==="inventario" && <Inventario showToast={showToast}/>}
         {tab==="produccion" && <Produccion showToast={showToast}/>}
+        {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
         {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
         {tab==="productos"  && <Productos showToast={showToast}/>}
         {tab==="categorias" && <Categorias showToast={showToast}/>}
@@ -1070,8 +1114,10 @@ function Empleados({showToast}){
               <option value="cajero">Cajero (operador)</option>
               <option value="tesorero">Tesorero</option>
               <option value="gerente">Gerente</option>
+              <option value="supervisor">Supervisor de mantenimiento</option>
               <option value="admin">Administrador</option>
             </select>
+            <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Back office: <b>Administrador</b> = todo · <b>Supervisor de mantenimiento</b> = solo pestaña Mantenimiento · los demás roles no entran al back office.</div>
             <label className="label">PIN de acceso (4 dígitos)</label>
             <input className="input" type="text" inputMode="numeric" maxLength={4} placeholder="ej: 1234"
               value={editing.pin||""}
@@ -1218,6 +1264,30 @@ function Inventario({showToast}){
     try{ await db.setMinimo(r.id,sede,m); setInv(prev=>prev.map(x=>x.id===r.id?{...x,minimo:m}:x)); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  const guardarIdeal=async(r,val)=>{
+    const v=Math.max(0,Number(val)||0);
+    try{ await db.setIdeal(r.id,sede,v); setInv(prev=>prev.map(x=>x.id===r.id?{...x,ideal:v}:x)); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const faltante=r=> (Number(r.ideal)>0 && Number(r.stock)<Number(r.ideal)) ? (Number(r.ideal)-Number(r.stock)) : 0;
+  const reportePreparacion=()=>{
+    const list=(inv||[]).filter(r=>Number(r.ideal)>0 && faltante(r)>0).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+    const fechaTxt=new Date().toLocaleString('es-CO');
+    const filas=list.map(r=>'<tr><td>'+r.nombre+'</td><td style="text-align:center">'+Number(r.stock)+'</td><td style="text-align:center">'+Number(r.ideal)+'</td><td style="text-align:center;font-weight:bold">'+faltante(r)+'</td></tr>').join('');
+    const totalUds=list.reduce((s,r)=>s+faltante(r),0);
+    const html='<!DOCTYPE html><html><head><meta charset="utf-8"><title>Preparación '+sede+'</title>'+
+      '<style>body{font-family:Arial,sans-serif;color:#222;padding:24px} h1{margin:0 0 2px;font-size:20px} .sub{color:#666;margin:0 0 16px}'+
+      'table{border-collapse:collapse;width:100%;font-size:14px} th{background:#f3f4f6;text-align:left;padding:8px 10px;border-bottom:2px solid #ddd} td{padding:7px 10px;border-bottom:1px solid #eee}'+
+      '.tot{margin-top:14px;font-weight:bold} @media print{button{display:none}}</style></head><body>'+
+      '<h1>Preparación de transferencia — '+sede+'</h1>'+
+      '<p class="sub">Generado: '+fechaTxt+' · Productos a surtir: '+list.length+'</p>'+
+      (list.length? '<table><tr><th>Producto</th><th style="text-align:center">Stock actual</th><th style="text-align:center">Ideal</th><th style="text-align:center">Transferir</th></tr>'+filas+'</table><p class="tot">Total unidades a transferir: '+totalUds+'</p>'
+        : '<p>Todo está en su nivel ideal. No hay que transferir nada. 🎉</p>')+
+      '<button onclick="window.print()" style="margin-top:18px;padding:10px 16px;font-size:14px;cursor:pointer">🖨 Imprimir</button>'+
+      '</body></html>';
+    const w=window.open('','_blank'); if(!w){ showToast("Permite las ventanas emergentes para ver el reporte","err"); return; }
+    w.document.write(html); w.document.close();
+  };
   const abrirTransfer=async()=>{
     if(!bodega) return;
     let bodegaStock={};
@@ -1262,6 +1332,7 @@ function Inventario({showToast}){
         </div>
         <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Buscar</label><input className="input" placeholder="Producto…" value={q} onChange={e=>setQ(e.target.value)}/></div>
         <label className="check" style={{alignSelf:"center"}}><input type="checkbox" checked={soloBajo} onChange={e=>setSoloBajo(e.target.checked)}/> Solo stock bajo {nBajo>0&&<span className="pill pill-off" style={{marginLeft:4}}>{nBajo}</span>}</label>
+        <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={reportePreparacion}>🖨 Reporte de preparación</button>
         {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Transferir desde {bodega.nombre}</button>}
       </div>
 
@@ -1269,17 +1340,20 @@ function Inventario({showToast}){
 
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th>Estado</th></tr></thead>
+          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th className="num">Ideal</th><th className="num">Transferir</th><th>Estado</th></tr></thead>
           <tbody>
-            {rows.length===0 && <tr><td colSpan="5"><div className="empty">Sin productos.</div></td></tr>}
+            {rows.length===0 && <tr><td colSpan="7"><div className="empty">Sin productos.</div></td></tr>}
             {rows.map(r=>{
               const st=estado(r);
+              const falta=faltante(r);
               return (
                 <tr key={r.id}>
                   <td className="row-name">{r.nombre}</td>
                   <td className="muted">{r.categoria}</td>
                   <td className="num"><b style={{color:st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"}}>{r.stock}</b></td>
-                  <td className="num"><input className="input" type="number" style={{margin:0,width:80,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
+                  <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
+                  <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.ideal} placeholder="—" onChange={e=>guardarIdeal(r,e.target.value)}/></td>
+                  <td className="num">{Number(r.ideal)>0 ? (falta>0 ? <b style={{color:"var(--amber)"}}>{falta}</b> : <span className="pill pill-prod">✓</span>) : <span className="muted">—</span>}</td>
                   <td>{st==="agotado"?<span className="pill pill-off">Agotado</span>:st==="bajo"?<span className="pill pill-token">Stock bajo</span>:<span className="pill pill-prod">OK</span>}</td>
                 </tr>
               );
@@ -1642,6 +1716,8 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
 const UNIDADES=["g","kg","ml","L","unidad"];
 // factor para pasar de "kg equivalente" a la unidad del insumo (g/ml van en milésimas)
 const convInsumo=u=>(u==='g'||u==='ml')?1000:1;
+// duración legible entre dos fechas (para tiempo de solución de mantenimiento)
+const fmtDur=(desde,hasta)=>{ if(!desde||!hasta) return '—'; let ms=new Date(hasta)-new Date(desde); if(ms<0) ms=0; const min=Math.floor(ms/60000); const d=Math.floor(min/1440), h=Math.floor((min%1440)/60), m=min%60; return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'; };
 
 function Produccion({showToast}){
   const [sub,setSub]=useState("insumos");
@@ -1986,6 +2062,146 @@ function HistorialProd({showToast,clave,onUnlock}){
               </table>
             </div>
             <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Mantenimiento({showToast}){
+  const [sedes,setSedes]=useState([]);
+  const [sede,setSede]=useState("");
+  const [equipos,setEquipos]=useState(null);
+  const [abiertos,setAbiertos]=useState([]);   // reportes 'abierto' de la sede
+  const [hist,setHist]=useState([]);            // historial de mantenimientos
+  const [nuevo,setNuevo]=useState("");          // nombre nuevo equipo
+  const [edit,setEdit]=useState(null);          // equipo en edición de nombre
+  const [rep,setRep]=useState(null);            // {equipo} a reparar
+  const [supervisor,setSupervisor]=useState("");
+  const [notaRep,setNotaRep]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); },[]);
+  const load=async()=>{
+    if(!sede) return;
+    try{
+      const [eq,ab,h]=await Promise.all([db.listEquipos(sede),db.mantAbiertos(sede),db.listMantenimientos(sede)]);
+      setEquipos(eq); setAbiertos(ab); setHist(h);
+    }catch(e){ showToast(""+(e.message||e),"err"); setEquipos([]); }
+  };
+  useEffect(()=>{ if(sede){ setEquipos(null); load(); } },[sede]);
+
+  const reporteDe=id=>abiertos.find(m=>m.equipo_id===id);
+
+  const agregar=async()=>{
+    const n=nuevo.trim(); if(!n) return;
+    try{ await db.saveEquipo({sede,nombre:n}); setNuevo(""); load(); showToast("Equipo agregado","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const guardarNombre=async(eq)=>{
+    const n=(edit&&edit.nombre||"").trim(); if(!n){ setEdit(null); return; }
+    try{ await db.saveEquipo({id:eq.id,sede:eq.sede,nombre:n}); setEdit(null); load(); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const borrar=async(eq)=>{
+    if(eq.estado==='parada'){ showToast("No puedes borrar una máquina parada. Repárala primero.","err"); return; }
+    if(!confirm("¿Borrar el equipo \""+eq.nombre+"\"?")) return;
+    try{ await db.deleteEquipo(eq.id); load(); }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const reparar=async()=>{
+    if(!rep) return; setBusy(true);
+    try{
+      await db.repararEquipo(rep.equipo.id, supervisor.trim(), notaRep.trim());
+      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load();
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  const cerrados=hist.filter(m=>m.estado==='cerrado'&&m.reparado_at);
+  const promedio=cerrados.length? cerrados.reduce((a,m)=>a+(new Date(m.reparado_at)-new Date(m.reportado_at)),0)/cerrados.length : 0;
+  const paradas=(equipos||[]).filter(e=>e.estado==='parada').length;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Mantenimiento de equipos</div>
+        <select className="select" style={{maxWidth:220}} value={sede} onChange={e=>setSede(e.target.value)}>
+          {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+        </select>
+      </div>
+
+      <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Equipos</div><div style={{fontSize:24,fontWeight:800}}>{(equipos||[]).length}</div></div>
+        <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Paradas ahora</div><div style={{fontSize:24,fontWeight:800,color:paradas?"var(--red)":"var(--green)"}}>{paradas}</div></div>
+        <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Tiempo prom. solución</div><div style={{fontSize:24,fontWeight:800}}>{cerrados.length?fmtDur(0,promedio):"—"}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <input className="input" style={{maxWidth:280}} placeholder="Nombre del equipo (ej. Aspiradora 1)" value={nuevo} onChange={e=>setNuevo(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')agregar();}}/>
+        <button className="btn btn-amber btn-sm" onClick={agregar}>＋ Agregar equipo</button>
+      </div>
+
+      {!equipos ? <div className="empty">Cargando…</div> : (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Estado</th><th>Equipo</th><th>Reporte abierto</th><th></th></tr></thead>
+            <tbody>
+              {equipos.length===0 && <tr><td colSpan="4"><div className="empty">No hay equipos en esta sede. Agrega el primero arriba.</div></td></tr>}
+              {equipos.map(eq=>{ const r=reporteDe(eq.id); const parada=eq.estado==='parada'; return (
+                <tr key={eq.id}>
+                  <td><span style={{display:"inline-flex",alignItems:"center",gap:6,fontWeight:700,color:parada?"var(--red)":"var(--green)"}}><span style={{width:11,height:11,borderRadius:"50%",background:parada?"var(--red)":"var(--green)",display:"inline-block"}}></span>{parada?"Parada":"Operativa"}</span></td>
+                  <td className="row-name">
+                    {edit&&edit.id===eq.id
+                      ? <input className="input" autoFocus value={edit.nombre} onChange={e=>setEdit({...edit,nombre:e.target.value})} onKeyDown={e=>{if(e.key==='Enter')guardarNombre(eq);if(e.key==='Escape')setEdit(null);}} onBlur={()=>guardarNombre(eq)}/>
+                      : <span onClick={()=>setEdit({id:eq.id,nombre:eq.nombre})} style={{cursor:"pointer"}}>{eq.nombre} <span className="muted">✎</span></span>}
+                  </td>
+                  <td>{r? <span><b>{r.descripcion||"(sin descripción)"}</b><br/><span className="muted">{r.operador?("Reportó "+r.operador+" · "):""}{fLocalDia(r.reportado_at)} {fLocalHora(r.reportado_at)} · lleva {fmtDur(r.reportado_at,new Date().toISOString())}</span></span> : <span className="muted">—</span>}</td>
+                  <td style={{whiteSpace:"nowrap"}}>
+                    {parada
+                      ? <button className="btn btn-amber btn-sm" onClick={()=>{setRep({equipo:eq,reporte:r});}}>🔧 Reparar / Encender</button>
+                      : <button className="btn btn-ghost btn-sm" onClick={()=>borrar(eq)}>Borrar</button>}
+                  </td>
+                </tr>
+              );})}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="sec-title" style={{margin:"20px 0 8px"}}>Historial de mantenimientos <span className="muted">({hist.length})</span></div>
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Equipo</th><th>Descripción</th><th>Reportó</th><th>Apagada</th><th>Reparada</th><th>Tiempo solución</th><th>Supervisor</th></tr></thead>
+          <tbody>
+            {hist.length===0 && <tr><td colSpan="7"><div className="empty">Sin registros.</div></td></tr>}
+            {hist.map(m=>(
+              <tr key={m.id}>
+                <td className="row-name">{m.equipo_nombre}</td>
+                <td>{m.descripcion}{m.nota_reparacion?<div className="muted">↳ {m.nota_reparacion}</div>:null}</td>
+                <td className="muted">{m.operador||"—"}</td>
+                <td className="muted">{fLocalDia(m.reportado_at)} {fLocalHora(m.reportado_at)}</td>
+                <td className="muted">{m.reparado_at?(fLocalDia(m.reparado_at)+" "+fLocalHora(m.reparado_at)):<span style={{color:"var(--red)"}}>abierto</span>}</td>
+                <td style={{fontWeight:700}}>{m.reparado_at?fmtDur(m.reportado_at,m.reparado_at):fmtDur(m.reportado_at,new Date().toISOString())}</td>
+                <td className="muted">{m.supervisor||"—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {rep && (
+        <div className="modal-bg" onClick={()=>!busy&&setRep(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">🔧 Reparar y encender — {rep.equipo.nombre}</div>
+            {rep.reporte && <div className="card" style={{marginBottom:10}}><div className="muted">Falla reportada</div><b>{rep.reporte.descripcion||"(sin descripción)"}</b><div className="muted" style={{marginTop:4}}>{rep.reporte.operador?("Por "+rep.reporte.operador+" · "):""}{fLocalDia(rep.reporte.reportado_at)} {fLocalHora(rep.reporte.reportado_at)} · lleva {fmtDur(rep.reporte.reportado_at,new Date().toISOString())} parada</div></div>}
+            <label className="label">Supervisor que repara</label>
+            <input className="input" value={supervisor} onChange={e=>setSupervisor(e.target.value)} placeholder="Tu nombre"/>
+            <label className="label">Nota de reparación (opcional)</label>
+            <input className="input" value={notaRep} onChange={e=>setNotaRep(e.target.value)} placeholder="Qué se hizo / repuesto cambiado…"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setRep(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={reparar}>{busy?"Encendiendo…":"✅ Encender máquina"}</button>
+            </div>
           </div>
         </div>
       )}

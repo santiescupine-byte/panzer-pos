@@ -287,18 +287,18 @@ const db = {
     });
     if(error) throw error;
   },
-  // Login por PIN → devuelve {nombre, sedes:[...]} o null si no existe
+  // Login por PIN → devuelve {nombre, rol, sedes:[...]} o null si no existe
   async loginPin(pin){
     if(DEMO_MODE){
       const e = DEMO_EMPLEADOS.find(x=>x.pin===pin);
-      return e ? { nombre:e.nombre, sedes:[...e.sedes] } : null;
+      return e ? { nombre:e.nombre, rol:e.rol||'cajero', sedes:[...e.sedes] } : null;
     }
     const { data, error } = await sb.from('empleados')
-      .select('nombre, empleado_sedes(sedes(nombre))')
+      .select('nombre, rol, empleado_sedes(sedes(nombre))')
       .eq('pin', pin).eq('activo', true).maybeSingle();
     if(error || !data) return null;
     const sedes = (data.empleado_sedes||[]).map(r=>r.sedes?.nombre).filter(Boolean);
-    return { nombre:data.nombre, sedes };
+    return { nombre:data.nombre, rol:data.rol||'cajero', sedes };
   },
   async getProductos(sede){
     if(DEMO_MODE){
@@ -433,7 +433,7 @@ function App(){
 
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2200); };
 
-  const abrir=async(sedeSel, nombre)=>{
+  const abrir=async(sedeSel, nombre, rol)=>{
     setBusy(true);
     try{
       const t=await db.abrirTurno(sedeSel,nombre);
@@ -441,9 +441,13 @@ function App(){
       const prods=await db.getProductos(sedeSel);
       setProductos(prods);
       db.getDescuentos().then(setDescuentos).catch(()=>{});
-      // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
-      const vigente = await db.chequeoVigente(sedeSel, nombre);
-      if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok"); }
+      // El chequeo de inventario es OBLIGATORIO solo para CAJEROS. Supervisor/admin/otros entran directo.
+      if(rol && rol!=='cajero'){ setChequeoHecho(true); }
+      else {
+        // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
+        const vigente = await db.chequeoVigente(sedeSel, nombre);
+        if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok"); }
+      }
     }catch(e){ showToast("Error: "+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -454,7 +458,7 @@ function App(){
       const emp=await db.loginPin(p);
       if(!emp){ showToast("PIN incorrecto","err"); setPin(""); setBusy(false); return; }
       if(!emp.sedes.length){ showToast("Sin sede asignada","err"); setPin(""); setBusy(false); return; }
-      if(emp.sedes.length===1){ await abrir(emp.sedes[0], emp.nombre); }
+      if(emp.sedes.length===1){ await abrir(emp.sedes[0], emp.nombre, emp.rol); }
       else { setPinEmp(emp); }   // elegir sede
     }catch(e){ showToast("Error: "+(e.message||e),"err"); }
     setBusy(false);
@@ -564,7 +568,7 @@ function App(){
               <div className="card-t">Hola, {pinEmp.nombre} 👋</div>
               <label className="label">¿En qué sede vas a trabajar?</label>
               {pinEmp.sedes.map(s=>(
-                <button key={s} className="btn-secondary" style={{marginBottom:10}} disabled={busy} onClick={()=>abrir(s,pinEmp.nombre)}>{s}</button>
+                <button key={s} className="btn-secondary" style={{marginBottom:10}} disabled={busy} onClick={()=>abrir(s,pinEmp.nombre,pinEmp.rol)}>{s}</button>
               ))}
               <button className="btn-secondary" style={{marginTop:6,opacity:.7}} onClick={()=>{setPinEmp(null);setPin("");}}>← Volver</button>
             </div>

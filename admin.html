@@ -200,6 +200,7 @@ let DEMO = {
   producciones: [],   // historial demo
   equipos: [],        // mantenimiento demo
   mant: [],           // reportes de mantenimiento demo
+  transferencias: [], // transferencias en tránsito demo
   empleados: [
     {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
     {id:"es", nombre:"Supervisor", rol:"supervisor", activo:true, pin:"7777", sedes:[]},
@@ -595,6 +596,34 @@ const db = {
     }
     const {error}=await sb.rpc('transferir_stock',{p_producto_id:producto_id,p_origen:origen,p_destino:destino,p_cantidad:cantidad,p_operador:null});
     if(error) throw error;
+  },
+  // ---- TRANSFERENCIAS EN TRÁNSITO ----
+  // Envía mercancía: resta de la bodega y queda EN TRÁNSITO (entra al destino solo cuando el operador recibe).
+  async enviarTransferencia(items, origen, destino, operador){
+    const envio_id = (crypto.randomUUID ? crypto.randomUUID() : 'env-'+Date.now()+'-'+Math.random().toString(16).slice(2));
+    if(DEMO_MODE){
+      DEMO.transferencias = DEMO.transferencias||[];
+      items.forEach(it=>{
+        const p=DEMO.productos.find(x=>x.id===it.producto_id);
+        if(p){ p.stock=p.stock||{}; p.stock[origen]=(Number(p.stock[origen])||0)-it.cantidad; }
+        DEMO.transferencias.push({id:uid(),envio_id,producto_id:it.producto_id,producto_nombre:p?p.nombre:'',origen,destino,cantidad_enviada:it.cantidad,cantidad_recibida:null,estado:'en_transito',enviado_por:operador||null,enviado_at:new Date().toISOString()});
+      });
+      return;
+    }
+    for(const it of items){
+      const {error}=await sb.rpc('enviar_transferencia',{p_envio_id:envio_id,p_producto_id:it.producto_id,p_origen:origen,p_destino:destino,p_cantidad:it.cantidad,p_operador:operador||null});
+      if(error) throw error;
+    }
+  },
+  async listTransferencias(f={}){
+    if(DEMO_MODE){
+      return (DEMO.transferencias||[]).filter(t=>(!f.estado||t.estado===f.estado)&&(!f.destino||t.destino===f.destino))
+        .sort((a,b)=>b.enviado_at.localeCompare(a.enviado_at));
+    }
+    let q=sb.from('transferencias').select('*').order('enviado_at',{ascending:false}).limit(300);
+    if(f.estado) q=q.eq('estado',f.estado);
+    if(f.destino) q=q.eq('destino',f.destino);
+    const {data,error}=await q; if(error) return []; return data||[];
   },
   // ---- CHEQUEOS DE INVENTARIO ----
   async listChequeos(f={}){
@@ -1252,8 +1281,12 @@ function Inventario({showToast}){
   const [cat,setCat]=useState("");
   const [soloBajo,setSoloBajo]=useState(false);
   const [transfer,setTransfer]=useState(null);
+  const [verTransitos,setVerTransitos]=useState(false);
+  const [transitos,setTransitos]=useState([]);
 
   useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); db.listCategorias().then(setCats).catch(()=>{}); },[]);
+  const cargarTransitos=()=>{ db.listTransferencias({estado:'en_transito'}).then(setTransitos).catch(()=>setTransitos([])); };
+  useEffect(()=>{ cargarTransitos(); },[]);
   const cargar=async()=>{ if(!sede) return; setInv(null); try{ setInv(await db.getInventario(sede)); }catch(e){ showToast(""+(e.message||e),"err"); setInv([]); } };
   useEffect(()=>{ cargar(); },[sede]);
 
@@ -1295,12 +1328,12 @@ function Inventario({showToast}){
     setTransfer({origen:bodega.nombre, destino: sede!==bodega.nombre?sede:"", cantidades:{}, bodegaStock});
   };
   const hacerTransfer=async(t)=>{
-    const items=Object.entries(t.cantidades||{}).filter(([id,c])=>Number(c)>0);
+    const items=Object.entries(t.cantidades||{}).filter(([id,c])=>Number(c)>0).map(([producto_id,c])=>({producto_id,cantidad:Number(c)}));
     if(!t.destino || !items.length) return;
     try{
-      for(const [pid,c] of items){ await db.transferirStock(pid, t.origen, t.destino, Number(c)); }
-      setTransfer(null); await cargar();
-      showToast(items.length+" producto(s) transferido(s) a "+t.destino);
+      await db.enviarTransferencia(items, t.origen, t.destino, null);
+      setTransfer(null); await cargar(); cargarTransitos();
+      showToast(items.length+" producto(s) enviado(s) a "+t.destino+" (en tránsito)");
     }catch(e){ showToast(""+(e.message||e),"err"); }
   };
 
@@ -1333,7 +1366,8 @@ function Inventario({showToast}){
         <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Buscar</label><input className="input" placeholder="Producto…" value={q} onChange={e=>setQ(e.target.value)}/></div>
         <label className="check" style={{alignSelf:"center"}}><input type="checkbox" checked={soloBajo} onChange={e=>setSoloBajo(e.target.checked)}/> Solo stock bajo {nBajo>0&&<span className="pill pill-off" style={{marginLeft:4}}>{nBajo}</span>}</label>
         <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={reportePreparacion}>🖨 Reporte de preparación</button>
-        {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Transferir desde {bodega.nombre}</button>}
+        <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={()=>{cargarTransitos();setVerTransitos(true);}}>🚚 En tránsito {transitos.length>0&&<span className="pill pill-token" style={{marginLeft:4}}>{transitos.length}</span>}</button>
+        {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Enviar desde {bodega.nombre}</button>}
       </div>
 
       {nBajo>0 && !soloBajo && <div className="muted" style={{marginBottom:12}}>⚠ {nBajo} producto(s) en o por debajo del mínimo en {sede}. <a style={{color:"var(--amber)",cursor:"pointer"}} onClick={()=>setSoloBajo(true)}>Ver solo esos</a></div>}
@@ -1363,6 +1397,39 @@ function Inventario({showToast}){
       </div>
 
       {transfer && <TransferModal t={transfer} setT={setTransfer} bodega={bodega} sedes={sedes} inv={inv} onClose={()=>setTransfer(null)} onConfirm={hacerTransfer}/>}
+      {verTransitos && <TransitosModal transitos={transitos} onClose={()=>setVerTransitos(false)}/>}
+    </div>
+  );
+}
+
+function TransitosModal({transitos,onClose}){
+  // agrupar por envío
+  const envios={};
+  transitos.forEach(t=>{ (envios[t.envio_id]=envios[t.envio_id]||[]).push(t); });
+  const grupos=Object.values(envios).sort((a,b)=>b[0].enviado_at.localeCompare(a[0].enviado_at));
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-t">🚚 Mercancía en tránsito ({transitos.length})</div>
+        <div className="muted" style={{marginBottom:10}}>Envíos que salieron de la bodega y aún no han sido recibidos en la sede destino. Entran al stock cuando el operador les da "Recibir".</div>
+        <div style={{maxHeight:"55vh",overflowY:"auto"}}>
+          {grupos.length===0 && <div className="empty">No hay envíos en tránsito. 🎉</div>}
+          {grupos.map((g,i)=>(
+            <div key={i} className="card" style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontWeight:700}}>
+                <span>{g[0].origen} → {g[0].destino}</span>
+                <span className="muted" style={{fontWeight:400,fontSize:12}}>{fLocalDia(g[0].enviado_at)} {fLocalHora(g[0].enviado_at)}</span>
+              </div>
+              <table className="tbl" style={{marginTop:6}}>
+                <tbody>
+                  {g.map(t=>(<tr key={t.id}><td className="row-name">{t.producto_nombre}</td><td className="num">{Number(t.cantidad_enviada)} und.</td></tr>))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>Cerrar</button></div>
+      </div>
     </div>
   );
 }
@@ -1376,8 +1443,8 @@ function TransferModal({t,setT,bodega,sedes,inv,onClose,onConfirm}){
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
-        <div className="modal-t">⇄ Transferir desde {t.origen}</div>
-        <div className="muted" style={{marginBottom:10}}>Elige la sede destino y escribe cuánto enviar de cada producto. Se descuenta de {t.origen} y se suma al destino.</div>
+        <div className="modal-t">⇄ Enviar desde {t.origen}</div>
+        <div className="muted" style={{marginBottom:10}}>Elige la sede destino y escribe cuánto enviar de cada producto. Se descuenta de {t.origen} y queda <b>en tránsito</b>: entra al stock de la sede solo cuando el operador lo <b>recibe</b> en el POS.</div>
         <label className="label">Sede destino</label>
         <select className="select" value={t.destino} onChange={e=>setT(prev=>({...prev,destino:e.target.value}))}>
           <option value="">Seleccionar…</option>
@@ -1395,7 +1462,7 @@ function TransferModal({t,setT,bodega,sedes,inv,onClose,onConfirm}){
         </div>
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
-          <button className="btn btn-amber" disabled={!valido} onClick={()=>onConfirm(t)}>Transferir{nSel?(" "+nSel):""}</button>
+          <button className="btn btn-amber" disabled={!valido} onClick={()=>onConfirm(t)}>Enviar{nSel?(" "+nSel):""} (en tránsito)</button>
         </div>
       </div>
     </div>

@@ -508,6 +508,7 @@ const db = {
     }
     const row={nombre:p.nombre,tipo:p.tipo,categoria:p.categoria,precio:p.precio,costo:p.costo,
       codigo_barras:p.codigo_barras||null,controla_stock:p.controla_stock,activo:p.activo,
+      precio_variable:!!p.precio_variable,
       fabricable:!!p.fabricable, vende_pos:p.vende_pos!==false};
     let prodId=p.id;
     if(prodId){ const {error}=await sb.from('productos').update(row).eq('id',prodId); if(error) throw error; }
@@ -591,6 +592,11 @@ const db = {
   async setIdeal(producto_id, sede, ideal){
     if(DEMO_MODE){ DEMO_IDEAL[sede+'|'+producto_id]=ideal; return; }
     const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_ideal:ideal},{onConflict:'producto_id,sede'}); if(error) throw error;
+  },
+  // set ABSOLUTO del stock de una sede (mismo mecanismo que el editor de Productos; no toca mínimo/ideal)
+  async setStockSede(producto_id, sede, cantidad){
+    if(DEMO_MODE){ const p=DEMO.productos.find(x=>x.id===producto_id); if(p){ p.stock=p.stock||{}; p.stock[sede]=cantidad; } return; }
+    const {error}=await sb.from('inventario').upsert({producto_id,sede,cantidad},{onConflict:'producto_id,sede'}); if(error) throw error;
   },
   async transferirStock(producto_id, origen, destino, cantidad){
     if(DEMO_MODE){
@@ -1306,6 +1312,11 @@ function Inventario({showToast}){
     try{ await db.setIdeal(r.id,sede,v); setInv(prev=>prev.map(x=>x.id===r.id?{...x,ideal:v}:x)); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  const guardarStock=async(r,val)=>{
+    const v=Number(val)||0;   // permite negativo (sobreventa), igual que el resto del sistema
+    try{ await db.setStockSede(r.id,sede,v); setInv(prev=>prev.map(x=>x.id===r.id?{...x,stock:v}:x)); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
   const faltante=r=> (Number(r.ideal)>0 && Number(r.stock)<Number(r.ideal)) ? (Number(r.ideal)-Number(r.stock)) : 0;
   const reportePreparacion=()=>{
     const list=(inv||[]).filter(r=>Number(r.ideal)>0 && faltante(r)>0).sort((a,b)=>a.nombre.localeCompare(b.nombre));
@@ -1388,7 +1399,7 @@ function Inventario({showToast}){
                 <tr key={r.id}>
                   <td className="row-name">{r.nombre}</td>
                   <td className="muted">{r.categoria}</td>
-                  <td className="num"><b style={{color:st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"}}>{r.stock}</b></td>
+                  <td className="num"><input className="input" type="number" style={{margin:0,width:80,textAlign:"right",padding:"6px 8px",fontWeight:700,color:st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"}} value={r.stock} onChange={e=>guardarStock(r,e.target.value)}/></td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.ideal} placeholder="—" onChange={e=>guardarIdeal(r,e.target.value)}/></td>
                   <td className="num">{Number(r.ideal)>0 ? (falta>0 ? <b style={{color:"var(--amber)"}}>{falta}</b> : <span className="pill pill-prod">✓</span>) : <span className="muted">—</span>}</td>

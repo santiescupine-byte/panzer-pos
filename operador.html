@@ -130,6 +130,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <!-- Cliente de Supabase por CDN (no requiere build) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Lector y generador de QR para el módulo VIP -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <!-- Catálogo real importado de Loyverse (define window.PANZER_CATALOGO) -->
   <script src="catalogo_demo.js"></script>
 
@@ -433,6 +436,38 @@ const db = {
 };
 
 const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
+
+// ============================================================
+// MÓDULO VIP — habla al MISMO backend (Google Apps Script + Sheets) que la app vip.panzercarwash.com
+// No migra datos, no crea ventas del POS (los tokens VIP ya van al recaudo aparte).
+// ============================================================
+const VIP_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyoTaC9iB1fm4s3hM4QQ9-1Zbo5cCzJQIn68YlczTTAXrYHBJK1rQsZmiIMo4CL9-S8Bg/exec';
+const VIP_PRECIO_TOKEN = 6000;
+const VIP_MEMBRESIAS = {
+  'Standard': { saldo: 30000, tokens: 5,  precio: 24000, gratis: 1 },
+  'Silver':   { saldo: 60000, tokens: 10, precio: 42000, gratis: 3 },
+  'Gold':     { saldo: 90000, tokens: 15, precio: 60000, gratis: 5 }
+};
+// Equivalencia sede del POS  →  nombre de sede en el sistema VIP (tal cual lo guarda hoy, con prefijo "Sede " y espacios).
+// Así los canjes/recargas hechos desde el POS quedan en la MISMA sede que la app VIP y los reportes cuadran.
+const VIP_SEDE_MAP = {
+  'Bolivariana':'Sede Bolivariana','Bello':'Sede Bello','Toberín':'Sede Toberin ',
+  'San Felipe':'Sede San Felipe ','Perdomo':'Sede Perdomo ','Kemilabo':'Sede Kemilabo',
+  'Chia (franquicia)':'Sede chia','Belen (franquicia)':'Sede Belen ','Itagui (franquicia)':'Sede Itagui',
+  'Marly':'Sede Marly','La union (franquicia)':'Sede la union ','Rionegro (franquicia)':'Sede Rionegro ',
+  '12 de octubre (franquicia)':'Sede 12 de octubre '
+};
+const vipSedeNombre = sede => VIP_SEDE_MAP[sede] || sede;
+async function vipApi(params, timeoutMs=45000){
+  const url = VIP_APPS_SCRIPT_URL + '?' + new URLSearchParams(params).toString();
+  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{ const r = await fetch(url,{signal:ctrl.signal}); clearTimeout(t); return await r.json(); }
+  catch(e){ clearTimeout(t); return { ok:false, error: e.name==='AbortError'?'timeout':'Error de conexión' }; }
+}
+// teléfono colombiano → formato wa.me
+const vipTelWA = t => { let n=String(t||'').replace(/\D/g,''); if(n.startsWith('3')&&n.length===10) n='57'+n; if(!n.startsWith('57')) n='57'+n; return n; };
+const vipCarnetLink = c => 'https://vip.panzercarwash.com/carnet.html?'+new URLSearchParams({id:c.id,nombre:c.nombre,mem:c.membresia,saldo:c.saldo}).toString();
+
 // Nº de recibo secuencial para demo (en Supabase lo asigna el sistema y es el mismo que ve el back office)
 function nextReciboDemo(){
   let n=0; try{ n=Number(localStorage.getItem('panzer_recibo_seq')||'0'); }catch(e){}
@@ -465,6 +500,7 @@ function App(){
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
+  const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
   // descuentos
@@ -645,7 +681,8 @@ function App(){
           <h1>{sede}</h1>
           <div className="header-sub">{operador} · Caja abierta</div>
         </div>
-        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowRecepcion(true)}>📦 Recibir{pendTransito>0?(" ("+pendTransito+")"):""}</button>
+        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowVip(true)}>💳 Membresías</button>
+        <button className="header-x" onClick={()=>setShowRecepcion(true)}>📦 Recibir{pendTransito>0?(" ("+pendTransito+")"):""}</button>
         <button className="header-x" onClick={()=>setShowRecibos(true)}>🧾 Recibos</button>
         <button className="header-x" onClick={()=>setShowMaq(true)}>🔧 Máquinas</button>
         <button className="header-x" onClick={()=>setShowCierre(true)}>Cerrar caja</button>
@@ -694,7 +731,7 @@ function App(){
 
       {/* Sheet cierre de caja → liquidación */}
       {showCierre && (
-        <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} showToast={showToast}
+        <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} turno={turno} showToast={showToast}
           onClose={()=>setShowCierre(false)} onCerrar={cerrarCaja}/>
       )}
 
@@ -711,6 +748,11 @@ function App(){
       {/* Sheet "mis últimos recibos" */}
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
+      )}
+
+      {/* Módulo VIP / Membresías */}
+      {showVip && (
+        <VipSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowVip(false)}/>
       )}
 
       {/* Sheet recepción de mercancía de proveedor */}
@@ -836,7 +878,7 @@ function PrecioSheet({producto,onClose,onConfirm}){
 // Auto: sede, operador, Nº recibo, valor total, QR/tarjeta, efectivo esperado.
 // Manual: control de tokens, devoluciones $, observaciones.
 // ============================================================
-function CierreSheet({ventas,sede,operador,showToast,onClose,onCerrar}){
+function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   // Nº de recibo = el de la última venta del turno (el mismo que se ve en el back office)
   const numRecibo = ventas.length ? (ventas[ventas.length-1].recibo || '—') : '—';
   // manuales (control de tokens + devoluciones + observaciones)
@@ -847,6 +889,19 @@ function CierreSheet({ventas,sede,operador,showToast,onClose,onCerrar}){
   const [devoluciones,setDevoluciones]=useState("");
   const [observaciones,setObservaciones]=useState("");
   const [sending,setSending]=useState(false);
+  const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
+
+  // Auto-llenar "tokens membresía" con los canjes VIP del turno (reporte_turno → tokens_canjeados).
+  // Es una sugerencia: el operador puede ajustarla. No bloquea el cierre si falla.
+  useEffect(()=>{
+    if(DEMO_MODE) return;
+    const desde = (turno && turno.created_at) ? new Date(turno.created_at).getTime() : (Date.now()-12*3600*1000);
+    vipApi({accion:'reporte_turno', operador, sede:vipSedeNombre(sede), fecha_desde:desde})
+      .then(r=>{ if(r && r.ok && typeof r.tokens_canjeados==='number' && r.tokens_canjeados>0){
+        setTokensMembresia(prev=> prev===""? String(r.tokens_canjeados) : prev); setMemAuto(true);
+      }})
+      .catch(()=>{});
+  },[]);
 
   // automáticos desde las ventas del turno
   const productosVal=ventas.reduce((s,v)=>s+(v.productos||0),0);  // todo lo vendido que NO son tokens
@@ -934,6 +989,7 @@ function CierreSheet({ventas,sede,operador,showToast,onClose,onCerrar}){
           {tokenInput("Dev. tokens", devTokens, setDevTokens)}
           {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
         </div>
+        {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
         <div style={{fontSize:12,color:"var(--amber)",fontWeight:700,marginBottom:10}}>🪙 Tokens restantes: {tokensRestantes}</div>
 
         {/* Devoluciones + observaciones (manual) */}
@@ -1352,6 +1408,327 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
         )}
 
         <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// MÓDULO VIP — membresías (mismo backend Sheets que vip.panzercarwash.com)
+// ============================================================
+function QRScanner({onScan,onError}){
+  useEffect(()=>{
+    if(typeof Html5Qrcode==='undefined'){ const e=document.getElementById('vip-qr-reader'); if(e) e.innerHTML='<div class="empty">Lector QR no disponible.</div>'; return; }
+    let stopped=false; let scanner;
+    try{ scanner=new Html5Qrcode('vip-qr-reader'); }catch(_){ return; }
+    scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:230,height:230}},
+      (txt)=>{ if(stopped) return; stopped=true; scanner.stop().then(()=>onScan(txt)).catch(()=>onScan(txt)); },
+      ()=>{}
+    ).catch(()=>{ const e=document.getElementById('vip-qr-reader'); if(e) e.innerHTML='<div class="empty" style="color:var(--red)">No se pudo abrir la cámara. Revisa los permisos o usa un dispositivo con cámara.</div>'; if(onError)onError(); });
+    return ()=>{ stopped=true; try{ scanner.stop().catch(()=>{}); }catch(_){} };
+  },[]);
+  return <div id="vip-qr-reader" style={{width:'100%',maxWidth:300,margin:'0 auto 10px',borderRadius:12,overflow:'hidden'}}></div>;
+}
+
+function VipSheet({sede,operador,showToast,onClose}){
+  const [pant,setPant]=useState('menu');
+  const [busy,setBusy]=useState(false);
+  const vSede=vipSedeNombre(sede);
+  // canjear
+  const [cli,setCli]=useState(null);          // cliente para canje
+  const [tok,setTok]=useState(1);
+  const [canjeRes,setCanjeRes]=useState(null);
+  const [cupon,setCupon]=useState(null);      // {data,estado,info}
+  // vender
+  const [vNombre,setVNombre]=useState(''),[vTel,setVTel]=useState(''),[vMem,setVMem]=useState(null),[vPago,setVPago]=useState('Efectivo'),[vRes,setVRes]=useState(null);
+  // recargar
+  const [rCli,setRCli]=useState(null),[rTipo,setRTipo]=useState(null),[rPago,setRPago]=useState('Efectivo'),[rRes,setRRes]=useState(null);
+  // reenviar
+  const [reTel,setReTel]=useState(''),[reCli,setReCli]=useState(null);
+  // reporte
+  const [horas,setHoras]=useState(8),[rep,setRep]=useState(null);
+
+  const volver=()=>{ setPant('menu'); setCli(null); setCanjeRes(null); setCupon(null); setVRes(null); setRCli(null); setRTipo(null); setRRes(null); setReCli(null); setRep(null); };
+
+  // QR de venta (carnet) generado al crear membresía
+  useEffect(()=>{
+    if(vRes && pant==='vender'){
+      const el=document.getElementById('vip-venta-qr');
+      if(el && typeof QRCode!=='undefined'){ el.innerHTML=''; const m=VIP_MEMBRESIAS[vRes.membresia]||{}; new QRCode(el,{text:JSON.stringify({id:vRes.id,nombre:vRes.nombre,membresia:vRes.membresia,saldo:m.saldo||vRes.saldo}),width:160,height:160,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.M}); }
+    }
+  },[vRes]);
+
+  // ---------- CANJEAR ----------
+  const cargarCliente=async(id, setter)=>{
+    const r=await vipApi({accion:'consultar_cliente',id_vip:id});
+    if(r.ok && r.cliente){ setter(r.cliente); return true; }
+    showToast(r.error||'Cliente no encontrado','err'); return false;
+  };
+  const onScanCanje=async(txt)=>{
+    setScan(false);
+    let data; try{ data=JSON.parse(txt); }catch(_){ showToast('QR no reconocido','err'); return; }
+    if(data && data.tipo==='cupon'){ procesarCupon(data); return; }
+    if(!data || !data.id){ showToast('QR inválido','err'); return; }
+    setBusy(true); await cargarCliente(data.id, c=>{ setCli(c); setTok(1); }); setBusy(false);
+  };
+  const maxTok=()=> Math.max(1, Math.floor((cli?.saldo||0)/VIP_PRECIO_TOKEN));
+  const descontar=async()=>{
+    const monto=tok*VIP_PRECIO_TOKEN;
+    if(monto>(cli.saldo||0)){ showToast('Saldo insuficiente','err'); return; }
+    setBusy(true);
+    const r=await vipApi({accion:'descontar_saldo',id_vip:cli.id,monto,tokens:tok,sede:vSede,operador,metodo:'WebApp'});
+    setBusy(false);
+    if(r.ok){ setCanjeRes({nombre:cli.nombre,tok,monto,saldo:r.saldo_nuevo}); setCli(null); }
+    else showToast(r.error||'No se pudo descontar','err');
+  };
+  // cupones
+  const procesarCupon=async(data)=>{
+    setCupon({data,estado:'verificando'}); setBusy(true);
+    const r=await vipApi({accion:'verificar_cupon',id_cupon:data.id_cupon,id_cliente:data.id_cliente});
+    setBusy(false);
+    if(!r.ok){ showToast(r.error||'Error al verificar cupón','err'); setCupon(null); return; }
+    if(r.canjeado){ setCupon({data,estado:'canjeado'}); return; }
+    setCupon({data,estado:'disponible',info:r.cupon||{}});
+  };
+  const confirmarCupon=async()=>{
+    setBusy(true);
+    const d=cupon.data;
+    const r=await vipApi({accion:'canjear_cupon',id_cupon:d.id_cupon,id_cliente:d.id_cliente,sede:vSede,operador});
+    setBusy(false);
+    if(r.ok) setCupon({data:d,estado:'entregado'});
+    else showToast(r.error||'Error al registrar canje','err');
+  };
+
+  // ---------- VENDER ----------
+  const registrar=async()=>{
+    const n=vNombre.trim(), t=vTel.trim();
+    if(n.length<3){ showToast('Ingresa el nombre','err'); return; }
+    if(t.length<7||!/^[0-9]+$/.test(t)){ showToast('Teléfono inválido','err'); return; }
+    if(!vMem){ showToast('Selecciona la membresía','err'); return; }
+    setBusy(true);
+    let r={ok:false};
+    for(let i=1;i<=3;i++){ r=await vipApi({accion:'crear_cliente',nombre:n,telefono:t,membresia:vMem,operador,sede:vSede},20000); if(r.ok) break; if(i<3) await new Promise(x=>setTimeout(x,1500)); }
+    setBusy(false);
+    if(!r.ok||!r.id_vip){ showToast('Sin respuesta del servidor. Revisa internet e intenta de nuevo.','err'); return; }
+    const m=VIP_MEMBRESIAS[r.membresia||vMem]||VIP_MEMBRESIAS[vMem];
+    setVRes({id:r.id_vip,nombre:r.nombre||n,telefono:t,membresia:r.membresia||vMem,saldo:r.saldo!==undefined?r.saldo:m.saldo,existe:r.existe===true});
+  };
+  const waVenta=()=>{
+    const c=vRes, m=VIP_MEMBRESIAS[c.membresia];
+    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n🪙 *'+m.tokens+' Tokens* ('+m.gratis+' gratis)\n💰 Saldo: *'+fmt(m.saldo)+'*\n🎁 Ahorro: *'+fmt(m.saldo-m.precio)+'*\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n\n🔑 Tu código VIP: *'+c.id+'*\n\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
+    window.open('https://wa.me/'+vipTelWA(c.telefono)+'?text='+encodeURIComponent(msg),'_blank');
+  };
+
+  // ---------- RECARGAR ----------
+  const onScanRecarga=async(txt)=>{
+    setRScan(false);
+    let data; try{ data=JSON.parse(txt); }catch(_){ showToast('QR no reconocido','err'); return; }
+    if(!data||!data.id){ showToast('QR inválido','err'); return; }
+    setBusy(true); await cargarCliente(data.id, setRCli); setBusy(false);
+  };
+  const recargar=async()=>{
+    if(!rTipo){ showToast('Selecciona un paquete','err'); return; }
+    const m=VIP_MEMBRESIAS[rTipo], saldoAnt=rCli.saldo||0;
+    setBusy(true);
+    const r=await vipApi({accion:'recargar_saldo',id_vip:rCli.id,monto:m.saldo,membresia:rTipo,operador,sede:vSede});
+    setBusy(false);
+    const nuevo=r.ok?r.saldo_nuevo:(saldoAnt+m.saldo);
+    if(!r.ok){ showToast('Error: '+(r.error||''),'err'); return; }
+    setRRes({nombre:rCli.nombre,tipo:rTipo,antes:saldoAnt,agregado:m.saldo,nuevo}); setRCli(null);
+  };
+
+  // ---------- REENVIAR ----------
+  const buscarTel=async()=>{
+    if(reTel.trim().length<7){ showToast('Teléfono inválido','err'); return; }
+    setBusy(true);
+    const r=await vipApi({accion:'buscar_por_telefono',telefono:reTel.trim()});
+    setBusy(false);
+    if(!r.ok||!r.cliente){ showToast('Cliente no encontrado con ese teléfono','err'); return; }
+    setReCli(r.cliente);
+  };
+  const waReenvio=()=>{
+    const c=reCli;
+    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n💰 Saldo actual: *'+fmt(c.saldo||0)+'*\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n\n🔑 Tu código VIP: *'+c.id+'*\n\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
+    window.open('https://wa.me/'+vipTelWA(c.telefono)+'?text='+encodeURIComponent(msg),'_blank');
+  };
+
+  // ---------- REPORTE ----------
+  const generarReporte=async()=>{
+    setBusy(true);
+    const desde=Date.now()-horas*3600*1000;
+    const r=await vipApi({accion:'reporte_turno',operador,sede:vSede,fecha_desde:desde});
+    setBusy(false);
+    if(!r.ok){ showToast(r.error||'No se pudo generar el reporte','err'); return; }
+    setRep(r);
+  };
+  const waReporte=()=>{
+    const r=rep; const desde=new Date(Date.now()-horas*3600*1000).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
+    let det=''; if(r.ventas>0&&r.detalle_ventas){ det='\n   '+Object.entries(r.detalle_ventas).filter(([,v])=>v>0).map(([k,v])=>v+' '+k).join(', '); }
+    const msg='📊 *REPORTE DE TURNO — PANZER CARWASH*\n━━━━━━━━━━━━━━━━━━\n👤 Empleado: '+operador+'\n📍 Sede: '+sede+'\n🕐 Turno: '+desde+' → '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' ('+horas+'h)\n━━━━━━━━━━━━━━━━━━\n🔋 Tokens canjeados: '+r.tokens_canjeados+'\n🛒 Membresías vendidas: '+r.ventas+det+'\n💰 Recargas: '+r.recargas+(r.monto_recargas>0?(' ('+fmt(r.monto_recargas)+')'):'')+'\n🎁 Cupones canjeados: '+r.cupones+'\n━━━━━━━━━━━━━━━━━━\n✅ Panzer VIP';
+    window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
+  };
+
+  // ---------- UI helpers ----------
+  const memBtn=(tipo,sel,onSel)=>{ const m=VIP_MEMBRESIAS[tipo]; const on=sel===tipo; return (
+    <button key={tipo} onClick={()=>onSel(tipo)} style={{flex:1,padding:'10px 6px',borderRadius:12,border:'2px solid '+(on?'var(--blue)':'var(--bd)'),background:on?'var(--blue-d)':'var(--sf2)',color:'var(--t)',cursor:'pointer'}}>
+      <div style={{fontWeight:800}}>{tipo==='Gold'?'🥇':tipo==='Silver'?'🥈':'⭐'} {tipo}</div>
+      <div className="header-sub">{m.tokens} tk · {fmt(m.precio)}</div>
+    </button>
+  );};
+  const pagoBtn=(p,sel,onSel)=>(<button key={p} onClick={()=>onSel(p)} style={{flex:1,padding:'8px',borderRadius:10,border:'1px solid '+(sel===p?'var(--blue)':'var(--bd)'),background:sel===p?'var(--blue-d)':'var(--sf2)',color:'var(--t)',fontSize:12,fontWeight:600,cursor:'pointer'}}>{p}</button>);
+  const clientCard=(c)=>(<div className="card" style={{marginBottom:12}}><div style={{fontWeight:800,fontSize:17}}>{c.nombre}</div><div className="header-sub">{c.membresia} · Código {c.id}</div><div style={{fontSize:22,fontWeight:800,marginTop:4}}>Saldo: {fmt(c.saldo||0)}</div></div>);
+
+  const Menu=()=>(
+    <div>
+      <div className="header-sub" style={{marginBottom:12}}>{sede} · {operador}</div>
+      {[['canjear','🪙 Canjear tokens (QR)'],['vender','💳 Vender membresía'],['recargar','🔋 Recargar saldo'],['reenviar','📲 Reenviar carnet'],['reporte','📊 Reporte de turno']].map(([k,l])=>(
+        <button key={k} className="btn-secondary" style={{marginBottom:10,justifyContent:'flex-start'}} onClick={()=>{volver();setPant(k);}}>{l}</button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="sheet-bg" onClick={()=>!busy&&onClose()}>
+      <div className="sheet" onClick={e=>e.stopPropagation()} style={{maxHeight:'90vh',overflowY:'auto'}}>
+        <div className="sheet-handle"/>
+        <div className="card-t" style={{justifyContent:'space-between'}}>
+          <span>💳 Membresías</span>
+          {pant!=='menu' && <button className="header-x" onClick={volver}>← Menú</button>}
+        </div>
+
+        {pant==='menu' && <Menu/>}
+
+        {/* ===== CANJEAR ===== */}
+        {pant==='canjear' && (
+          canjeRes ? (
+            <div className="card" style={{background:'var(--green-d)',borderColor:'var(--green)'}}>
+              <div style={{fontWeight:800,fontSize:18}}>✅ Canje realizado</div>
+              <div className="header-sub" style={{margin:'6px 0'}}>{canjeRes.tok} token(s) ({fmt(canjeRes.monto)}) a {canjeRes.nombre}.<br/>Nuevo saldo: {fmt(canjeRes.saldo)}</div>
+              <button className="btn-primary" onClick={()=>{setCanjeRes(null);}}>Otro canje</button>
+            </div>
+          ) : cupon ? (
+            <div className="card">
+              {cupon.estado==='verificando' && <div className="empty">Verificando cupón…</div>}
+              {cupon.estado==='canjeado' && <div><div style={{fontWeight:800,color:'var(--amber)'}}>⚠️ Cupón ya canjeado</div><button className="btn-secondary" style={{marginTop:10}} onClick={()=>setCupon(null)}>Volver</button></div>}
+              {cupon.estado==='disponible' && (<div>
+                <div style={{fontSize:30,textAlign:'center'}}>{cupon.info.emoji||'🎁'}</div>
+                <div style={{fontWeight:800,textAlign:'center'}}>{cupon.info.nombre||cupon.data.nombre_cupon||'Cupón'}</div>
+                <div className="header-sub" style={{textAlign:'center',marginBottom:10}}>{cupon.info.descripcion||''}<br/>👤 {cupon.data.nombre_cliente||cupon.data.id_cliente}</div>
+                <button className="btn-primary" disabled={busy} onClick={confirmarCupon}>{busy?'Registrando…':'🎁 Confirmar y entregar'}</button>
+              </div>)}
+              {cupon.estado==='entregado' && <div><div style={{fontWeight:800,color:'var(--green)'}}>✅ Beneficio entregado</div><button className="btn-primary" style={{marginTop:10}} onClick={()=>setCupon(null)}>Listo</button></div>}
+            </div>
+          ) : cli ? (
+            <div>
+              {clientCard(cli)}
+              <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:16,margin:'10px 0'}}>
+                <button className="qty-btn" style={{width:42,height:42,borderRadius:10,border:'1px solid var(--bd)',background:'var(--sf2)',color:'var(--tb)',fontSize:22,fontWeight:700}} onClick={()=>setTok(Math.max(1,tok-1))}>−</button>
+                <div style={{textAlign:'center'}}><div style={{fontSize:30,fontWeight:800}}>{tok}</div><div className="header-sub">{fmt(tok*VIP_PRECIO_TOKEN)}</div></div>
+                <button className="qty-btn" style={{width:42,height:42,borderRadius:10,border:'1px solid var(--bd)',background:'var(--sf2)',color:'var(--tb)',fontSize:22,fontWeight:700}} onClick={()=>setTok(Math.min(maxTok(),tok+1))}>+</button>
+              </div>
+              <button className="btn-primary" disabled={busy} onClick={descontar}>{busy?'Procesando…':'✅ Descontar '+tok+' token(s)'}</button>
+              <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setCli(null)}>Cancelar</button>
+            </div>
+          ) : (
+            <div>
+              <div className="header-sub" style={{marginBottom:10,textAlign:'center'}}>Escanea el código QR del cliente</div>
+              <QRScanner onScan={onScanCanje}/>
+              {busy && <div className="empty">Consultando…</div>}
+            </div>
+          )
+        )}
+
+        {/* ===== VENDER ===== */}
+        {pant==='vender' && (
+          vRes ? (
+            <div>
+              <div className="card" style={{textAlign:'center',background:vRes.existe?'var(--amber-d)':'var(--green-d)',borderColor:vRes.existe?'var(--amber)':'var(--green)'}}>
+                <div style={{fontSize:24}}>{vRes.existe?'⚠️':'🎉'}</div>
+                <div style={{fontWeight:800}}>{vRes.existe?'Cliente ya registrado':'¡Membresía creada!'}</div>
+                <div className="header-sub">{vRes.membresia} · Saldo {fmt(vRes.saldo)} · {vPago}</div>
+                <div id="vip-venta-qr" style={{display:'flex',justifyContent:'center',margin:'12px 0',background:'#fff',padding:10,borderRadius:12,width:'fit-content',marginLeft:'auto',marginRight:'auto'}}></div>
+                <div className="header-sub">Código VIP: <b>{vRes.id}</b></div>
+              </div>
+              <button className="btn-primary" style={{background:'#25D366',borderColor:'#25D366'}} onClick={waVenta}>📲 Enviar carnet por WhatsApp</button>
+              {vRes.existe && <button className="btn-secondary" style={{marginTop:10}} onClick={()=>{ setRCli({id:vRes.id,nombre:vRes.nombre,membresia:vRes.membresia,saldo:vRes.saldo}); setVRes(null); setPant('recargar'); }}>🔋 Ir a recargar</button>}
+              <button className="btn-secondary" style={{marginTop:10}} onClick={()=>{setVRes(null);setVNombre('');setVTel('');setVMem(null);}}>Nueva venta</button>
+            </div>
+          ) : (
+            <div>
+              <label className="label">Nombre del cliente</label>
+              <input className="input" value={vNombre} onChange={e=>setVNombre(e.target.value)} placeholder="Nombre completo"/>
+              <label className="label">Teléfono (WhatsApp)</label>
+              <input className="input" type="tel" inputMode="numeric" value={vTel} onChange={e=>setVTel(e.target.value.replace(/[^0-9]/g,''))} placeholder="3001234567"/>
+              <label className="label">Membresía</label>
+              <div style={{display:'flex',gap:8,marginBottom:8}}>{['Standard','Silver','Gold'].map(t=>memBtn(t,vMem,setVMem))}</div>
+              <label className="label">Pago</label>
+              <div style={{display:'flex',gap:8,marginBottom:12}}>{['Efectivo','Nequi','Transferencia'].map(p=>pagoBtn(p,vPago,setVPago))}</div>
+              <button className="btn-primary" disabled={busy} onClick={registrar}>{busy?'Registrando…':'💳 Registrar membresía'}</button>
+            </div>
+          )
+        )}
+
+        {/* ===== RECARGAR ===== */}
+        {pant==='recargar' && (
+          rRes ? (
+            <div className="card" style={{background:'var(--green-d)',borderColor:'var(--green)'}}>
+              <div style={{fontWeight:800,fontSize:18}}>✅ Recarga realizada</div>
+              <div className="header-sub" style={{margin:'6px 0'}}>{rRes.nombre} · Paquete {rRes.tipo}<br/>Antes: {fmt(rRes.antes)} · Agregado: +{fmt(rRes.agregado)}</div>
+              <div style={{fontSize:20,fontWeight:800}}>Nuevo saldo: {fmt(rRes.nuevo)}</div>
+              <button className="btn-primary" style={{marginTop:10}} onClick={()=>{setRRes(null);setRTipo(null);}}>Otra recarga</button>
+            </div>
+          ) : rCli ? (
+            <div>
+              {clientCard(rCli)}
+              <label className="label">Paquete de recarga</label>
+              <div style={{display:'flex',gap:8,marginBottom:8}}>{['Standard','Silver','Gold'].map(t=>memBtn(t,rTipo,setRTipo))}</div>
+              <label className="label">Pago</label>
+              <div style={{display:'flex',gap:8,marginBottom:12}}>{['Efectivo','Nequi','Transferencia'].map(p=>pagoBtn(p,rPago,setRPago))}</div>
+              <button className="btn-primary" disabled={busy} onClick={recargar}>{busy?'Recargando…':'🔋 Recargar saldo'}</button>
+              <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setRCli(null)}>Cancelar</button>
+            </div>
+          ) : (
+            <div>
+              <div className="header-sub" style={{marginBottom:10,textAlign:'center'}}>Escanea el código QR del cliente</div>
+              <QRScanner onScan={onScanRecarga}/>
+              {busy && <div className="empty">Consultando…</div>}
+            </div>
+          )
+        )}
+
+        {/* ===== REENVIAR CARNET ===== */}
+        {pant==='reenviar' && (
+          <div>
+            <label className="label">Teléfono del cliente</label>
+            <div style={{display:'flex',gap:8,marginBottom:12}}>
+              <input className="input" type="tel" inputMode="numeric" value={reTel} onChange={e=>setReTel(e.target.value.replace(/[^0-9]/g,''))} placeholder="3001234567" style={{flex:1}}/>
+              <button className="btn-secondary" style={{width:'auto',padding:'0 16px'}} disabled={busy} onClick={buscarTel}>{busy?'…':'Buscar'}</button>
+            </div>
+            {reCli && (<div>{clientCard(reCli)}<button className="btn-primary" style={{background:'#25D366',borderColor:'#25D366'}} onClick={waReenvio}>📲 Enviar carnet por WhatsApp</button></div>)}
+          </div>
+        )}
+
+        {/* ===== REPORTE ===== */}
+        {pant==='reporte' && (
+          <div>
+            <label className="label">Duración del turno</label>
+            <div style={{display:'flex',gap:8,marginBottom:12}}>{[4,8,12].map(h=>(<button key={h} onClick={()=>setHoras(h)} style={{flex:1,padding:'8px',borderRadius:10,border:'1px solid '+(horas===h?'var(--blue)':'var(--bd)'),background:horas===h?'var(--blue-d)':'var(--sf2)',color:'var(--t)',fontWeight:700,cursor:'pointer'}}>{h}h</button>))}</div>
+            <button className="btn-primary" disabled={busy} onClick={generarReporte}>{busy?'Generando…':'📊 Generar reporte'}</button>
+            {rep && (
+              <div className="card" style={{marginTop:12}}>
+                <div className="header-sub" style={{marginBottom:8}}>{operador} · {sede} · últimas {horas}h</div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0'}}><span>🔋 Tokens canjeados</span><b>{rep.tokens_canjeados}</b></div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0'}}><span>🛒 Membresías vendidas</span><b>{rep.ventas}</b></div>
+                {rep.ventas>0 && rep.detalle_ventas && <div className="header-sub" style={{textAlign:'right',marginTop:-4}}>{Object.entries(rep.detalle_ventas).filter(([,v])=>v>0).map(([k,v])=>v+' '+k).join(' · ')}</div>}
+                <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0'}}><span>💰 Recargas</span><b>{rep.recargas}{rep.monto_recargas>0?(' · '+fmt(rep.monto_recargas)):''}</b></div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0'}}><span>🎁 Cupones</span><b>{rep.cupones}</b></div>
+                <button className="btn-primary" style={{marginTop:10,background:'#25D366',borderColor:'#25D366'}} onClick={waReporte}>📲 Enviar reporte por WhatsApp</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <button className="btn-secondary" style={{marginTop:14}} onClick={onClose}>Cerrar</button>
       </div>
     </div>
   );

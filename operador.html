@@ -68,6 +68,11 @@
     .search input:focus{border-color:var(--blue);}
     .search .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--td);font-size:15px;}
     .header-x{background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:8px 12px;color:var(--t);font-size:12px;font-weight:700;cursor:pointer;}
+    /* Menú lateral (drawer) de acciones */
+    .drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200;}
+    .drawer{position:fixed;top:0;left:0;height:100vh;width:260px;max-width:82vw;background:linear-gradient(180deg,var(--sf),var(--sf2));border-right:1px solid var(--bd);z-index:201;padding:18px 14px;display:flex;flex-direction:column;gap:8px;animation:drawerIn .2s ease;box-shadow:0 0 30px rgba(0,0,0,.5);}
+    @keyframes drawerIn{from{transform:translateX(-105%);}to{transform:translateX(0);}}
+    .drawer-item{display:flex;align-items:center;gap:10px;padding:14px;border-radius:12px;font-size:15px;font-weight:700;color:var(--t);background:var(--sf2);border:1px solid var(--bd);cursor:pointer;text-align:left;width:100%;}
     /* Categorías */
     .cats{display:flex;gap:8px;overflow-x:auto;padding:4px 0 10px;scrollbar-width:none;}
     .cats::-webkit-scrollbar{display:none;}
@@ -501,6 +506,7 @@ function App(){
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
+  const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
   // descuentos
@@ -681,12 +687,24 @@ function App(){
           <h1>{sede}</h1>
           <div className="header-sub">{operador} · Caja abierta</div>
         </div>
-        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowVip(true)}>💳 Membresías</button>
-        <button className="header-x" onClick={()=>setShowRecepcion(true)}>📦 Recibir{pendTransito>0?(" ("+pendTransito+")"):""}</button>
-        <button className="header-x" onClick={()=>setShowRecibos(true)}>🧾 Recibos</button>
-        <button className="header-x" onClick={()=>setShowMaq(true)}>🔧 Máquinas</button>
-        <button className="header-x" onClick={()=>setShowCierre(true)}>Cerrar caja</button>
+        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setMenuOpen(true)}>☰ Menú{pendTransito>0?(" ("+pendTransito+")"):""}</button>
       </div>
+
+      {/* Menú lateral de acciones */}
+      {menuOpen && (
+        <div className="drawer-bg" onClick={()=>setMenuOpen(false)}>
+          <div className="drawer" onClick={e=>e.stopPropagation()}>
+            <div className="card-t" style={{marginBottom:6}}>Menú</div>
+            <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
+            <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
+            <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecibos(true);}}>🧾 Mis recibos</button>
+            <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMaq(true);}}>🔧 Máquinas</button>
+            <div style={{marginTop:"auto",paddingTop:10}}>
+              <button className="drawer-item" style={{background:"var(--red-d)",borderColor:"var(--red)",color:"var(--red)"}} onClick={()=>{setMenuOpen(false);setShowCierre(true);}}>🔒 Cerrar caja</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="page">
         <div className="search">

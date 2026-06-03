@@ -1465,7 +1465,6 @@ function VipSheet({sede,operador,showToast,onClose}){
     showToast(r.error||'Cliente no encontrado','err'); return false;
   };
   const onScanCanje=async(txt)=>{
-    setScan(false);
     let data; try{ data=JSON.parse(txt); }catch(_){ showToast('QR no reconocido','err'); return; }
     if(data && data.tipo==='cupon'){ procesarCupon(data); return; }
     if(!data || !data.id){ showToast('QR inválido','err'); return; }
@@ -1521,7 +1520,6 @@ function VipSheet({sede,operador,showToast,onClose}){
 
   // ---------- RECARGAR ----------
   const onScanRecarga=async(txt)=>{
-    setRScan(false);
     let data; try{ data=JSON.parse(txt); }catch(_){ showToast('QR no reconocido','err'); return; }
     if(!data||!data.id){ showToast('QR inválido','err'); return; }
     setBusy(true); await cargarCliente(data.id, setRCli); setBusy(false);

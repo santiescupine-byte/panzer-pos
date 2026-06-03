@@ -2331,7 +2331,12 @@ function Membresias({showToast}){
   if(clientes===null) return <div className="empty">Cargando membresías…</div>;
 
   const filtro=q.trim().toLowerCase();
-  const rows=clientes.filter(c=>!filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.id||'').toLowerCase().includes(filtro));
+  const filtroDig=filtro.replace(/\D/g,'');
+  const rows=clientes.filter(c=>{
+    if(!filtro) return true;
+    const tel=String(c.telefono||'').replace(/\D/g,'');
+    return (c.nombre||'').toLowerCase().includes(filtro) || (c.id||'').toLowerCase().includes(filtro) || (filtroDig && tel.includes(filtroDig));
+  });
   const tot=clientes.length;
   const porTipo={Standard:0,Silver:0,Gold:0}; let saldoTot=0;
   clientes.forEach(c=>{ if(porTipo[c.membresia]!==undefined) porTipo[c.membresia]++; saldoTot+=Number(c.saldo)||0; });
@@ -2346,17 +2351,18 @@ function Membresias({showToast}){
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Saldo total en circulación</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(saldoTot)}</div></div>
       </div>
 
-      <div className="toolbar"><input className="input" style={{maxWidth:320}} placeholder="Buscar por nombre o código VIP…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <div className="toolbar"><input className="input" style={{maxWidth:320}} placeholder="Buscar por nombre, código VIP o teléfono…" value={q} onChange={e=>setQ(e.target.value)}/></div>
 
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Código</th><th>Cliente</th><th>Membresía</th><th className="num">Saldo</th><th></th></tr></thead>
+          <thead><tr><th>Código</th><th>Cliente</th><th>Teléfono</th><th>Membresía</th><th className="num">Saldo</th><th></th></tr></thead>
           <tbody>
-            {rows.length===0 && <tr><td colSpan="5"><div className="empty">{tot===0?"No se pudieron cargar las membresías (revisa la conexión).":"Sin resultados."}</div></td></tr>}
+            {rows.length===0 && <tr><td colSpan="6"><div className="empty">{tot===0?"No se pudieron cargar las membresías (revisa la conexión).":"Sin resultados."}</div></td></tr>}
             {rows.slice(0,300).map(c=>(
               <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>verFicha(c)}>
                 <td className="muted">{c.id}</td>
                 <td className="row-name">{c.nombre}</td>
+                <td className="muted">{c.telefono||"—"}</td>
                 <td><span className="pill pill-prod">{c.membresia}</span></td>
                 <td className="num"><b>{fmt(c.saldo)}</b></td>
                 <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();verFicha(c);}}>Ver</button></td>

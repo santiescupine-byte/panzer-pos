@@ -407,6 +407,25 @@ const db = {
       if(error) throw error;
     }
   },
+  // ---- Transferencias en tránsito que llegan a la sede ----
+  async transferenciasEnTransito(sede){
+    if(DEMO_MODE) return [];
+    const { data, error } = await sb.from('transferencias')
+      .select('id,producto_nombre,cantidad_enviada,enviado_at,origen')
+      .eq('destino',sede).eq('estado','en_transito').order('enviado_at');
+    if(error) return [];
+    return data||[];
+  },
+  // Recibe transferencias: cada item = {id, cantidad} (lo que realmente llegó)
+  async recibirTransferencias(items, operador){
+    if(DEMO_MODE) return;
+    for(const it of items){
+      const { error } = await sb.rpc('recibir_transferencia',{
+        p_id:it.id, p_cantidad_recibida:it.cantidad, p_operador:operador, p_nota:it.nota||null
+      });
+      if(error) throw error;
+    }
+  },
 };
 
 const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
@@ -441,6 +460,7 @@ function App(){
   const [showMaq,setShowMaq]=useState(false);   // sheet de máquinas / mantenimiento
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
+  const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
   // descuentos
@@ -457,6 +477,7 @@ function App(){
       const prods=await db.getProductos(sedeSel);
       setProductos(prods);
       db.getDescuentos().then(setDescuentos).catch(()=>{});
+      db.transferenciasEnTransito(sedeSel).then(a=>setPendTransito(a.length)).catch(()=>{});
       // El chequeo de inventario es OBLIGATORIO solo para CAJEROS. Supervisor/admin/otros entran directo.
       if(rol && rol!=='cajero'){ setChequeoHecho(true); }
       else {
@@ -620,7 +641,7 @@ function App(){
           <h1>{sede}</h1>
           <div className="header-sub">{operador} · Caja abierta</div>
         </div>
-        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowRecepcion(true)}>📦 Recibir</button>
+        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowRecepcion(true)}>📦 Recibir{pendTransito>0?(" ("+pendTransito+")"):""}</button>
         <button className="header-x" onClick={()=>setShowRecibos(true)}>🧾 Recibos</button>
         <button className="header-x" onClick={()=>setShowMaq(true)}>🔧 Máquinas</button>
         <button className="header-x" onClick={()=>setShowCierre(true)}>Cerrar caja</button>
@@ -692,7 +713,7 @@ function App(){
       {showRecepcion && (
         <RecepcionSheet sede={sede} operador={operador} productos={productos} showToast={showToast}
           onClose={()=>setShowRecepcion(false)}
-          onSaved={()=>{ db.getProductos(sede).then(setProductos).catch(()=>{}); }}/>
+          onSaved={()=>{ db.getProductos(sede).then(setProductos).catch(()=>{}); db.transferenciasEnTransito(sede).then(a=>setPendTransito(a.length)).catch(()=>{}); }}/>
       )}
     </div>
   );
@@ -1218,57 +1239,115 @@ function RecibosSheet({sede,operador,onClose}){
 // y lo SUMA al inventario central de la sede (ajustar_inventario).
 // ============================================================
 function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
+  const [modo,setModo]=useState(null);          // 'transito' | 'proveedor'
+  const [transitos,setTransitos]=useState(null); // transferencias en tránsito
+  const [rec,setRec]=useState({});               // id → cantidad recibida (string)
   const [q,setQ]=useState("");
-  const [cant,setCant]=useState({}); // producto_id → string
+  const [cant,setCant]=useState({});             // proveedor: producto_id → string
   const [busy,setBusy]=useState(false);
 
-  // solo productos que controlan inventario (los que tienen stock que reabastecer)
+  useEffect(()=>{
+    db.transferenciasEnTransito(sede).then(ts=>{
+      setTransitos(ts);
+      const r={}; ts.forEach(t=>{ r[t.id]=String(t.cantidad_enviada); }); setRec(r);
+      setModo(ts.length>0?'transito':'proveedor');   // si hay envíos pendientes, abre en esa pestaña
+    }).catch(()=>{ setTransitos([]); setModo('proveedor'); });
+  },[]);
+
+  // ---- proveedor (a ciegas) ----
   const lista=(productos||[]).filter(p=>p.controla_stock);
   const visibles=lista.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
-  const set=(id,v)=>setCant(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const setC=(id,v)=>setCant(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
   const items=Object.entries(cant).map(([producto_id,v])=>({producto_id,cantidad:Number(v)||0})).filter(it=>it.cantidad>0);
-  const totalLineas=items.length;
   const totalUds=items.reduce((s,it)=>s+it.cantidad,0);
 
-  const guardar=async()=>{
+  const guardarProveedor=async()=>{
     if(!items.length){ showToast("Escribe al menos una cantidad","err"); return; }
     setBusy(true);
     try{
       await db.recibirMercancia(sede, operador, items);
       showToast("Inventario actualizado ("+totalUds+" uds)","ok");
-      if(onSaved) onSaved();
-      onClose();
+      if(onSaved) onSaved(); onClose();
     }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setBusy(false); }
   };
+
+  // ---- tránsito (transferencias de Kemilabo) ----
+  const setR=(id,v)=>setRec(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const recibirTransito=async()=>{
+    if(!transitos||!transitos.length) return;
+    setBusy(true);
+    try{
+      const its=transitos.map(t=>({id:t.id, cantidad:Number(rec[t.id]??t.cantidad_enviada)||0}));
+      await db.recibirTransferencias(its, operador);
+      const faltantes=transitos.filter(t=>(Number(rec[t.id]??t.cantidad_enviada)||0) < Number(t.cantidad_enviada));
+      showToast(faltantes.length?("Recibido — "+faltantes.length+" con faltante"):"Transferencia recibida ✓","ok");
+      if(onSaved) onSaved(); onClose();
+    }catch(e){ showToast("No se pudo recibir: "+(e.message||e),"err"); setBusy(false); }
+  };
+
+  const tab=(k,l)=>(<div onClick={()=>setModo(k)} style={{flex:1,textAlign:"center",padding:"9px 6px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,background:modo===k?"var(--blue-d)":"transparent",color:modo===k?"var(--blue)":"var(--td)"}}>{l}</div>);
 
   return (
     <div className="sheet-bg" onClick={()=>!busy&&onClose()}>
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
         <div className="card-t">📦 Recibir mercancía</div>
-        <div className="header-sub" style={{marginBottom:10}}>{sede} · suma al inventario lo que llega del proveedor (snacks, bebidas…)</div>
 
-        <div className="search" style={{marginBottom:10}}>
-          <span className="ico">🔍</span>
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:12,padding:4,marginBottom:12}}>
+          {tab('transito','🚚 De Kemilabo'+(transitos&&transitos.length?(" ("+transitos.length+")"):""))}
+          {tab('proveedor','🏪 De proveedor')}
         </div>
 
-        <div style={{maxHeight:"45vh",overflowY:"auto",marginBottom:10}}>
-          {visibles.length===0 && <div className="empty">No hay productos con inventario en esta sede.</div>}
-          {visibles.map(p=>{ const v=cant[p.id]||""; return (
-            <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
-              <div style={{flex:1}}>
-                <div style={{fontWeight:600}}>{p.nombre}</div>
-                {p.categoria && <div className="header-sub">{p.categoria}</div>}
+        {modo===null && <div className="empty">Cargando…</div>}
+
+        {/* ---- TRÁNSITO ---- */}
+        {modo==='transito' && (
+          transitos===null ? <div className="empty">Cargando…</div> :
+          transitos.length===0 ? <div className="empty">No hay transferencias en tránsito hacia {sede}.</div> : (
+            <div>
+              <div className="header-sub" style={{marginBottom:10}}>Llegó un envío desde la bodega. Escribe cuánto recibiste <b>de verdad</b> de cada producto (si llegó menos, queda registrado el faltante).</div>
+              <div style={{maxHeight:"45vh",overflowY:"auto",marginBottom:10}}>
+                {transitos.map(t=>{ const r=Number(rec[t.id]??t.cantidad_enviada)||0; const falta=Number(t.cantidad_enviada)-r; return (
+                  <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600}}>{t.producto_nombre}</div>
+                      <div className="header-sub">Enviado: {Number(t.cantidad_enviada)}{falta>0?<span style={{color:"var(--amber)"}}> · faltan {falta}</span>:(falta<0?<span style={{color:"var(--amber)"}}> · sobran {-falta}</span>:<span style={{color:"var(--green)"}}> · ✓</span>)}</div>
+                    </div>
+                    <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} value={rec[t.id]??""} onChange={e=>setR(t.id,e.target.value)}/>
+                  </div>
+                );})}
               </div>
-              <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Llegó…" value={v} onChange={e=>set(p.id,e.target.value)}/>
+              <button className="btn-primary" disabled={busy} onClick={recibirTransito}>{busy?"Recibiendo…":"✅ Confirmar recepción"}</button>
             </div>
-          );})}
-        </div>
+          )
+        )}
 
-        {totalLineas>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a ingresar <b>{totalUds}</b> unidades en <b>{totalLineas}</b> producto(s).</div>}
-        <button className="btn-primary" disabled={busy||!totalLineas} onClick={guardar}>{busy?"Guardando…":"✅ Registrar entrada"}</button>
-        <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cancelar</button>
+        {/* ---- PROVEEDOR (a ciegas) ---- */}
+        {modo==='proveedor' && (
+          <div>
+            <div className="header-sub" style={{marginBottom:10}}>Lo que llega directo del proveedor (snacks, bebidas…). Escribe cuánto llegó de cada producto.</div>
+            <div className="search" style={{marginBottom:10}}>
+              <span className="ico">🔍</span>
+              <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
+            </div>
+            <div style={{maxHeight:"42vh",overflowY:"auto",marginBottom:10}}>
+              {visibles.length===0 && <div className="empty">No hay productos con inventario en esta sede.</div>}
+              {visibles.map(p=>{ const v=cant[p.id]||""; return (
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600}}>{p.nombre}</div>
+                    {p.categoria && <div className="header-sub">{p.categoria}</div>}
+                  </div>
+                  <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Llegó…" value={v} onChange={e=>setC(p.id,e.target.value)}/>
+                </div>
+              );})}
+            </div>
+            {items.length>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a ingresar <b>{totalUds}</b> unidades en <b>{items.length}</b> producto(s).</div>}
+            <button className="btn-primary" disabled={busy||!items.length} onClick={guardarProveedor}>{busy?"Guardando…":"✅ Registrar entrada"}</button>
+          </div>
+        )}
+
+        <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
       </div>
     </div>
   );

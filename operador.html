@@ -362,6 +362,36 @@ const db = {
     if(error) throw error;
     return { recibo: data };
   },
+  // ---- MANTENIMIENTO (operador) ----
+  async getEquipos(sede){
+    if(DEMO_MODE) return [
+      {id:"eq1",nombre:"Máquina de lavado 1",estado:"operativa"},
+      {id:"eq2",nombre:"Aspiradora 1",estado:"operativa"},
+      {id:"eq3",nombre:"Compresor",estado:"parada"},
+    ];
+    const { data, error } = await sb.from('equipos').select('id,nombre,estado').eq('sede',sede).eq('activo',true).order('nombre');
+    if(error) return [];
+    return data||[];
+  },
+  async reportarFalla(equipoId, operador, descripcion){
+    if(DEMO_MODE) return "demo-rep";
+    const { data, error } = await sb.rpc('reportar_falla',{p_equipo_id:equipoId,p_operador:operador,p_descripcion:descripcion});
+    if(error) throw error;
+    return data;
+  },
+  // ---- Mis últimos recibos (consulta del propio operador) ----
+  async misRecibos(sede, operador){
+    if(DEMO_MODE) return [
+      {id:"r1",numero_recibo:"R-000124",total:31000,descuento:0,pago_efectivo:6000,pago_qr:25000,pago_tarjeta:0,anulada:false,created_at:new Date(Date.now()-3600000).toISOString(),venta_items:[{nombre_producto:"Lavado básico",cantidad:1,precio_unit:25000,subtotal:25000,descuento:0},{nombre_producto:"Token aspiradora",cantidad:1,precio_unit:6000,subtotal:6000,descuento:0}]},
+      {id:"r2",numero_recibo:"R-000123",total:18000,descuento:2000,pago_efectivo:18000,pago_qr:0,pago_tarjeta:0,anulada:false,created_at:new Date(Date.now()-7200000).toISOString(),venta_items:[{nombre_producto:"Cera líquida",cantidad:1,precio_unit:20000,subtotal:20000,descuento:2000}]},
+    ];
+    const { data, error } = await sb.from('ventas')
+      .select('id,numero_recibo,total,descuento,pago_efectivo,pago_qr,pago_tarjeta,anulada,created_at, venta_items(nombre_producto,cantidad,precio_unit,subtotal,descuento)')
+      .eq('sede',sede).eq('operador',operador)
+      .order('created_at',{ascending:false}).limit(5);
+    if(error) return [];
+    return data||[];
+  },
 };
 
 const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
@@ -393,6 +423,8 @@ function App(){
   // resumen del turno
   const [ventasTurno,setVentasTurno]=useState([]);
   const [showCierre,setShowCierre]=useState(false);
+  const [showMaq,setShowMaq]=useState(false);   // sheet de máquinas / mantenimiento
+  const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
   // descuentos
@@ -568,7 +600,9 @@ function App(){
           <h1>{sede}</h1>
           <div className="header-sub">{operador} · Caja abierta</div>
         </div>
-        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowCierre(true)}>Cerrar caja</button>
+        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowRecibos(true)}>🧾 Recibos</button>
+        <button className="header-x" onClick={()=>setShowMaq(true)}>🔧 Máquinas</button>
+        <button className="header-x" onClick={()=>setShowCierre(true)}>Cerrar caja</button>
       </div>
 
       <div className="page">
@@ -621,6 +655,16 @@ function App(){
       {/* Teclado para precio variable */}
       {precioModal && (
         <PrecioSheet producto={precioModal} onClose={()=>setPrecioModal(null)} onConfirm={confirmarPrecio}/>
+      )}
+
+      {/* Sheet de máquinas / reporte de mantenimiento */}
+      {showMaq && (
+        <MaquinasSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowMaq(false)}/>
+      )}
+
+      {/* Sheet "mis últimos recibos" */}
+      {showRecibos && (
+        <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
       )}
     </div>
   );
@@ -984,6 +1028,157 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
             <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setPaso("carrito")}>← Volver al carrito</button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: MÁQUINAS / REPORTE DE MANTENIMIENTO (operador)
+// El operador reporta una falla: descripción OBLIGATORIA y apaga la máquina.
+// Solo el supervisor la enciende desde el back office. Botón de WhatsApp.
+// ============================================================
+function MaquinasSheet({sede,operador,showToast,onClose}){
+  const [equipos,setEquipos]=useState(null);
+  const [sel,setSel]=useState(null);      // equipo elegido para reportar
+  const [desc,setDesc]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [enviado,setEnviado]=useState(null); // {equipo,desc} tras reportar, para ofrecer WhatsApp
+
+  const load=()=>{ db.getEquipos(sede).then(setEquipos).catch(()=>setEquipos([])); };
+  useEffect(load,[]);
+
+  const mensajeWA=(eq,d)=>'*🔧 Reporte de máquina — '+sede+'*\n'+
+    'Equipo: '+eq.nombre+'\n'+
+    'Operador: '+operador+'\n'+
+    'Fecha: '+new Date().toLocaleString('es-CO')+'\n'+
+    '———\n'+
+    'Falla: '+d+'\n'+
+    '*Máquina APAGADA — pendiente de reparación por supervisor*';
+  const enviarWhatsApp=(eq,d)=>{
+    const url='https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA(eq,d));
+    window.open(url,'_blank');
+  };
+
+  const reportar=async()=>{
+    const d=desc.trim();
+    if(!d){ showToast("La descripción es obligatoria","err"); return; }
+    setBusy(true);
+    try{
+      await db.reportarFalla(sel.id, operador, d);
+      setEnviado({equipo:sel, desc:d});
+      setSel(null); setDesc("");
+      load();
+      showToast("Máquina apagada y reportada","ok");
+    }catch(e){ showToast("No se pudo reportar: "+(e.message||e),"err"); }
+    finally{ setBusy(false); }
+  };
+
+  return (
+    <div className="sheet-bg" onClick={()=>!busy&&onClose()}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🔧 Máquinas — {sede}</div>
+
+        {/* Confirmación tras reportar: ofrecer WhatsApp */}
+        {enviado && (
+          <div className="card" style={{margin:"4px 0 14px",background:"var(--red-d)",borderColor:"var(--red)"}}>
+            <div style={{fontWeight:700}}>✅ {enviado.equipo.nombre} apagada y reportada</div>
+            <div className="header-sub" style={{margin:"4px 0 10px"}}>{enviado.desc}</div>
+            <button className="btn-primary" style={{background:"#25D366",borderColor:"#25D366"}} onClick={()=>enviarWhatsApp(enviado.equipo,enviado.desc)}>📲 Enviar reporte por WhatsApp</button>
+            <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setEnviado(null)}>Listo</button>
+          </div>
+        )}
+
+        {!enviado && (
+          !equipos ? <div className="empty">Cargando…</div> :
+          equipos.length===0 ? <div className="empty">No hay máquinas configuradas para esta sede.</div> :
+          !sel ? (
+            <div>
+              <div className="header-sub" style={{marginBottom:10}}>Toca una máquina operativa para reportar una falla.</div>
+              {equipos.map(eq=>{ const parada=eq.estado==='parada'; return (
+                <div key={eq.id} onClick={()=>{ if(!parada) setSel(eq); }}
+                  style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",marginBottom:8,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:parada?"default":"pointer",opacity:parada?0.7:1}}>
+                  <span style={{width:12,height:12,borderRadius:"50%",background:parada?"var(--red)":"var(--green)",flexShrink:0}}></span>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:700}}>{eq.nombre}</div>
+                    <div className="header-sub" style={{color:parada?"var(--red)":"var(--green)"}}>{parada?"Parada — reportada":"Operativa"}</div>
+                  </div>
+                  {!parada && <span style={{color:"var(--td)"}}>Reportar ›</span>}
+                </div>
+              );})}
+            </div>
+          ) : (
+            <div>
+              <div className="card" style={{marginBottom:12}}>
+                <div className="header-sub">Reportando falla de</div>
+                <div style={{fontWeight:800,fontSize:18}}>{sel.nombre}</div>
+              </div>
+              <label className="label">Descripción de la falla (obligatoria)</label>
+              <textarea className="input" rows="4" style={{resize:"vertical"}} value={desc} onChange={e=>setDesc(e.target.value)} placeholder="¿Qué le pasa a la máquina?"></textarea>
+              <button className="btn-primary" style={{marginTop:14,background:"var(--red)",borderColor:"var(--red)"}} disabled={busy||!desc.trim()} onClick={reportar}>{busy?"Reportando…":"🔌 Reportar y apagar máquina"}</button>
+              <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={()=>{setSel(null);setDesc("");}}>← Volver</button>
+            </div>
+          )
+        )}
+
+        {!sel && !enviado && <button className="btn-secondary" style={{marginTop:6}} onClick={onClose}>Cerrar</button>}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: MIS ÚLTIMOS RECIBOS (operador)
+// El cajero consulta sus últimos 5 recibos por si cometió un error.
+// Solo lectura — no puede editar ni anular (eso es del back office).
+// ============================================================
+function RecibosSheet({sede,operador,onClose}){
+  const [recibos,setRecibos]=useState(null);
+  const [abierto,setAbierto]=useState(null); // id del recibo expandido
+
+  useEffect(()=>{ db.misRecibos(sede,operador).then(setRecibos).catch(()=>setRecibos([])); },[]);
+
+  const metodo=r=>{ const m=[]; if(r.pago_efectivo>0)m.push("Efectivo"); if(r.pago_qr>0)m.push("QR/Transf."); if(r.pago_tarjeta>0)m.push("Tarjeta"); return m.join(" + ")||"—"; };
+  const fechaHora=iso=>{ const d=new Date(iso); return d.toLocaleDateString('es-CO')+" "+d.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}); };
+
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🧾 Mis últimos recibos</div>
+        <div className="header-sub" style={{marginBottom:10}}>{operador} · {sede} · solo consulta</div>
+
+        {!recibos ? <div className="empty">Cargando…</div> :
+         recibos.length===0 ? <div className="empty">Aún no has registrado ventas.</div> :
+         recibos.map(r=>{ const exp=abierto===r.id; return (
+          <div key={r.id} style={{marginBottom:8,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",overflow:"hidden",opacity:r.anulada?0.6:1}}>
+            <div onClick={()=>setAbierto(exp?null:r.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",cursor:"pointer"}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700}}>{r.numero_recibo||"(sin Nº)"} {r.anulada && <span style={{fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--red-d)",color:"var(--red)",marginLeft:4}}>ANULADO</span>}</div>
+                <div className="header-sub">{fechaHora(r.created_at)} · {metodo(r)}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontWeight:800,fontSize:16}}>{fmt(r.total)}</div>
+                <div className="header-sub">{exp?"▲":"▼"}</div>
+              </div>
+            </div>
+            {exp && (
+              <div style={{padding:"0 14px 12px",borderTop:"1px solid var(--bd)"}}>
+                {(r.venta_items||[]).map((it,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13}}>
+                    <span>{it.cantidad}× {it.nombre_producto}{it.descuento>0?<span style={{color:"var(--green)"}}> (−{fmt(it.descuento)})</span>:null}</span>
+                    <span>{fmt(it.subtotal-(it.descuento||0))}</span>
+                  </div>
+                ))}
+                {r.descuento>0 && <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13,color:"var(--green)"}}><span>Descuento total</span><span>−{fmt(r.descuento)}</span></div>}
+                <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0",borderTop:"1px solid var(--bd)",fontWeight:800}}><span>Total</span><span>{fmt(r.total)}</span></div>
+              </div>
+            )}
+          </div>
+        );})}
+
+        <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Cerrar</button>
       </div>
     </div>
   );

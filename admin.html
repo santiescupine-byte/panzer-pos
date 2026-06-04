@@ -229,6 +229,7 @@ let DEMO = {
   equipos: [],        // mantenimiento demo
   mant: [],           // reportes de mantenimiento demo
   transferencias: [], // transferencias en tránsito demo
+  remisiones: [],     // remisiones a franquicias demo
   empleados: [
     {id:"e0", nombre:"ADMIN",   rol:"admin",   activo:true, pin:"6262", sedes:["Kemilabo"]},
     {id:"es", nombre:"Supervisor", rol:"supervisor", activo:true, pin:"7777", sedes:[]},
@@ -633,6 +634,28 @@ const db = {
     if(hasta) q=q.lte('created_at',hasta);
     const {data,error}=await q; if(error) return []; return data||[];
   },
+  // ---- REMISIONES (venta al por mayor de Kemilabo a franquicias) ----
+  async crearRemision({destino, origen, operador, nota, items}){
+    if(DEMO_MODE){
+      DEMO.remisiones = DEMO.remisiones||[];
+      const total=items.reduce((s,it)=>s+it.cantidad*it.precio_unit,0);
+      items.forEach(it=>{ const p=DEMO.productos.find(x=>x.id===it.producto_id); if(p){p.stock=p.stock||{}; p.stock[origen]=(Number(p.stock[origen])||0)-it.cantidad;} });
+      DEMO.remisiones.unshift({id:uid(),destino,origen,operador,nota,total,estado:'pendiente',created_at:new Date().toISOString(),remision_items:items.map(it=>({...it,nombre_producto:it.nombre,subtotal:it.cantidad*it.precio_unit}))});
+      return;
+    }
+    const {error}=await sb.rpc('crear_remision',{p_destino:destino,p_origen:origen||'Kemilabo',p_operador:operador||null,p_nota:nota||null,p_items:items});
+    if(error) throw error;
+  },
+  async listRemisiones(){
+    if(DEMO_MODE) return [...(DEMO.remisiones||[])];
+    const {data,error}=await sb.from('remisiones').select('*, remision_items(*)').order('created_at',{ascending:false}).limit(300);
+    if(error) return []; return data||[];
+  },
+  async marcarRemisionPagada(id){
+    if(DEMO_MODE){ const r=(DEMO.remisiones||[]).find(x=>x.id===id); if(r){r.estado='pagada';r.pagada_at=new Date().toISOString();} return; }
+    // RPC: marca pagada + crea la venta de la franquicia destino (atómico)
+    const {error}=await sb.rpc('marcar_remision_pagada',{p_id:id}); if(error) throw error;
+  },
   async transferirStock(producto_id, origen, destino, cantidad){
     if(DEMO_MODE){
       const p=DEMO.productos.find(x=>x.id===producto_id);
@@ -770,7 +793,7 @@ function App(){
       {(() => {
         const NAV = auth.rol==='supervisor'
           ? [["mantenimiento","🔧","Mantenimiento"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -798,6 +821,7 @@ function App(){
               <div className="page">
                 {tab==="informes"   && <Informes showToast={showToast}/>}
                 {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
+                {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
@@ -2512,6 +2536,187 @@ function Membresias({showToast}){
               </table>
             </div>
             <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setSel(null)}>Cerrar</button></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: REMISIONES (venta al por mayor Kemilabo → franquicias)
+// ============================================================
+function Remisiones({showToast, admin}){
+  const [sedes,setSedes]=useState([]);
+  const [prods,setProds]=useState([]);          // controla_stock (con precio del catálogo)
+  const [bodegaStock,setBodegaStock]=useState({});
+  const [remisiones,setRemisiones]=useState(null);
+  const [nueva,setNueva]=useState(false);
+  const [det,setDet]=useState(null);
+  // formulario
+  const [destino,setDestino]=useState("");
+  const [q,setQ]=useState("");
+  const [cant,setCant]=useState({});
+  const [precio,setPrecio]=useState({});
+  const [nota,setNota]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  const bodega = sedes.find(s=>s.es_bodega);
+  const origen = bodega ? bodega.nombre : 'Kemilabo';
+  const load=()=>db.listRemisiones().then(setRemisiones).catch(()=>setRemisiones([]));
+  useEffect(()=>{
+    db.listSedes().then(setSedes).catch(()=>{});
+    db.listProductos().then(ps=>setProds((ps||[]).filter(p=>p.controla_stock))).catch(()=>{});
+    load();
+  },[]);
+
+  const abrirNueva=async()=>{
+    setDestino(""); setCant({}); setPrecio({}); setNota(""); setQ("");
+    if(bodega){ try{ const inv=await db.getInventario(bodega.nombre); const m={}; inv.forEach(r=>m[r.id]=r.stock); setBodegaStock(m); }catch(e){} }
+    setNueva(true);
+  };
+  const setC=(id,v)=>setCant(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const setP=(id,v)=>setPrecio(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const precioDe=p=> (precio[p.id]!==undefined ? Number(precio[p.id]) : Number(p.precio))||0;
+  const itemsForm=prods.filter(p=>Number(cant[p.id])>0).map(p=>({producto_id:p.id,nombre:p.nombre,cantidad:Number(cant[p.id]),precio_unit:precioDe(p)}));
+  const totalForm=itemsForm.reduce((s,it)=>s+it.cantidad*it.precio_unit,0);
+
+  const imprimirRemito=(rem)=>{
+    const its=rem.remision_items||rem.items||[];
+    const fecha=rem.created_at?new Date(rem.created_at).toLocaleString('es-CO'):new Date().toLocaleString('es-CO');
+    const filas=its.map(i=>'<tr><td>'+(i.nombre_producto||i.nombre)+'</td><td style="text-align:center">'+Number(i.cantidad)+'</td><td style="text-align:right">$'+Number(i.precio_unit).toLocaleString('es-CO')+'</td><td style="text-align:right">$'+Number(i.subtotal!=null?i.subtotal:i.cantidad*i.precio_unit).toLocaleString('es-CO')+'</td></tr>').join('');
+    const total=rem.total!=null?rem.total:its.reduce((s,i)=>s+(i.subtotal!=null?i.subtotal:i.cantidad*i.precio_unit),0);
+    const html='<html><head><meta charset="utf-8"><title>Remisión '+rem.destino+'</title>'+
+      '<style>body{font-family:Arial,sans-serif;padding:30px;color:#111}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #ccc;padding:8px;font-size:13px}th{background:#f3f4f6;text-align:left}.tot{font-size:18px;font-weight:bold;text-align:right;margin-top:14px}</style></head><body>'+
+      '<h1>🚚 REMISIÓN — PANZER CARWASH</h1>'+
+      '<div>Origen: <b>'+(rem.origen||origen)+'</b> → Destino: <b>'+rem.destino+'</b></div>'+
+      '<div>Fecha: '+fecha+(rem.operador?(' · Generó: '+rem.operador):'')+'</div>'+
+      '<div>Estado: <b>'+(rem.estado||'pendiente').toUpperCase()+'</b></div>'+
+      '<table><thead><tr><th>Producto</th><th style="text-align:center">Cant.</th><th style="text-align:right">Precio</th><th style="text-align:right">Subtotal</th></tr></thead><tbody>'+filas+'</tbody></table>'+
+      '<div class="tot">TOTAL: $'+Number(total).toLocaleString('es-CO')+'</div>'+
+      (rem.nota?('<p>Nota: '+rem.nota+'</p>'):'')+
+      '<button onclick="window.print()" style="margin-top:18px;padding:10px 16px;font-size:14px;cursor:pointer">🖨 Imprimir</button>'+
+      '</body></html>';
+    const w=window.open('','_blank'); if(!w){ showToast("Permite las ventanas emergentes","err"); return; }
+    w.document.write(html); w.document.close();
+  };
+
+  const crear=async(imprimir)=>{
+    if(!destino){ showToast("Elige la franquicia destino","err"); return; }
+    if(!itemsForm.length){ showToast("Agrega al menos un producto con cantidad","err"); return; }
+    setBusy(true);
+    try{
+      const snapshot={destino,origen,operador:admin,nota,total:totalForm,created_at:new Date().toISOString(),estado:'pendiente',remision_items:itemsForm.map(it=>({...it,nombre_producto:it.nombre,subtotal:it.cantidad*it.precio_unit}))};
+      await db.crearRemision({destino, origen, operador:admin, nota, items:itemsForm});
+      showToast("Remisión creada ("+fmt(totalForm)+")","ok");
+      setNueva(false); load();
+      if(imprimir) imprimirRemito(snapshot);
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusy(false);
+  };
+
+  const pagar=async(rem)=>{
+    if(!confirm("¿Marcar como PAGADA la remisión a "+rem.destino+" ("+fmt(rem.total)+")?\n\nSe registrará como venta facturada de "+rem.destino+" en los Informes.")) return;
+    try{ await db.marcarRemisionPagada(rem.id); showToast("Remisión pagada · sumada a la facturación de "+rem.destino,"ok"); load(); if(det&&det.id===rem.id) setDet({...det,estado:'pagada'}); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  const visibles=prods.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
+  const pendientes=(remisiones||[]).filter(r=>r.estado==='pendiente');
+  const carteraTotal=pendientes.reduce((s,r)=>s+Number(r.total||0),0);
+
+  if(remisiones===null) return <div className="empty">Cargando remisiones…</div>;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Remisiones <span className="muted">({remisiones.length})</span></div>
+        <button className="btn btn-amber" onClick={abrirNueva}>＋ Nueva remisión</button>
+      </div>
+
+      <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Remisiones</div><div style={{fontSize:24,fontWeight:800}}>{remisiones.length}</div></div>
+        <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Pendientes de pago</div><div style={{fontSize:24,fontWeight:800,color:pendientes.length?"var(--amber)":"var(--green)"}}>{pendientes.length}</div></div>
+        <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Cartera (por cobrar)</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(carteraTotal)}</div></div>
+      </div>
+
+      <div className="card" style={{padding:0,overflowX:"auto"}}>
+        <table className="tbl">
+          <thead><tr><th>Fecha</th><th>Destino</th><th className="num">Total</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {remisiones.length===0 && <tr><td colSpan="5"><div className="empty">Aún no hay remisiones.</div></td></tr>}
+            {remisiones.map(r=>(
+              <tr key={r.id} style={{cursor:"pointer"}} onClick={()=>setDet(r)}>
+                <td className="muted">{fLocalDia(r.created_at)} {fLocalHora(r.created_at)}</td>
+                <td className="row-name">{r.destino}</td>
+                <td className="num"><b>{fmt(r.total)}</b></td>
+                <td>{r.estado==='pagada'?<span className="pill pill-prod">Pagada</span>:<span className="pill pill-token">Pendiente</span>}</td>
+                <td style={{whiteSpace:"nowrap"}}>
+                  <button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();imprimirRemito(r);}}>🖨</button>
+                  {r.estado!=='pagada' && <button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();pagar(r);}}>✓ Pagada</button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Crear remisión */}
+      {nueva && (
+        <div className="modal-bg" onClick={()=>!busy&&setNueva(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:720}}>
+            <div className="modal-t">📄 Nueva remisión — desde {origen}</div>
+            <label className="label">Franquicia / destino</label>
+            <select className="select" value={destino} onChange={e=>setDestino(e.target.value)}>
+              <option value="">Seleccionar…</option>
+              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+            <input className="input" placeholder="Buscar producto…" value={q} onChange={e=>setQ(e.target.value)}/>
+            <div style={{maxHeight:"42vh",overflowY:"auto",border:"1px solid var(--bd)",borderRadius:10,padding:"4px 10px",marginBottom:10}}>
+              <div style={{display:"flex",fontSize:11,color:"var(--td)",padding:"6px 0",borderBottom:"1px solid var(--bd)",fontWeight:700}}>
+                <span style={{flex:1}}>Producto</span><span style={{width:70,textAlign:"center"}}>Cant.</span><span style={{width:90,textAlign:"center"}}>Precio</span>
+              </div>
+              {visibles.map(p=>{ const c=cant[p.id]||""; return (
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid var(--bd)"}}>
+                  <div style={{flex:1,fontSize:13}}>{p.nombre} <span className="muted">· bodega: {bodegaStock[p.id]??0}</span></div>
+                  <input className="input" type="number" style={{width:70,textAlign:"center",margin:0,padding:"6px"}} placeholder="0" value={c} onChange={e=>setC(p.id,e.target.value)}/>
+                  <input className="input" type="number" style={{width:90,textAlign:"right",margin:0,padding:"6px"}} value={precio[p.id]!==undefined?precio[p.id]:p.precio} onChange={e=>setP(p.id,e.target.value)}/>
+                </div>
+              );})}
+              {visibles.length===0 && <div className="muted" style={{padding:"10px 0"}}>Sin productos.</div>}
+            </div>
+            <input className="input" placeholder="Nota (opcional)" value={nota} onChange={e=>setNota(e.target.value)}/>
+            <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:8}}><span className="result-label" style={{fontWeight:800}}>Total a cobrar</span><span className="result-value amber" style={{fontSize:20}}>{fmt(totalForm)}</span></div>
+            <div className="muted" style={{fontSize:12,marginBottom:8}}>{itemsForm.length} producto(s) · se descuentan de {origen}</div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setNueva(false)}>Cancelar</button>
+              <button className="btn btn-ghost" disabled={busy||!itemsForm.length||!destino} onClick={()=>crear(true)}>Crear e imprimir</button>
+              <button className="btn btn-amber" disabled={busy||!itemsForm.length||!destino} onClick={()=>crear(false)}>{busy?"Creando…":"Crear remisión"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detalle */}
+      {det && (
+        <div className="modal-bg" onClick={()=>setDet(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Remisión → {det.destino}</div>
+            <div className="muted" style={{marginBottom:10}}>{fLocalDia(det.created_at)} {fLocalHora(det.created_at)}{det.operador?(" · "+det.operador):""} · {det.estado==='pagada'?"PAGADA":"PENDIENTE"}</div>
+            <div className="card" style={{padding:0}}>
+              <table className="tbl">
+                <thead><tr><th>Producto</th><th className="num">Cant.</th><th className="num">Precio</th><th className="num">Subtotal</th></tr></thead>
+                <tbody>{(det.remision_items||[]).map((i,k)=>(
+                  <tr key={k}><td className="row-name">{i.nombre_producto}</td><td className="num">{Number(i.cantidad)}</td><td className="num">{fmt(i.precio_unit)}</td><td className="num">{fmt(i.subtotal)}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:8}}><span className="result-label" style={{fontWeight:800}}>Total</span><span className="result-value amber" style={{fontSize:18}}>{fmt(det.total)}</span></div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button>
+              <button className="btn btn-ghost" onClick={()=>imprimirRemito(det)}>🖨 Imprimir</button>
+              {det.estado!=='pagada' && <button className="btn btn-amber" onClick={()=>pagar(det)}>✓ Marcar pagada</button>}
+            </div>
           </div>
         </div>
       )}

@@ -656,6 +656,11 @@ const db = {
     // RPC: marca pagada + crea la venta de la franquicia destino (atómico)
     const {error}=await sb.rpc('marcar_remision_pagada',{p_id:id}); if(error) throw error;
   },
+  async eliminarRemision(id){
+    if(DEMO_MODE){ DEMO.remisiones=(DEMO.remisiones||[]).filter(x=>x.id!==id); return; }
+    // RPC: devuelve el stock a la bodega + borra (y anula la venta si estaba pagada)
+    const {error}=await sb.rpc('eliminar_remision',{p_id:id}); if(error) throw error;
+  },
   async transferirStock(producto_id, origen, destino, cantidad){
     if(DEMO_MODE){
       const p=DEMO.productos.find(x=>x.id===producto_id);
@@ -2620,6 +2625,12 @@ function Remisiones({showToast, admin}){
     try{ await db.marcarRemisionPagada(rem.id); showToast("Remisión pagada · sumada a la facturación de "+rem.destino,"ok"); load(); if(det&&det.id===rem.id) setDet({...det,estado:'pagada'}); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  const eliminar=async(rem)=>{
+    const extra = rem.estado==='pagada' ? "\n\n⚠️ Estaba PAGADA: también se anulará la venta que se le sumó a "+rem.destino+"." : "";
+    if(!confirm("¿Eliminar la remisión a "+rem.destino+" ("+fmt(rem.total)+")?\n\nEl stock se devuelve a la bodega."+extra)) return;
+    try{ await db.eliminarRemision(rem.id); showToast("Remisión eliminada · stock devuelto a la bodega","ok"); setDet(null); load(); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
 
   const visibles=prods.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
   const pendientes=(remisiones||[]).filter(r=>r.estado==='pendiente');
@@ -2654,6 +2665,7 @@ function Remisiones({showToast, admin}){
                 <td style={{whiteSpace:"nowrap"}}>
                   <button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();imprimirRemito(r);}}>🖨</button>
                   {r.estado!=='pagada' && <button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();pagar(r);}}>✓ Pagada</button>}
+                  <button className="btn btn-ghost btn-sm" style={{color:"var(--red)"}} onClick={e=>{e.stopPropagation();eliminar(r);}}>🗑</button>
                 </td>
               </tr>
             ))}
@@ -2714,6 +2726,7 @@ function Remisiones({showToast, admin}){
             <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:8}}><span className="result-label" style={{fontWeight:800}}>Total</span><span className="result-value amber" style={{fontSize:18}}>{fmt(det.total)}</span></div>
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button>
+              <button className="btn btn-ghost" style={{color:"var(--red)"}} onClick={()=>eliminar(det)}>🗑 Eliminar</button>
               <button className="btn btn-ghost" onClick={()=>imprimirRemito(det)}>🖨 Imprimir</button>
               {det.estado!=='pagada' && <button className="btn btn-amber" onClick={()=>pagar(det)}>✓ Marcar pagada</button>}
             </div>

@@ -617,10 +617,21 @@ const db = {
     if(DEMO_MODE){ DEMO_IDEAL[sede+'|'+producto_id]=ideal; return; }
     const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_ideal:ideal},{onConflict:'producto_id,sede'}); if(error) throw error;
   },
-  // set ABSOLUTO del stock de una sede (mismo mecanismo que el editor de Productos; no toca mínimo/ideal)
-  async setStockSede(producto_id, sede, cantidad){
-    if(DEMO_MODE){ const p=DEMO.productos.find(x=>x.id===producto_id); if(p){ p.stock=p.stock||{}; p.stock[sede]=cantidad; } return; }
-    const {error}=await sb.from('inventario').upsert({producto_id,sede,cantidad},{onConflict:'producto_id,sede'}); if(error) throw error;
+  // Ajuste manual de stock desde el back office: cambia el stock Y deja rastro (movimiento 'ajuste').
+  // delta = nuevo - actual. Usa ajustar_inventario (atómico: suma delta + registra el movimiento).
+  async ajustarStock(producto_id, sede, delta, nuevo, operador){
+    if(DEMO_MODE){ const p=DEMO.productos.find(x=>x.id===producto_id); if(p){ p.stock=p.stock||{}; p.stock[sede]=nuevo; } return; }
+    const {error}=await sb.rpc('ajustar_inventario',{p_producto_id:producto_id,p_sede:sede,p_tipo:'ajuste',p_cantidad:delta,p_operador:operador||null,p_nota:'Ajuste manual (back office)'});
+    if(error) throw error;
+  },
+  // Trazabilidad: todos los movimientos de un producto (entradas/ventas/salidas/transferencias/muestras…)
+  async listMovimientos({producto_id, sede, desde, hasta}={}){
+    if(DEMO_MODE) return [];
+    let q=sb.from('movimientos_inventario').select('created_at,sede,tipo,cantidad,operador,nota').eq('producto_id',producto_id).order('created_at',{ascending:false}).limit(500);
+    if(sede) q=q.eq('sede',sede);
+    if(desde) q=q.gte('created_at',desde);
+    if(hasta) q=q.lte('created_at',hasta);
+    const {data,error}=await q; if(error) return []; return data||[];
   },
   async transferirStock(producto_id, origen, destino, cantidad){
     if(DEMO_MODE){
@@ -786,7 +797,7 @@ function App(){
               </div>
               <div className="page">
                 {tab==="informes"   && <Informes showToast={showToast}/>}
-                {tab==="inventario" && <Inventario showToast={showToast}/>}
+                {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
@@ -1324,7 +1335,7 @@ function Chequeos({showToast}){
 // ============================================================
 // SECCIÓN: INVENTARIO (stock por sede, alertas, transferencias)
 // ============================================================
-function Inventario({showToast}){
+function Inventario({showToast, admin}){
   const [sedes,setSedes]=useState([]);
   const [cats,setCats]=useState([]);
   const [sede,setSede]=useState("");
@@ -1335,6 +1346,7 @@ function Inventario({showToast}){
   const [transfer,setTransfer]=useState(null);
   const [verTransitos,setVerTransitos]=useState(false);
   const [transitos,setTransitos]=useState([]);
+  const [traza,setTraza]=useState(null);   // producto cuyo historial se ve
 
   useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); db.listCategorias().then(setCats).catch(()=>{}); },[]);
   const cargarTransitos=()=>{ db.listTransferencias({estado:'en_transito'}).then(setTransitos).catch(()=>setTransitos([])); };
@@ -1354,9 +1366,11 @@ function Inventario({showToast}){
     try{ await db.setIdeal(r.id,sede,v); setInv(prev=>prev.map(x=>x.id===r.id?{...x,ideal:v}:x)); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
-  const guardarStock=async(r,val)=>{
-    const v=Number(val)||0;   // permite negativo (sobreventa), igual que el resto del sistema
-    try{ await db.setStockSede(r.id,sede,v); setInv(prev=>prev.map(x=>x.id===r.id?{...x,stock:v}:x)); }
+  const guardarStock=async(r,nuevo)=>{
+    const v=Number(nuevo)||0;          // permite negativo (sobreventa)
+    const delta=v-(Number(r.stock)||0);
+    if(delta===0) return;
+    try{ await db.ajustarStock(r.id,sede,delta,v,admin); setInv(prev=>prev.map(x=>x.id===r.id?{...x,stock:v}:x)); showToast("Stock ajustado ("+(delta>0?"+":"")+delta+")","ok"); }
     catch(e){ showToast(""+(e.message||e),"err"); }
   };
   const faltante=r=> (Number(r.ideal)>0 && Number(r.stock)<Number(r.ideal)) ? (Number(r.ideal)-Number(r.stock)) : 0;
@@ -1431,9 +1445,9 @@ function Inventario({showToast}){
 
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th className="num">Ideal</th><th className="num">Transferir</th><th>Estado</th></tr></thead>
+          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th className="num">Ideal</th><th className="num">Transferir</th><th>Estado</th><th></th></tr></thead>
           <tbody>
-            {rows.length===0 && <tr><td colSpan="7"><div className="empty">Sin productos.</div></td></tr>}
+            {rows.length===0 && <tr><td colSpan="8"><div className="empty">Sin productos.</div></td></tr>}
             {rows.map(r=>{
               const st=estado(r);
               const falta=faltante(r);
@@ -1441,11 +1455,12 @@ function Inventario({showToast}){
                 <tr key={r.id}>
                   <td className="row-name">{r.nombre}</td>
                   <td className="muted">{r.categoria}</td>
-                  <td className="num"><input className="input" type="number" style={{margin:0,width:80,textAlign:"right",padding:"6px 8px",fontWeight:700,color:st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"}} value={r.stock} onChange={e=>guardarStock(r,e.target.value)}/></td>
+                  <td className="num"><StockCell value={r.stock} color={st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"} onCommit={v=>guardarStock(r,v)}/></td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.ideal} placeholder="—" onChange={e=>guardarIdeal(r,e.target.value)}/></td>
                   <td className="num">{Number(r.ideal)>0 ? (falta>0 ? <b style={{color:"var(--amber)"}}>{falta}</b> : <span className="pill pill-prod">✓</span>) : <span className="muted">—</span>}</td>
                   <td>{st==="agotado"?<span className="pill pill-off">Agotado</span>:st==="bajo"?<span className="pill pill-token">Stock bajo</span>:<span className="pill pill-prod">OK</span>}</td>
+                  <td><button className="btn btn-ghost btn-sm" title="Trazabilidad" onClick={()=>setTraza(r)}>📜</button></td>
                 </tr>
               );
             })}
@@ -1455,6 +1470,72 @@ function Inventario({showToast}){
 
       {transfer && <TransferModal t={transfer} setT={setTransfer} bodega={bodega} sedes={sedes} inv={inv} onClose={()=>setTransfer(null)} onConfirm={hacerTransfer}/>}
       {verTransitos && <TransitosModal transitos={transitos} onClose={()=>setVerTransitos(false)}/>}
+      {traza && <TrazaModal producto={traza} sede={sede} sedes={sedes} onClose={()=>setTraza(null)}/>}
+    </div>
+  );
+}
+
+// Celda de stock editable: guarda al salir (blur) o Enter; permite negativo.
+function StockCell({value,color,onCommit}){
+  const [v,setV]=useState(String(value));
+  useEffect(()=>{ setV(String(value)); },[value]);
+  const commit=()=>{ if(v.trim()==="" ) { setV(String(value)); return; } if(Number(v)!==Number(value)) onCommit(Number(v)); };
+  return <input className="input" type="number" style={{margin:0,width:80,textAlign:"right",padding:"6px 8px",fontWeight:700,color}}
+    value={v} onChange={e=>setV(e.target.value)} onBlur={commit} onKeyDown={e=>{ if(e.key==='Enter') e.target.blur(); }}/>;
+}
+
+// Modal de trazabilidad: historial de movimientos de un producto.
+function TrazaModal({producto,sede,sedes,onClose}){
+  const [movs,setMovs]=useState(null);
+  const [filtroSede,setFiltroSede]=useState("");   // "" = todas
+  useEffect(()=>{ setMovs(null); db.listMovimientos({producto_id:producto.id, sede:filtroSede||undefined}).then(setMovs).catch(()=>setMovs([])); },[filtroSede]);
+
+  const tipoInfo={venta:["Venta","var(--blue)"],reabastecimiento:["Entrada","var(--green)"],transferencia:["Transferencia","var(--amber)"],muestra:["Muestra","var(--purple)"],merma:["Merma","var(--red)"],ajuste:["Ajuste","var(--td)"],devolucion:["Devolución","var(--green)"]};
+  const resumen={};
+  (movs||[]).forEach(m=>{ resumen[m.tipo]=(resumen[m.tipo]||0)+Number(m.cantidad); });
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:720}}>
+        <div className="modal-t">📜 Trazabilidad — {producto.nombre}</div>
+        <div className="toolbar" style={{marginBottom:10}}>
+          <div className="fld"><label className="label">Sede</label>
+            <select className="select" value={filtroSede} onChange={e=>setFiltroSede(e.target.value)}>
+              <option value="">Todas las sedes</option>
+              {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+          </div>
+        </div>
+        {movs===null ? <div className="empty">Cargando…</div> : (
+          <div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+              {Object.entries(resumen).map(([t,n])=>{ const inf=tipoInfo[t]||[t,"var(--td)"]; return (
+                <div key={t} className="card" style={{padding:"8px 12px"}}><div className="muted" style={{fontSize:11}}>{inf[0]}</div><div style={{fontWeight:800,color:inf[1]}}>{n>0?"+":""}{n}</div></div>
+              );})}
+              {Object.keys(resumen).length===0 && <div className="muted">Sin movimientos registrados.</div>}
+            </div>
+            <div className="card" style={{padding:0,overflowX:"auto",maxHeight:"50vh",overflowY:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Fecha</th><th>Sede</th><th>Tipo</th><th className="num">Cant.</th><th>Operador</th><th>Nota</th></tr></thead>
+                <tbody>
+                  {(movs||[]).length===0 && <tr><td colSpan="6"><div className="empty">Sin movimientos.</div></td></tr>}
+                  {(movs||[]).map((m,i)=>{ const inf=tipoInfo[m.tipo]||[m.tipo,"var(--td)"]; const c=Number(m.cantidad); return (
+                    <tr key={i}>
+                      <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(m.created_at)} {fLocalHora(m.created_at)}</td>
+                      <td className="muted">{m.sede}</td>
+                      <td><span style={{color:inf[1],fontWeight:700}}>{inf[0]}</span></td>
+                      <td className="num" style={{color:c<0?"var(--red)":"var(--green)",fontWeight:700}}>{c>0?"+":""}{c}</td>
+                      <td className="muted">{m.operador||"—"}</td>
+                      <td className="muted" style={{fontSize:12}}>{m.nota||""}</td>
+                    </tr>
+                  );})}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>Cerrar</button></div>
+      </div>
     </div>
   );
 }

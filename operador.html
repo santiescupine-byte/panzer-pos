@@ -419,6 +419,21 @@ const db = {
       if(error) throw error;
     }
   },
+  // ---- Retiro de producto para MUESTRA/demostración (sale del inventario, no es venta) ----
+  async retirarMuestra(sede, operador, items){
+    if(DEMO_MODE){
+      const st=demoStock(sede);
+      items.forEach(it=>{ if(it.producto_id in st) st[it.producto_id]=(Number(st[it.producto_id])||0)-it.cantidad; });
+      return;
+    }
+    for(const it of items){
+      const { error } = await sb.rpc('ajustar_inventario',{
+        p_producto_id:it.producto_id, p_sede:sede, p_tipo:'muestra',
+        p_cantidad:-Math.abs(it.cantidad), p_operador:operador, p_nota:'Retiro para muestra/demostración (POS)'
+      });
+      if(error) throw error;
+    }
+  },
   // ---- Transferencias en tránsito que llegan a la sede ----
   async transferenciasEnTransito(sede){
     if(DEMO_MODE) return [];
@@ -1322,6 +1337,7 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
   const [rec,setRec]=useState({});               // id → cantidad recibida (string)
   const [q,setQ]=useState("");
   const [cant,setCant]=useState({});             // proveedor: producto_id → string
+  const [cantM,setCantM]=useState({});           // muestra: producto_id → string
   const [busy,setBusy]=useState(false);
 
   useEffect(()=>{
@@ -1349,6 +1365,20 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
     }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setBusy(false); }
   };
 
+  // ---- muestra (a ciegas: retira del inventario) ----
+  const setM=(id,v)=>setCantM(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const itemsM=Object.entries(cantM).map(([producto_id,v])=>({producto_id,cantidad:Number(v)||0})).filter(it=>it.cantidad>0);
+  const totalM=itemsM.reduce((s,it)=>s+it.cantidad,0);
+  const guardarMuestra=async()=>{
+    if(!itemsM.length){ showToast("Escribe al menos una cantidad","err"); return; }
+    setBusy(true);
+    try{
+      await db.retirarMuestra(sede, operador, itemsM);
+      showToast("Retiro de muestra registrado ("+totalM+" uds)","ok");
+      if(onSaved) onSaved(); onClose();
+    }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setBusy(false); }
+  };
+
   // ---- tránsito (transferencias de Kemilabo) ----
   const setR=(id,v)=>setRec(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
   const recibirTransito=async()=>{
@@ -1372,8 +1402,9 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
         <div className="card-t">📦 Recibir mercancía</div>
 
         <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:12,padding:4,marginBottom:12}}>
-          {tab('transito','🚚 De Kemilabo'+(transitos&&transitos.length?(" ("+transitos.length+")"):""))}
-          {tab('proveedor','🏪 De proveedor')}
+          {tab('transito','🚚 Kemilabo'+(transitos&&transitos.length?(" ("+transitos.length+")"):""))}
+          {tab('proveedor','🏪 Proveedor')}
+          {tab('muestra','🧪 Muestra')}
         </div>
 
         {modo===null && <div className="empty">Cargando…</div>}
@@ -1422,6 +1453,31 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
             </div>
             {items.length>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a ingresar <b>{totalUds}</b> unidades en <b>{items.length}</b> producto(s).</div>}
             <button className="btn-primary" disabled={busy||!items.length} onClick={guardarProveedor}>{busy?"Guardando…":"✅ Registrar entrada"}</button>
+          </div>
+        )}
+
+        {/* ---- MUESTRA (retiro del inventario para demostración) ---- */}
+        {modo==='muestra' && (
+          <div>
+            <div className="header-sub" style={{marginBottom:10}}>Producto que se retira del inventario para <b>muestra/demostración</b> (no es venta). Escribe cuánto sacaste de cada uno.</div>
+            <div className="search" style={{marginBottom:10}}>
+              <span className="ico">🔍</span>
+              <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
+            </div>
+            <div style={{maxHeight:"42vh",overflowY:"auto",marginBottom:10}}>
+              {visibles.length===0 && <div className="empty">No hay productos con inventario en esta sede.</div>}
+              {visibles.map(p=>{ const v=cantM[p.id]||""; return (
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600}}>{p.nombre}</div>
+                    {p.categoria && <div className="header-sub">{p.categoria}</div>}
+                  </div>
+                  <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Retiré…" value={v} onChange={e=>setM(p.id,e.target.value)}/>
+                </div>
+              );})}
+            </div>
+            {itemsM.length>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a retirar <b>{totalM}</b> unidad(es) en <b>{itemsM.length}</b> producto(s) para muestra.</div>}
+            <button className="btn-primary" style={{background:"var(--amber)",borderColor:"var(--amber)"}} disabled={busy||!itemsM.length} onClick={guardarMuestra}>{busy?"Registrando…":"🧪 Registrar retiro de muestra"}</button>
           </div>
         )}
 

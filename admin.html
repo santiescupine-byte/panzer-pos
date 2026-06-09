@@ -2324,8 +2324,13 @@ function Mantenimiento({showToast}){
   const [supervisor,setSupervisor]=useState("");
   const [notaRep,setNotaRep]=useState("");
   const [busy,setBusy]=useState(false);
+  const [vista,setVista]=useState('panorama');   // 'panorama' (todas las sedes) | 'sede'
+  const [allEq,setAllEq]=useState(null);          // todos los equipos (panorama)
+  const [allAb,setAllAb]=useState([]);            // todos los reportes abiertos (panorama)
 
   useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); },[]);
+  const loadPanorama=async()=>{ try{ const [eq,ab]=await Promise.all([db.listEquipos(),db.mantAbiertos()]); setAllEq(eq); setAllAb(ab); }catch(e){ setAllEq([]); } };
+  useEffect(()=>{ loadPanorama(); },[]);
   const load=async()=>{
     if(!sede) return;
     try{
@@ -2356,7 +2361,7 @@ function Mantenimiento({showToast}){
     if(!rep) return; setBusy(true);
     try{
       await db.repararEquipo(rep.equipo.id, supervisor.trim(), notaRep.trim());
-      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load();
+      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load(); loadPanorama();
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
 
@@ -2364,11 +2369,61 @@ function Mantenimiento({showToast}){
   const promedio=cerrados.length? cerrados.reduce((a,m)=>a+(new Date(m.reparado_at)-new Date(m.reportado_at)),0)/cerrados.length : 0;
   const paradas=(equipos||[]).filter(e=>e.estado==='parada').length;
 
+  // ---- datos del panorama (todas las sedes) ----
+  const bySede={}; (allEq||[]).forEach(e=>{ (bySede[e.sede]=bySede[e.sede]||[]).push(e); });
+  const panorama=Object.keys(bySede).map(s=>{ const eqs=bySede[s]; const par=eqs.filter(e=>e.estado==='parada'); return {sede:s,eqs,par}; })
+    .sort((a,b)=>(b.par.length-a.par.length)||a.sede.localeCompare(b.sede));
+  const gTotal=(allEq||[]).length, gParadas=(allEq||[]).filter(e=>e.estado==='parada').length, gSedesProb=panorama.filter(x=>x.par.length>0).length;
+  const abiertoDe=id=>allAb.find(m=>m.equipo_id===id);
+
   return (
     <div>
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Mantenimiento de equipos</div>
-        <select className="select" style={{maxWidth:220}} value={sede} onChange={e=>setSede(e.target.value)}>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+          <button className={"btn btn-sm "+(vista==='panorama'?'btn-amber':'btn-ghost')} onClick={()=>{setVista('panorama');loadPanorama();}}>🌐 Panorama</button>
+          <button className={"btn btn-sm "+(vista==='sede'?'btn-amber':'btn-ghost')} onClick={()=>setVista('sede')}>🔧 Por sede</button>
+        </div>
+      </div>
+
+      {/* ===== PANORAMA (todas las sedes) ===== */}
+      {vista==='panorama' && (
+        allEq===null ? <div className="empty">Cargando panorama…</div> : (
+          <div>
+            <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Equipos totales</div><div style={{fontSize:24,fontWeight:800}}>{gTotal}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Paradas ahora</div><div style={{fontSize:24,fontWeight:800,color:gParadas?"var(--red)":"var(--green)"}}>{gParadas}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Sedes con problemas</div><div style={{fontSize:24,fontWeight:800,color:gSedesProb?"var(--red)":"var(--green)"}}>{gSedesProb}</div></div>
+            </div>
+            {gParadas===0 && <div className="card" style={{textAlign:"center",color:"var(--green)",fontWeight:700,marginBottom:14}}>✓ Todas las máquinas operativas en todas las sedes 🎉</div>}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:12}}>
+              {panorama.map(x=>{ const prob=x.par.length>0; return (
+                <div key={x.sede} className="card" style={{borderStyle:"solid",borderWidth:prob?2:1,borderColor:prob?"var(--red)":"var(--bd)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div style={{fontWeight:800,fontSize:16}}>{x.sede}</div>
+                    {prob ? <span className="pill pill-off">{x.par.length} parada{x.par.length>1?"s":""}</span> : <span className="pill pill-prod">OK</span>}
+                  </div>
+                  <div className="muted" style={{fontSize:12,margin:"4px 0 8px"}}>{x.eqs.length-x.par.length}/{x.eqs.length} operativas</div>
+                  {prob ? x.par.map(eq=>{ const r=abiertoDe(eq.id); return (
+                    <div key={eq.id} style={{borderTop:"1px solid var(--bd)",padding:"8px 0"}}>
+                      <div style={{fontWeight:700,color:"var(--red)"}}>🔴 {eq.nombre}</div>
+                      <div className="muted" style={{fontSize:12,margin:"2px 0 6px"}}>{r?(r.descripcion||"(sin descripción)"):"(sin reporte)"}{r?(" · lleva "+fmtDur(r.reportado_at,new Date().toISOString())):""}</div>
+                      <button className="btn btn-amber btn-sm" onClick={()=>setRep({equipo:eq,reporte:r})}>🔧 Reparar</button>
+                    </div>
+                  );}) : <div style={{color:"var(--green)",fontSize:13}}>Todo operativo ✓</div>}
+                  <button className="btn btn-ghost btn-sm" style={{marginTop:8,width:"100%"}} onClick={()=>{setSede(x.sede);setVista('sede');}}>Gestionar →</button>
+                </div>
+              );})}
+              {panorama.length===0 && <div className="empty">No hay equipos registrados todavía.</div>}
+            </div>
+          </div>
+        )
+      )}
+
+      {/* ===== GESTIÓN POR SEDE ===== */}
+      {vista==='sede' && (<div>
+      <div className="toolbar">
+        <select className="select" style={{maxWidth:220,marginLeft:"auto"}} value={sede} onChange={e=>setSede(e.target.value)}>
           {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
         </select>
       </div>
@@ -2431,6 +2486,7 @@ function Mantenimiento({showToast}){
           </tbody>
         </table>
       </div>
+      </div>)}
 
       {rep && (
         <div className="modal-bg" onClick={()=>!busy&&setRep(null)}>

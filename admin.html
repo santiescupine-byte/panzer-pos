@@ -573,15 +573,24 @@ const db = {
         return true;
       });
     }
-    let q=sb.from('ventas').select('*, venta_items(*, productos(categoria))').eq('anulada',false).order('created_at');
     // Convertir los límites del día LOCAL a instantes UTC (created_at se guarda en UTC).
     // Así una venta de la noche (que en UTC cae al día siguiente) no se pierde del informe.
-    if(f.desde) q=q.gte('created_at', new Date(f.desde+'T00:00:00').toISOString());
-    if(f.hasta) q=q.lte('created_at', new Date(f.hasta+'T23:59:59.999').toISOString());
-    if(f.sede) q=q.eq('sede', f.sede);
-    if(f.operador) q=q.eq('operador', f.operador);
-    const {data,error}=await q;
-    if(error) throw error;
+    const desdeISO = f.desde ? new Date(f.desde+'T00:00:00').toISOString() : null;
+    const hastaISO = f.hasta ? new Date(f.hasta+'T23:59:59.999').toISOString() : null;
+    // PAGINAR: Supabase devuelve máx 1000 filas por consulta → traer todas las páginas.
+    const PAGE=1000; let from=0; let data=[];
+    while(true){
+      let q=sb.from('ventas').select('*, venta_items(*, productos(categoria))').eq('anulada',false).order('created_at').range(from, from+PAGE-1);
+      if(desdeISO) q=q.gte('created_at', desdeISO);
+      if(hastaISO) q=q.lte('created_at', hastaISO);
+      if(f.sede) q=q.eq('sede', f.sede);
+      if(f.operador) q=q.eq('operador', f.operador);
+      const {data:page,error}=await q;
+      if(error) throw error;
+      data=data.concat(page||[]);
+      if(!page || page.length<PAGE) break;
+      from+=PAGE;
+    }
     // normalizar a la forma que usan los informes
     return (data||[]).filter(v=>{
       if(f.tipoPago==='efectivo') return v.pago_efectivo>0;

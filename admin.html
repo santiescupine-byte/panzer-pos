@@ -231,6 +231,11 @@ async function vipDeleteCupon(id){
   const {error}=await sb.from('cupones_vip').delete().eq('id_cupon',id);
   return error?{ok:false,error:error.message}:{ok:true};
 }
+async function vipUltimasTx(n=50){
+  if(DEMO_MODE) return [];
+  const {data,error}=await sb.from('transacciones_vip').select('created_at,id_vip,nombre,tipo,monto,tokens,sede,operador').order('created_at',{ascending:false}).limit(n);
+  return error?[]:(data||[]);
+}
 
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
@@ -2567,11 +2572,12 @@ function Membresias({showToast, admin}){
   const [accionM,setAccionM]=useState(null);  // 'recargar' | 'descontar' (ajuste manual)
   const [montoM,setMontoM]=useState("");
   const [busyM,setBusyM]=useState(false);
-  const [vista,setVista]=useState('clientes');   // 'clientes' | 'cupones'
+  const [vista,setVista]=useState('clientes');   // 'clientes' | 'cupones' | 'bitacora'
   const [edC,setEdC]=useState(null);             // edición de ficha del cliente
   const [cupones,setCupones]=useState(null);
   const [edCup,setEdCup]=useState(null);         // cupón en edición
   const [busyC,setBusyC]=useState(false);
+  const [bitacora,setBitacora]=useState(null);   // últimas transacciones
 
   useEffect(()=>{
     vipApi({accion:'listar_clientes'}).then(r=>{
@@ -2580,7 +2586,8 @@ function Membresias({showToast, admin}){
   },[]);
 
   const cargarCupones=()=>vipListCupones().then(setCupones).catch(()=>setCupones([]));
-  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); },[vista]);
+  const cargarBitacora=()=>{ setBitacora(null); vipUltimasTx(50).then(setBitacora).catch(()=>setBitacora([])); };
+  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); if(vista==='bitacora') cargarBitacora(); },[vista]);
 
   // editar ficha del cliente
   const guardarCliente=async()=>{
@@ -2659,6 +2666,7 @@ function Membresias({showToast, admin}){
         <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
           <button className={"btn btn-sm "+(vista==='clientes'?'btn-amber':'btn-ghost')} onClick={()=>setVista('clientes')}>👥 Clientes</button>
           <button className={"btn btn-sm "+(vista==='cupones'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cupones')}>🎁 Cupones</button>
+          <button className={"btn btn-sm "+(vista==='bitacora'?'btn-amber':'btn-ghost')} onClick={()=>setVista('bitacora')}>📋 Bitácora</button>
         </div>
       </div>
 
@@ -2719,6 +2727,37 @@ function Membresias({showToast, admin}){
                       </td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== BITÁCORA (últimas 50 transacciones) ===== */}
+      {vista==='bitacora' && (
+        <div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>Últimas 50 transacciones de todos los clientes (registros, recargas, canjes, cupones).</div>
+            <button className="btn btn-ghost btn-sm" onClick={cargarBitacora}>🔄 Actualizar</button>
+          </div>
+          {bitacora===null ? <div className="empty">Cargando bitácora…</div> : (
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Fecha</th><th>Cliente</th><th>Tipo</th><th className="num">Monto</th><th className="num">Tokens</th><th>Sede</th><th>Operador</th></tr></thead>
+                <tbody>
+                  {bitacora.length===0 && <tr><td colSpan="7"><div className="empty">Sin transacciones.</div></td></tr>}
+                  {bitacora.map((t,i)=>{ const c=Number(t.monto)||0; return (
+                    <tr key={i}>
+                      <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(t.created_at)} {fLocalHora(t.created_at)}</td>
+                      <td className="row-name">{t.nombre||"—"}<div className="muted" style={{fontSize:11}}>{t.id_vip}</div></td>
+                      <td>{t.tipo}</td>
+                      <td className="num" style={{color:c<0?"var(--red)":"var(--green)",fontWeight:700}}>{fmt(c)}</td>
+                      <td className="num">{Number(t.tokens)||0}</td>
+                      <td className="muted">{t.sede}</td>
+                      <td className="muted">{t.operador||"—"}</td>
+                    </tr>
+                  );})}
                 </tbody>
               </table>
             </div>

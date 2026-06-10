@@ -209,6 +209,28 @@ async function vipApiSupabase(params){
   }catch(e){ return {ok:false,error:'Error de conexión'}; }
 }
 const vipApi = (params, t) => VIP_BACKEND==='supabase' ? vipApiSupabase(params) : vipApiGoogle(params, t);
+// ---- Gestión VIP desde el Admin (editar cliente + CRUD de cupones) — directo a Supabase ----
+async function vipUpdateCliente(id, fields){
+  if(DEMO_MODE) return {ok:true};
+  const {error}=await sb.from('clientes_vip').update(fields).eq('id',id);
+  return error?{ok:false,error:error.message}:{ok:true};
+}
+async function vipListCupones(){
+  if(DEMO_MODE) return [];
+  const {data,error}=await sb.from('cupones_vip').select('*').order('id_cupon');
+  return error?[]:(data||[]);
+}
+async function vipSaveCupon(c){
+  if(DEMO_MODE) return {ok:true};
+  const row={id_cupon:c.id_cupon,nombre:c.nombre,descripcion:c.descripcion,emoji:c.emoji||'🎁',membresia:c.membresia||'Todos',activo:!!c.activo};
+  const {error}=await sb.from('cupones_vip').upsert(row,{onConflict:'id_cupon'});
+  return error?{ok:false,error:error.message}:{ok:true};
+}
+async function vipDeleteCupon(id){
+  if(DEMO_MODE) return {ok:true};
+  const {error}=await sb.from('cupones_vip').delete().eq('id_cupon',id);
+  return error?{ok:false,error:error.message}:{ok:true};
+}
 
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
@@ -2545,12 +2567,48 @@ function Membresias({showToast, admin}){
   const [accionM,setAccionM]=useState(null);  // 'recargar' | 'descontar' (ajuste manual)
   const [montoM,setMontoM]=useState("");
   const [busyM,setBusyM]=useState(false);
+  const [vista,setVista]=useState('clientes');   // 'clientes' | 'cupones'
+  const [edC,setEdC]=useState(null);             // edición de ficha del cliente
+  const [cupones,setCupones]=useState(null);
+  const [edCup,setEdCup]=useState(null);         // cupón en edición
+  const [busyC,setBusyC]=useState(false);
 
   useEffect(()=>{
     vipApi({accion:'listar_clientes'}).then(r=>{
       if(r&&r.ok) setClientes(r.clientes||[]); else { setClientes([]); if(r&&r.error) showToast('VIP: '+r.error,'err'); }
     }).catch(()=>setClientes([]));
   },[]);
+
+  const cargarCupones=()=>vipListCupones().then(setCupones).catch(()=>setCupones([]));
+  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); },[vista]);
+
+  // editar ficha del cliente
+  const guardarCliente=async()=>{
+    if(!edC) return;
+    const f={nombre:(edC.nombre||'').trim(), telefono:(edC.telefono||'').toString().trim(), membresia:edC.membresia, activo:!!edC.activo};
+    if(!f.nombre){ showToast("El nombre es obligatorio","err"); return; }
+    setBusyM(true); const r=await vipUpdateCliente(sel.cliente.id, f); setBusyM(false);
+    if(!r.ok){ showToast("Error: "+r.error,"err"); return; }
+    showToast("Cliente actualizado","ok");
+    setSel(s=>({...s, cliente:{...s.cliente, ...f}}));
+    setClientes(cs=>cs.map(c=>c.id===sel.cliente.id?{...c,nombre:f.nombre,telefono:f.telefono,membresia:f.membresia}:c));
+    setEdC(null);
+  };
+
+  // CRUD de cupones
+  const nuevoCupon=()=>{
+    const nums=(cupones||[]).map(c=>parseInt((c.id_cupon||'').replace(/\D/g,''))||0);
+    const next='C'+String((Math.max(0,...nums)+1)).padStart(3,'0');
+    setEdCup({id_cupon:next,nombre:'',descripcion:'',emoji:'🎁',membresia:'Todos',activo:true,_nuevo:true});
+  };
+  const guardarCupon=async()=>{
+    if(!(edCup.nombre||'').trim()){ showToast("El nombre del cupón es obligatorio","err"); return; }
+    setBusyC(true); const r=await vipSaveCupon(edCup); setBusyC(false);
+    if(!r.ok){ showToast("Error: "+r.error,"err"); return; }
+    showToast("Cupón guardado","ok"); setEdCup(null); cargarCupones();
+  };
+  const toggleCupon=async(c)=>{ const r=await vipSaveCupon({...c,activo:!c.activo}); if(!r.ok){showToast("Error: "+r.error,"err");return;} cargarCupones(); };
+  const borrarCupon=async(c)=>{ if(!confirm('¿Borrar el cupón "'+c.nombre+'"?\n(No borra el historial de canjes ya hechos.)')) return; const r=await vipDeleteCupon(c.id_cupon); if(!r.ok){showToast("Error: "+r.error,"err");return;} showToast("Cupón borrado","ok"); cargarCupones(); };
 
   const verFicha=async(c)=>{
     setSel({cliente:c,historial:null}); setCargandoDet(true);
@@ -2595,8 +2653,15 @@ function Membresias({showToast, admin}){
 
   return (
     <div>
-      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Membresías VIP <span className="muted">({tot})</span></div></div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Membresías VIP <span className="muted">({tot})</span></div>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+          <button className={"btn btn-sm "+(vista==='clientes'?'btn-amber':'btn-ghost')} onClick={()=>setVista('clientes')}>👥 Clientes</button>
+          <button className={"btn btn-sm "+(vista==='cupones'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cupones')}>🎁 Cupones</button>
+        </div>
+      </div>
 
+      {vista==='clientes' && (<div>
       <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Miembros activos</div><div style={{fontSize:24,fontWeight:800}}>{tot}</div></div>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">⭐ Standard / 🥈 Silver / 🥇 Gold</div><div style={{fontSize:20,fontWeight:800}}>{porTipo.Standard} / {porTipo.Silver} / {porTipo.Gold}</div></div>
@@ -2624,12 +2689,87 @@ function Membresias({showToast, admin}){
         </table>
       </div>
       {rows.length>300 && <div className="muted" style={{marginTop:8}}>Mostrando 300 de {rows.length}. Usa el buscador para filtrar.</div>}
+      </div>)}
+
+      {/* ===== CUPONES ===== */}
+      {vista==='cupones' && (
+        <div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>Cupones que ven los clientes según su membresía.</div>
+            <button className="btn btn-amber btn-sm" onClick={nuevoCupon}>＋ Nuevo cupón</button>
+          </div>
+          {cupones===null ? <div className="empty">Cargando cupones…</div> : (
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Código</th><th>Cupón</th><th>Aplica a</th><th>Estado</th><th></th></tr></thead>
+                <tbody>
+                  {cupones.length===0 && <tr><td colSpan="5"><div className="empty">No hay cupones. Crea el primero.</div></td></tr>}
+                  {cupones.map(c=>(
+                    <tr key={c.id_cupon}>
+                      <td className="muted">{c.id_cupon}</td>
+                      <td className="row-name">{c.emoji} {c.nombre}<div className="muted" style={{fontSize:12}}>{c.descripcion}</div></td>
+                      <td><span className="pill pill-prod">{c.membresia}</span></td>
+                      <td>{c.activo?<span className="pill pill-prod">Activo</span>:<span className="pill pill-off">Inactivo</span>}</td>
+                      <td style={{whiteSpace:"nowrap"}}>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>setEdCup({...c})}>Editar</button>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>toggleCupon(c)}>{c.activo?"Desactivar":"Activar"}</button>
+                        <button className="btn btn-ghost btn-sm" style={{color:"var(--red)"}} onClick={()=>borrarCupon(c)}>🗑</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Editor de cupón */}
+      {edCup && (
+        <div className="modal-bg" onClick={()=>!busyC&&setEdCup(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{edCup._nuevo?"Nuevo cupón":"Editar cupón"} <span className="muted" style={{fontSize:13,fontWeight:400}}>{edCup.id_cupon}</span></div>
+            <label className="label">Emoji</label>
+            <input className="input" style={{maxWidth:90,fontSize:18,textAlign:"center"}} value={edCup.emoji} onChange={e=>setEdCup({...edCup,emoji:e.target.value})}/>
+            <label className="label">Nombre</label>
+            <input className="input" value={edCup.nombre} onChange={e=>setEdCup({...edCup,nombre:e.target.value})} placeholder="ej. 1 Token Gratis"/>
+            <label className="label">Descripción</label>
+            <input className="input" value={edCup.descripcion} onChange={e=>setEdCup({...edCup,descripcion:e.target.value})} placeholder="Detalle del beneficio"/>
+            <label className="label">Aplica a la membresía</label>
+            <select className="select" value={edCup.membresia} onChange={e=>setEdCup({...edCup,membresia:e.target.value})}>
+              {["Todos","Standard","Silver","Gold"].map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+            <label className="check" style={{marginTop:10}}><input type="checkbox" checked={!!edCup.activo} onChange={e=>setEdCup({...edCup,activo:e.target.checked})}/> Activo (visible para los clientes)</label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busyC} onClick={()=>setEdCup(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busyC} onClick={guardarCupon}>{busyC?"Guardando…":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {sel && (
-        <div className="modal-bg" onClick={()=>setSel(null)}>
+        <div className="modal-bg" onClick={()=>{setSel(null);setEdC(null);}}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
-            <div className="modal-t">{sel.cliente.nombre}</div>
-            <div className="muted" style={{marginBottom:10}}>Código {sel.cliente.id} · {sel.cliente.membresia}{sel.cliente.telefono?(" · 📞 "+sel.cliente.telefono):""}</div>
+            <div className="modal-t">{sel.cliente.nombre} {sel.cliente.activo===false && <span className="pill pill-off" style={{fontSize:10}}>INACTIVO</span>}</div>
+            <div className="muted" style={{marginBottom:8}}>Código {sel.cliente.id} · {sel.cliente.membresia}{sel.cliente.telefono?(" · 📞 "+sel.cliente.telefono):""}</div>
+            {!edC ? (
+              <button className="btn btn-ghost btn-sm" style={{marginBottom:8}} onClick={()=>setEdC({nombre:sel.cliente.nombre,telefono:sel.cliente.telefono||'',membresia:sel.cliente.membresia,activo:sel.cliente.activo!==false})}>✏️ Editar datos</button>
+            ) : (
+              <div className="card" style={{marginBottom:10}}>
+                <label className="label">Nombre</label>
+                <input className="input" value={edC.nombre} onChange={e=>setEdC({...edC,nombre:e.target.value})}/>
+                <label className="label">Teléfono</label>
+                <input className="input" value={edC.telefono} onChange={e=>setEdC({...edC,telefono:e.target.value})}/>
+                <label className="label">Membresía</label>
+                <select className="select" value={edC.membresia} onChange={e=>setEdC({...edC,membresia:e.target.value})}>{["Standard","Silver","Gold"].map(m=><option key={m} value={m}>{m}</option>)}</select>
+                <label className="check" style={{marginTop:8}}><input type="checkbox" checked={!!edC.activo} onChange={e=>setEdC({...edC,activo:e.target.checked})}/> Activo</label>
+                <div style={{display:"flex",gap:8,marginTop:10}}>
+                  <button className="btn btn-amber btn-sm" disabled={busyM} onClick={guardarCliente}>{busyM?"…":"Guardar cambios"}</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busyM} onClick={()=>setEdC(null)}>Cancelar</button>
+                </div>
+              </div>
+            )}
             <div className="result-row" style={{borderTop:"1px solid var(--bd)"}}><span className="result-label" style={{fontWeight:800}}>Saldo</span><span className="result-value amber" style={{fontSize:18}}>{fmt(sel.cliente.saldo)}</span></div>
             <div className="sec-title" style={{fontSize:14,margin:"14px 0 6px"}}>Últimos movimientos</div>
             <div className="card" style={{padding:0,overflowX:"auto",maxHeight:"40vh",overflowY:"auto"}}>
@@ -2669,7 +2809,7 @@ function Membresias({showToast, admin}){
                 </div>
               )}
             </div>
-            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>{setSel(null);setAccionM(null);}}>Cerrar</button></div>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>{setSel(null);setAccionM(null);setEdC(null);}}>Cerrar</button></div>
           </div>
         </div>
       )}

@@ -175,14 +175,40 @@ const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(
 const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 const uid = () => "tmp-"+Math.random().toString(36).slice(2,9);
 
-// ---- VIP / Membresías: lee del MISMO backend (Apps Script + Sheets) que vip.panzercarwash.com ----
+// ---- VIP / Membresías ----
 const VIP_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyoTaC9iB1fm4s3hM4QQ9-1Zbo5cCzJQIn68YlczTTAXrYHBJK1rQsZmiIMo4CL9-S8Bg/exec';
-async function vipApi(params, timeoutMs=45000){
+const VIP_BACKEND = 'supabase';   // 'supabase' (nuevo) | 'google' (respaldo)
+async function vipApiGoogle(params, timeoutMs=45000){
   const url = VIP_APPS_SCRIPT_URL + '?' + new URLSearchParams(params).toString();
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
   try{ const r = await fetch(url,{signal:ctrl.signal}); clearTimeout(t); return await r.json(); }
   catch(e){ clearTimeout(t); return { ok:false, error: e.name==='AbortError'?'timeout':'Error de conexión' }; }
 }
+async function vipApiSupabase(params){
+  if(DEMO_MODE) return { ok:false, error:'demo' };
+  const a=params.accion;
+  try{
+    if(a==='listar_clientes'){
+      const {data,error}=await sb.from('clientes_vip').select('id,nombre,telefono,membresia,saldo,activo').order('nombre');
+      if(error) return {ok:false,error:error.message};
+      return {ok:true, clientes:(data||[]).map(c=>({id:c.id,nombre:c.nombre,telefono:c.telefono,membresia:c.membresia,saldo:Number(c.saldo)}))};
+    }
+    if(a==='historial_cliente'){
+      const {data,error}=await sb.from('transacciones_vip').select('created_at,tipo,monto,tokens,sede').eq('id_vip',params.id_vip).order('created_at',{ascending:false}).limit(30);
+      if(error) return {ok:false,error:error.message};
+      return {ok:true, transacciones:(data||[]).map(t=>({fecha:t.created_at,tipo:t.tipo,monto:Number(t.monto),tokens:Number(t.tokens),sede:t.sede}))};
+    }
+    const map={
+      consultar_cliente:['vip_consultar',{p_id_vip:params.id_vip}],
+      buscar_por_telefono:['vip_buscar_telefono',{p_tel:params.telefono}],
+      descontar_saldo:['vip_descontar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens||0),p_sede:params.sede||'Admin',p_operador:params.operador||'Admin',p_metodo:params.metodo||'AjusteAdmin'}],
+      recargar_saldo:['vip_recargar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador||'Admin',p_sede:params.sede||'Admin',p_membresia:params.membresia||null}],
+    };
+    const m=map[a]; if(!m) return {ok:false,error:'acción no soportada: '+a};
+    const {data,error}=await sb.rpc(m[0],m[1]); if(error) return {ok:false,error:error.message}; return data;
+  }catch(e){ return {ok:false,error:'Error de conexión'}; }
+}
+const vipApi = (params, t) => VIP_BACKEND==='supabase' ? vipApiSupabase(params) : vipApiGoogle(params, t);
 
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
@@ -837,7 +863,7 @@ function App(){
                 {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
-                {tab==="membresias" && <Membresias showToast={showToast}/>}
+                {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
@@ -2511,11 +2537,14 @@ function Mantenimiento({showToast}){
 // ============================================================
 // SECCIÓN: MEMBRESÍAS VIP (solo lectura) — lee del backend VIP (Sheets)
 // ============================================================
-function Membresias({showToast}){
+function Membresias({showToast, admin}){
   const [clientes,setClientes]=useState(null);
   const [q,setQ]=useState("");
   const [sel,setSel]=useState(null);     // {cliente, historial} en el modal
   const [cargandoDet,setCargandoDet]=useState(false);
+  const [accionM,setAccionM]=useState(null);  // 'recargar' | 'descontar' (ajuste manual)
+  const [montoM,setMontoM]=useState("");
+  const [busyM,setBusyM]=useState(false);
 
   useEffect(()=>{
     vipApi({accion:'listar_clientes'}).then(r=>{
@@ -2533,6 +2562,22 @@ function Membresias({showToast}){
       setSel({ cliente: (det&&det.ok&&det.cliente)?det.cliente:c, historial: (hist&&hist.ok)?(hist.transacciones||[]):[] });
     }catch(e){ setSel(s=>s?{...s,historial:[]}:null); }
     setCargandoDet(false);
+  };
+
+  const aplicarAjuste=async()=>{
+    const m=Math.round(Number(montoM)||0); if(m<=0){ showToast("Monto inválido","err"); return; }
+    setBusyM(true);
+    const req = accionM==='recargar'
+      ? {accion:'recargar_saldo', id_vip:sel.cliente.id, monto:m, operador:admin||'Admin', sede:'Admin'}
+      : {accion:'descontar_saldo', id_vip:sel.cliente.id, monto:m, tokens:0, operador:admin||'Admin', sede:'Admin', metodo:'AjusteAdmin'};
+    const r=await vipApi(req); setBusyM(false);
+    if(!r||!r.ok){ showToast("Error: "+((r&&r.error)||"no se pudo"),"err"); return; }
+    const nuevo = (r.saldo_nuevo!=null)? Number(r.saldo_nuevo) : Number(sel.cliente.saldo);
+    showToast((accionM==='recargar'?"Recargado ":"Descontado ")+fmt(m)+" · saldo "+fmt(nuevo),"ok");
+    setSel(s=>({...s, cliente:{...s.cliente, saldo:nuevo}}));
+    setClientes(cs=>cs.map(c=>c.id===sel.cliente.id?{...c,saldo:nuevo}:c));
+    setAccionM(null); setMontoM("");
+    vipApi({accion:'historial_cliente',id_vip:sel.cliente.id}).then(h=>{ if(h&&h.ok) setSel(s=>s?{...s,historial:h.transacciones||[]}:null); });
   };
 
   if(clientes===null) return <div className="empty">Cargando membresías…</div>;
@@ -2605,7 +2650,26 @@ function Membresias({showToast}){
                 </tbody>
               </table>
             </div>
-            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setSel(null)}>Cerrar</button></div>
+            {/* Ajuste manual de saldo (recargar / descontar) */}
+            <div style={{marginTop:12,borderTop:"1px solid var(--bd)",paddingTop:10}}>
+              {!accionM ? (
+                <div style={{display:"flex",gap:8}}>
+                  <button className="btn btn-amber btn-sm" onClick={()=>{setAccionM('recargar');setMontoM('');}}>🔋 Recargar saldo</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setAccionM('descontar');setMontoM('');}}>➖ Descontar saldo</button>
+                </div>
+              ) : (
+                <div>
+                  <label className="label">{accionM==='recargar'?'Monto a recargar':'Monto a descontar'} (manual)</label>
+                  <div style={{display:"flex",gap:8}}>
+                    <input className="input" type="number" autoFocus value={montoM} onChange={e=>setMontoM(e.target.value)} placeholder="$" style={{flex:1}}/>
+                    <button className="btn btn-amber" disabled={busyM} onClick={aplicarAjuste}>{busyM?"…":(accionM==='recargar'?"Recargar":"Descontar")}</button>
+                    <button className="btn btn-ghost" disabled={busyM} onClick={()=>{setAccionM(null);setMontoM('');}}>Cancelar</button>
+                  </div>
+                  <div className="muted" style={{fontSize:11,marginTop:4}}>Queda registrado como movimiento a tu nombre ({admin||'Admin'}).</div>
+                </div>
+              )}
+            </div>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>{setSel(null);setAccionM(null);}}>Cerrar</button></div>
           </div>
         </div>
       )}

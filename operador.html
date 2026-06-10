@@ -478,12 +478,33 @@ const VIP_SEDE_MAP = {
   '12 de octubre (franquicia)':'Sede 12 de octubre '
 };
 const vipSedeNombre = sede => VIP_SEDE_MAP[sede] || sede;
-async function vipApi(params, timeoutMs=45000){
+// Interruptor del backend VIP: 'supabase' (nuevo, rápido) | 'google' (Apps Script viejo, respaldo)
+const VIP_BACKEND = 'supabase';
+async function vipApiGoogle(params, timeoutMs=45000){
   const url = VIP_APPS_SCRIPT_URL + '?' + new URLSearchParams(params).toString();
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
   try{ const r = await fetch(url,{signal:ctrl.signal}); clearTimeout(t); return await r.json(); }
   catch(e){ clearTimeout(t); return { ok:false, error: e.name==='AbortError'?'timeout':'Error de conexión' }; }
 }
+// Mismo contrato (mismas acciones y formato de respuesta) pero contra los RPCs de Supabase.
+async function vipApiSupabase(params){
+  if(DEMO_MODE) return { ok:false, error:'demo' };
+  const a=params.accion;
+  const map={
+    consultar_cliente:   ['vip_consultar',       {p_id_vip:params.id_vip}],
+    buscar_por_telefono: ['vip_buscar_telefono',  {p_tel:params.telefono}],
+    descontar_saldo:     ['vip_descontar',        {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens),p_sede:params.sede,p_operador:params.operador,p_metodo:params.metodo||'QR'}],
+    recargar_saldo:      ['vip_recargar',         {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador,p_sede:params.sede,p_membresia:params.membresia||null}],
+    crear_cliente:       ['vip_crear',            {p_nombre:params.nombre,p_telefono:params.telefono,p_membresia:params.membresia,p_operador:params.operador,p_sede:params.sede}],
+    verificar_cupon:     ['vip_verificar_cupon',  {p_id_cupon:params.id_cupon,p_id_cliente:params.id_cliente}],
+    canjear_cupon:       ['vip_canjear_cupon',    {p_id_cupon:params.id_cupon,p_id_cliente:params.id_cliente,p_sede:params.sede,p_operador:params.operador}],
+    reporte_turno:       ['vip_reporte_turno',    {p_operador:params.operador,p_sede:params.sede,p_desde:(params.fecha_desde? new Date(Number(params.fecha_desde)).toISOString() : null)}],
+  };
+  const m=map[a]; if(!m) return { ok:false, error:'acción no soportada: '+a };
+  try{ const {data,error}=await sb.rpc(m[0],m[1]); if(error) return { ok:false, error:error.message }; return data; }
+  catch(e){ return { ok:false, error:'Error de conexión' }; }
+}
+const vipApi = (params, t) => VIP_BACKEND==='supabase' ? vipApiSupabase(params) : vipApiGoogle(params, t);
 // teléfono colombiano → formato wa.me
 const vipTelWA = t => { let n=String(t||'').replace(/\D/g,''); if(n.startsWith('3')&&n.length===10) n='57'+n; if(!n.startsWith('57')) n='57'+n; return n; };
 const vipCarnetLink = c => 'https://vip.panzercarwash.com/carnet.html?'+new URLSearchParams({id:c.id,nombre:c.nombre,mem:c.membresia,saldo:c.saldo}).toString();

@@ -2648,8 +2648,9 @@ function Membresias({showToast, admin}){
     return (c.nombre||'').toLowerCase().includes(filtro) || (c.id||'').toLowerCase().includes(filtro) || (filtroDig && tel.includes(filtroDig));
   });
   const tot=clientes.length;
-  const porTipo={Standard:0,Silver:0,Gold:0}; let saldoTot=0;
-  clientes.forEach(c=>{ if(porTipo[c.membresia]!==undefined) porTipo[c.membresia]++; saldoTot+=Number(c.saldo)||0; });
+  const VIP_FACTOR={Standard:0.8, Silver:0.7, Gold:2/3};  // dinero real = saldo × (precio/saldo del paquete)
+  const porTipo={Standard:0,Silver:0,Gold:0}; let saldoTot=0, realTot=0;
+  clientes.forEach(c=>{ if(porTipo[c.membresia]!==undefined) porTipo[c.membresia]++; const s=Number(c.saldo)||0; saldoTot+=s; realTot+=s*(VIP_FACTOR[c.membresia]??0.8); });
 
   return (
     <div>
@@ -2665,7 +2666,8 @@ function Membresias({showToast, admin}){
       <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Miembros activos</div><div style={{fontSize:24,fontWeight:800}}>{tot}</div></div>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">⭐ Standard / 🥈 Silver / 🥇 Gold</div><div style={{fontSize:20,fontWeight:800}}>{porTipo.Standard} / {porTipo.Silver} / {porTipo.Gold}</div></div>
-        <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Saldo total en circulación</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(saldoTot)}</div></div>
+        <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Saldo total en circulación</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{fmt(saldoTot)}</div></div>
+        <div className="card" style={{flex:"1 1 130px"}}><div className="muted">💵 Dinero real prepagado <span title="Saldo × factor por membresía (Gold 0,67 · Silver 0,70 · Standard 0,80). Es la plata real que los clientes te pagaron y aún no consumen.">ⓘ</span></div><div style={{fontSize:22,fontWeight:800,color:"var(--green)"}}>{fmt(Math.round(realTot))}</div></div>
       </div>
 
       <div className="toolbar"><input className="input" style={{maxWidth:320}} placeholder="Buscar por nombre, código VIP o teléfono…" value={q} onChange={e=>setQ(e.target.value)}/></div>

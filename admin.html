@@ -1839,9 +1839,9 @@ function ReporteVista({sub,ventas,showToast,recargar}){
     return (
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>{sub==='articulo'?'Artículo':'Categoría'}</th><th className="num">Cantidad</th><th className="num">Ventas netas</th><th className="num">Beneficio</th></tr></thead>
+          <thead><tr><th>{sub==='articulo'?'Artículo':'Categoría'}</th><th className="num">Cantidad</th><th className="num">Ventas netas</th><th className="num">Costo</th><th className="num">Beneficio</th></tr></thead>
           <tbody>{rows.map(r=>(
-            <tr key={r.nombre}><td className="row-name">{r.nombre}</td><td className="num">{r.cant}</td><td className="num">{fmt(r.neto)}</td><td className="num">{fmt(r.neto-r.costo)}</td></tr>
+            <tr key={r.nombre}><td className="row-name">{r.nombre}</td><td className="num">{r.cant}</td><td className="num">{fmt(r.neto)}</td><td className="num" style={{color:"var(--red)"}}>{fmt(r.costo)}</td><td className="num" style={{color:"var(--green)"}}>{fmt(r.neto-r.costo)}</td></tr>
           ))}</tbody>
         </table>
       </div>

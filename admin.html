@@ -1352,13 +1352,13 @@ function Chequeos({showToast}){
         <div className="fld"><label className="label">Sede</label>
           <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
             <option value="">Todas las tiendas</option>
-            {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
           </select>
         </div>
         <div className="fld"><label className="label">Colaborador</label>
           <select className="select" value={operador} onChange={e=>setOperador(e.target.value)}>
             <option value="">Todos</option>
-            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero'||e.rol==='supervisor').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
           </select>
         </div>
       </div>
@@ -1759,14 +1759,14 @@ function Informes({showToast}){
           <label className="label">Sede</label>
           <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
             <option value="">Todas las tiendas</option>
-            {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
           </select>
         </div>
         <div className="fld">
           <label className="label">Colaborador</label>
           <select className="select" value={operador} onChange={e=>setOperador(e.target.value)}>
             <option value="">Todos los colaboradores</option>
-            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero'||e.rol==='supervisor').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
           </select>
         </div>
         <div className="fld">

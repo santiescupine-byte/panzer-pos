@@ -622,6 +622,14 @@ function App(){
       return [{...c,cantidad:nueva}];
     }));
   };
+  // Fija la cantidad exacta (escrita con teclado). Mínimo 1.
+  const setQty=(key,n)=>{
+    setCart(prev=>prev.map(c=>{
+      if((c.key||c.producto_id)!==key) return c;
+      const nn=Math.max(1, Math.floor(Number(n)||0));
+      return {...c,cantidad:nn};
+    }));
+  };
   // Separa 1 unidad de una línea a su propia línea (para darle descuento distinto al resto).
   const separarUnidad=(key)=>setCart(prev=>{
     const i=prev.findIndex(c=>(c.key||c.producto_id)===key);
@@ -789,7 +797,7 @@ function App(){
         <CartSheet cart={cart} total={totalCart} bruto={brutoCart} descTotal={descTotal} busy={busy}
           descuentos={descuentos} descTicket={descTicket} setDescTicket={setDescTicket} onLineDesc={setLineDesc}
           lineFull={lineFull} lineNet={lineNet}
-          onClose={()=>setShowCart(false)} onQty={changeQty} onSplit={separarUnidad} onCobrar={cobrar}/>
+          onClose={()=>setShowCart(false)} onQty={changeQty} onSetQty={setQty} onSplit={separarUnidad} onCobrar={cobrar}/>
       )}
 
       {/* Sheet cierre de caja → liquidación */}
@@ -1082,7 +1090,18 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
 // ============================================================
 // SHEET: CARRITO + COBRO
 // ============================================================
-function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,onClose,onQty,onSplit,onCobrar}){
+function QtyInput({value,onSet}){
+  const [v,setV]=React.useState(String(value));
+  React.useEffect(()=>{ setV(String(value)); },[value]);
+  const commit=()=>{ let n=parseInt(v,10); if(isNaN(n)||n<1) n=1; onSet(n); setV(String(n)); };
+  return <input type="number" inputMode="numeric" value={v}
+    onChange={e=>setV(e.target.value.replace(/[^0-9]/g,''))}
+    onFocus={e=>e.target.select()}
+    onBlur={commit}
+    onKeyDown={e=>{ if(e.key==='Enter') e.target.blur(); }}
+    style={{width:54,textAlign:"center",background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--tb)",fontSize:15,fontWeight:800,padding:"6px 2px"}}/>;
+}
+function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,onClose,onQty,onSetQty,onSplit,onCobrar}){
   const [paso,setPaso]=useState("carrito"); // carrito | pago
   const hayDesc = (descuentos||[]).length>0;
   const selStyle={background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--blue)",fontSize:11,fontWeight:600,padding:"2px 4px",marginTop:2};
@@ -1127,7 +1146,7 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
                 </div>
                 <div className="qty">
                   <button onClick={()=>onQty(key,-1)}>−</button>
-                  <span>{c.cantidad}</span>
+                  <QtyInput value={c.cantidad} onSet={n=>onSetQty(key,n)}/>
                   <button onClick={()=>onQty(key,1)}>+</button>
                 </div>
                 <div style={{minWidth:74,textAlign:"right"}}>

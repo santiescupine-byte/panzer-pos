@@ -234,13 +234,21 @@ async function apiGet(action, params={}){
   for(const [k,v] of Object.entries(params)) url.searchParams.set(k,v);
   try{ const r=await fetch(url.toString()); return await r.json(); }catch(e){ return null; }
 }
-// POST al Apps Script (header text/plain como en el sistema de recaudo)
-async function apiPost(action, body){
+// POST al Apps Script (header text/plain como en el sistema de recaudo) — con timeout
+async function apiPost(action, body, timeoutMs=25000){
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),timeoutMs);
   try{
-    const r=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,...body})});
+    const r=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,...body}),signal:ctrl.signal});
+    clearTimeout(t);
     return await r.json();
-  }catch(e){ return {ok:false,error:String(e)}; }
+  }catch(e){ clearTimeout(t); return {ok:false,error:String(e)}; }
 }
+
+// ---- Cola local de liquidaciones (para que NUNCA se pierda una si Google falla) ----
+const LIQ_KEY='panzer_liq_pendientes';
+function liqPendientes(){ try{ return JSON.parse(localStorage.getItem(LIQ_KEY)||'[]'); }catch(e){ return []; } }
+function liqSave(arr){ try{ localStorage.setItem(LIQ_KEY, JSON.stringify(arr)); }catch(e){} }
+function liqEncolar(liq){ const a=liqPendientes(); a.push(liq); liqSave(a); }
 
 const db = {
   async getConfig(){
@@ -263,15 +271,33 @@ const db = {
   // Registrar la liquidación de turno en el sistema de recaudo.
   // El Apps Script espera los campos ANIDADOS en `liquidacion` (igual que la app del tesorero),
   // con fecha/hora/estado. No mandar plano o responde "Datos incompletos".
+  // Intenta enviar UNA liquidación (varios intentos). Devuelve true/false; no lanza.
+  async postLiquidacion(liquidacion, intentos=3){
+    for(let i=1;i<=intentos;i++){
+      const res = await apiPost('guardarLiquidacionOperador', { liquidacion });
+      if(res && res.success) return true;
+      if(i<intentos) await new Promise(r=>setTimeout(r,1500));
+    }
+    return false;
+  },
   async enviarLiquidacion(payload){
     const liquidacion = { ...payload,
       fecha: new Date().toLocaleDateString('es-CO'),
       hora: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
       estado: 'pendiente',
     };
-    const res = await apiPost('guardarLiquidacionOperador', { liquidacion });
-    if(!res || !res.success) throw new Error((res && res.error) || 'No se pudo registrar la liquidación');
-    return res;
+    const ok = await db.postLiquidacion(liquidacion);
+    if(ok) return { success:true };
+    liqEncolar(liquidacion);          // Google falló → se guarda local y se reenviará
+    return { success:false, queued:true };
+  },
+  // Reenvía las liquidaciones que quedaron en cola (1 intento c/u; las que fallan quedan).
+  async reintentarLiqPendientes(){
+    const arr=liqPendientes(); if(!arr.length) return { enviadas:0, pendientes:0 };
+    const quedan=[]; let env=0;
+    for(const liq of arr){ const ok=await db.postLiquidacion(liq,1); if(ok) env++; else quedan.push(liq); }
+    liqSave(quedan);
+    return { enviadas:env, pendientes:quedan.length };
   },
   // ¿este operador hizo un chequeo VIGENTE en esta sede? (dentro de las últimas 12 h, = turno más largo)
   async chequeoVigente(sede, operador){
@@ -548,8 +574,18 @@ function App(){
   // descuentos
   const [descuentos,setDescuentos]=useState([]);     // lista de descuentos disponibles
   const [descTicket,setDescTicket]=useState(null);   // {nombre,porcentaje} aplicado al ticket
+  // liquidaciones pendientes de enviar (cola local que no pierde nada)
+  const [liqPend,setLiqPend]=useState(0);
 
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2200); };
+  const refrescarLiqPend=()=>setLiqPend(liqPendientes().length);
+  const reenviarLiq=async()=>{
+    const r=await db.reintentarLiqPendientes(); refrescarLiqPend();
+    if(r.enviadas>0) showToast(r.enviadas+" liquidación(es) enviada(s) ✓","ok");
+    else if(r.pendientes>0) showToast("Aún sin conexión — siguen "+r.pendientes+" pendiente(s)","err");
+  };
+  // al abrir la app: muestra el contador y reintenta enviar lo que quedó en cola
+  useEffect(()=>{ refrescarLiqPend(); db.reintentarLiqPendientes().then(refrescarLiqPend).catch(()=>{}); },[]);
 
   const abrir=async(sedeSel, nombre, rol)=>{
     setBusy(true);
@@ -743,6 +779,13 @@ function App(){
         <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setMenuOpen(true)}>☰ Menú{pendTransito>0?(" ("+pendTransito+")"):""}</button>
       </div>
 
+      {liqPend>0 && (
+        <div style={{background:"var(--amber-d)",color:"var(--amber)",fontSize:13,fontWeight:700,padding:"8px 14px",display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid rgba(245,158,11,.25)"}}>
+          ⚠ {liqPend} liquidación(es) sin enviar (se reenvían solas)
+          <button className="header-x" style={{marginLeft:"auto"}} onClick={reenviarLiq}>Reenviar ahora</button>
+        </div>
+      )}
+
       {/* Menú lateral de acciones */}
       {menuOpen && (
         <div className="drawer-bg" onClick={()=>setMenuOpen(false)}>
@@ -803,7 +846,7 @@ function App(){
       {/* Sheet cierre de caja → liquidación */}
       {showCierre && (
         <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} turno={turno} showToast={showToast}
-          onClose={()=>setShowCierre(false)} onCerrar={cerrarCaja}/>
+          onClose={()=>setShowCierre(false)} onCerrar={cerrarCaja} onPend={refrescarLiqPend}/>
       )}
 
       {/* Teclado para precio variable */}
@@ -1020,11 +1063,13 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
 
   const registrarYCerrar=async()=>{
     setSending(true);
-    try{
-      await db.enviarLiquidacion(payload());
-      showToast("Liquidación registrada","ok");
-      onCerrar();
-    }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setSending(false); }
+    let r;
+    try{ r=await db.enviarLiquidacion(payload()); }
+    catch(e){ r={success:false,queued:true}; }
+    if(onPend) onPend();
+    if(r.success) showToast("Liquidación registrada ✓","ok");
+    else showToast("⚠ Sin conexión: la liquidación quedó GUARDADA y se reenviará sola","err");
+    onCerrar();   // cierra caja igual — la liquidación no se pierde (queda en cola)
   };
 
   const tokenInput=(lbl,val,setter,extra)=>(

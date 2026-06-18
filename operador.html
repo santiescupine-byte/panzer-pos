@@ -417,6 +417,24 @@ const db = {
     if(error) throw error;
     return data;
   },
+  // ---- MIS TAREAS (asignadas a este operador en esta sede) ----
+  async misTareas(sede, operador){
+    if(DEMO_MODE) return [
+      {id:"t1",titulo:"Limpiar trampa de grasa",descripcion:"Antes de cerrar el turno",sede,asignado_a:operador,prioridad:"alta",fecha_limite:new Date().toISOString().slice(0,10),estado:"pendiente",completado_at:null},
+      {id:"t2",titulo:"Revisar nivel de cera líquida",descripcion:"",sede,asignado_a:operador,prioridad:"normal",fecha_limite:null,estado:"pendiente",completado_at:null},
+    ];
+    const { data, error } = await sb.from('tareas').select('id,titulo,descripcion,prioridad,fecha_limite,estado,completado_at,creado_por')
+      .eq('asignado_a',operador)
+      .order('fecha_limite',{ascending:true,nullsFirst:false}).limit(200);
+    if(error) return [];
+    return data||[];
+  },
+  async marcarMiTarea(id, hecha){
+    if(DEMO_MODE) return;
+    const row=hecha?{estado:'hecha',completado_at:new Date().toISOString()}:{estado:'pendiente',completado_at:null};
+    const { error } = await sb.from('tareas').update(row).eq('id',id);
+    if(error) throw error;
+  },
   // ---- Mis últimos recibos (consulta del propio operador) ----
   async misRecibos(sede, operador){
     if(DEMO_MODE) return [
@@ -567,6 +585,11 @@ function App(){
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
+  const [showTareas,setShowTareas]=useState(false);        // sheet "mis tareas"
+  const [tareasPend,setTareasPend]=useState(0);            // # tareas pendientes de este operador
+  const [tareasVenc,setTareasVenc]=useState(0);            // # de esas que están vencidas
+  const aplicarTareas=ts=>{ const h=new Date(); const hoyS=h.getFullYear()+'-'+String(h.getMonth()+1).padStart(2,'0')+'-'+String(h.getDate()).padStart(2,'0'); const p=ts.filter(t=>t.estado!=='hecha'); setTareasPend(p.length); setTareasVenc(p.filter(t=>t.fecha_limite&&t.fecha_limite<hoyS).length); };
+  const refrescarTareas=()=>{ if(sede&&operador) db.misTareas(sede,operador).then(aplicarTareas).catch(()=>{}); };
   const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
@@ -596,6 +619,7 @@ function App(){
       setProductos(prods);
       db.getDescuentos().then(setDescuentos).catch(()=>{});
       db.transferenciasEnTransito(sedeSel).then(a=>setPendTransito(a.length)).catch(()=>{});
+      db.misTareas(sedeSel,nombre).then(aplicarTareas).catch(()=>{});
       // El chequeo de inventario es OBLIGATORIO solo para CAJEROS. Supervisor/admin/otros entran directo.
       if(rol && rol!=='cajero'){ setChequeoHecho(true); }
       else {
@@ -786,6 +810,13 @@ function App(){
         </div>
       )}
 
+      {tareasPend>0 && (
+        <div style={{background:tareasVenc>0?"var(--red-d)":"var(--amber-d)",color:tareasVenc>0?"var(--red)":"var(--amber)",fontSize:13,fontWeight:700,padding:"8px 14px",display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid "+(tareasVenc>0?"rgba(239,68,68,.25)":"rgba(245,158,11,.25)")}}>
+          📋 Tienes {tareasPend} tarea{tareasPend>1?"s":""} pendiente{tareasPend>1?"s":""}{tareasVenc>0?(" · "+tareasVenc+" vencida"+(tareasVenc>1?"s":"")+" 🔴"):""}
+          <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setShowTareas(true)}>Ver</button>
+        </div>
+      )}
+
       {/* Menú lateral de acciones */}
       {menuOpen && (
         <div className="drawer-bg" onClick={()=>setMenuOpen(false)}>
@@ -793,6 +824,7 @@ function App(){
             <div className="card-t" style={{marginBottom:6}}>Menú</div>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
+            <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowTareas(true);}}>📋 Mis tareas{tareasPend>0?(" ("+tareasPend+")"):""}</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecibos(true);}}>🧾 Mis recibos</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMaq(true);}}>🔧 Máquinas</button>
             <div style={{marginTop:"auto",paddingTop:10}}>
@@ -860,6 +892,10 @@ function App(){
       )}
 
       {/* Sheet "mis últimos recibos" */}
+      {showTareas && (
+        <TareasSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>{setShowTareas(false);refrescarTareas();}}/>
+      )}
+
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
       )}
@@ -1370,6 +1406,61 @@ function MaquinasSheet({sede,operador,showToast,onClose}){
 // El cajero consulta sus últimos 5 recibos por si cometió un error.
 // Solo lectura — no puede editar ni anular (eso es del back office).
 // ============================================================
+function TareasSheet({sede,operador,showToast,onClose}){
+  const [tareas,setTareas]=useState(null);
+  const hoy=(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
+
+  const load=()=>{ db.misTareas(sede,operador).then(setTareas).catch(()=>setTareas([])); };
+  useEffect(()=>{ load(); },[]);
+
+  const toggle=async t=>{
+    const nuevo=t.estado!=='hecha';
+    setTareas(prev=>prev.map(x=>x.id===t.id?{...x,estado:nuevo?'hecha':'pendiente',completado_at:nuevo?new Date().toISOString():null}:x));
+    try{ await db.marcarMiTarea(t.id,nuevo); }
+    catch(e){ showToast&&showToast("No se pudo guardar, reintenta","err"); load(); }
+  };
+
+  const all=tareas||[];
+  const pend=all.filter(t=>t.estado!=='hecha');
+  const hechas=all.filter(t=>t.estado==='hecha');
+  const dueLabel=t=>{
+    if(!t.fecha_limite) return <span style={{color:"var(--td)"}}>Sin fecha</span>;
+    if(t.fecha_limite<hoy) return <span style={{color:"var(--red)",fontWeight:700}}>🔴 Vencida · {t.fecha_limite}</span>;
+    if(t.fecha_limite===hoy) return <span style={{color:"var(--amber)",fontWeight:700}}>🟡 Para hoy</span>;
+    return <span style={{color:"var(--td)"}}>⚪ {t.fecha_limite}</span>;
+  };
+  const Fila=({t})=>(
+    <div onClick={()=>toggle(t)} style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:8,padding:"14px",borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:"pointer",opacity:t.estado==='hecha'?0.55:1}}>
+      <div style={{width:26,height:26,borderRadius:8,flexShrink:0,marginTop:1,border:"2px solid "+(t.estado==='hecha'?"var(--green)":"var(--bd2)"),background:t.estado==='hecha'?"var(--green)":"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900}}>{t.estado==='hecha'?"✓":""}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:700,fontSize:15,textDecoration:t.estado==='hecha'?"line-through":"none"}}>{t.titulo}{t.prioridad==='alta'?<span style={{fontSize:10,fontWeight:800,padding:"1px 7px",borderRadius:8,background:"var(--red-d)",color:"var(--red)",marginLeft:6}}>ALTA</span>:null}</div>
+        {t.descripcion && <div style={{color:"var(--td)",fontSize:13,marginTop:3}}>{t.descripcion}</div>}
+        <div style={{fontSize:12,marginTop:5}}>{t.estado==='hecha'?<span style={{color:"var(--green)"}}>✅ Hecha</span>:dueLabel(t)}{t.creado_por?<span style={{color:"var(--td)"}}> · asignó {t.creado_por}</span>:null}</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">📋 Mis tareas</div>
+        <div className="header-sub" style={{marginBottom:12}}>{operador} · {sede} · toca la casilla para marcar hecho</div>
+
+        {tareas===null ? <div className="empty">Cargando…</div> : (
+          <div>
+            {pend.length>0
+              ? pend.map(t=><Fila key={t.id} t={t}/>)
+              : <div className="empty" style={{color:"var(--green)",fontWeight:700}}>✓ No tienes tareas pendientes 🎉</div>}
+            {hechas.length>0 && <div className="header-sub" style={{margin:"14px 0 8px"}}>Hechas ({hechas.length})</div>}
+            {hechas.map(t=><Fila key={t.id} t={t}/>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RecibosSheet({sede,operador,onClose}){
   const [recibos,setRecibos]=useState(null);
   const [abierto,setAbierto]=useState(null); // id del recibo expandido

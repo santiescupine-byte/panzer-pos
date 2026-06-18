@@ -534,6 +534,39 @@ const db = {
     let q=sb.from('mantenimientos').select('*').order('reportado_at',{ascending:false}).limit(200); if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
   },
+  // ---- TAREAS ----
+  async listTareas(f={}){
+    if(DEMO_MODE){ let a=(DEMO.tareas||[]).slice(); if(f.sede)a=a.filter(t=>t.sede===f.sede); if(f.asignado)a=a.filter(t=>t.asignado_a===f.asignado); if(f.estado)a=a.filter(t=>t.estado===f.estado); return a; }
+    let q=sb.from('tareas').select('*').order('fecha_limite',{ascending:true,nullsFirst:false}).order('created_at',{ascending:false}).limit(1000);
+    if(f.sede) q=q.eq('sede',f.sede);
+    if(f.asignado) q=q.eq('asignado_a',f.asignado);
+    if(f.estado) q=q.eq('estado',f.estado);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  // crearTareas: t={titulo,descripcion,sede,fecha_limite,prioridad,creado_por}; asignados=[{nombre,rol}]
+  async crearTareas(t, asignados){
+    const grupo = asignados.length>1 ? uid() : null;
+    const filas = asignados.map(a=>({
+      grupo_id:grupo, titulo:t.titulo, descripcion:t.descripcion||null, sede:t.sede,
+      asignado_a:a.nombre, asignado_rol:a.rol||null, prioridad:t.prioridad||'normal',
+      creado_por:t.creado_por||null, fecha_limite:t.fecha_limite||null, estado:'pendiente'
+    }));
+    if(DEMO_MODE){ DEMO.tareas=DEMO.tareas||[]; filas.forEach(f=>DEMO.tareas.push({...f,id:uid(),completado_at:null,created_at:new Date().toISOString()})); return; }
+    const {error}=await sb.from('tareas').insert(filas); if(error) throw error;
+  },
+  async marcarTarea(id, hecha){
+    if(DEMO_MODE){ const t=(DEMO.tareas||[]).find(x=>x.id===id); if(t){t.estado=hecha?'hecha':'pendiente'; t.completado_at=hecha?new Date().toISOString():null;} return; }
+    const row=hecha?{estado:'hecha',completado_at:new Date().toISOString()}:{estado:'pendiente',completado_at:null};
+    const {error}=await sb.from('tareas').update(row).eq('id',id); if(error) throw error;
+  },
+  async deleteTarea(id){
+    if(DEMO_MODE){ DEMO.tareas=(DEMO.tareas||[]).filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('tareas').delete().eq('id',id); if(error) throw error;
+  },
+  async deleteGrupoTarea(grupoId){
+    if(DEMO_MODE){ DEMO.tareas=(DEMO.tareas||[]).filter(x=>x.grupo_id!==grupoId); return; }
+    const {error}=await sb.from('tareas').delete().eq('grupo_id',grupoId); if(error) throw error;
+  },
   // ---- EMPLEADOS ----
   async listEmpleados(){
     if(DEMO_MODE) return DEMO.empleados.map(e=>({...e,sedes:[...e.sedes]}));
@@ -809,7 +842,12 @@ function App(){
   const [pin,setPin]=useState("");
   const [busy,setBusy]=useState(false);
   const [navOpen,setNavOpen]=useState(false);   // menú lateral en móvil
+  const [misT,setMisT]=useState({pend:0,venc:0});  // tareas pendientes del usuario logueado (banner)
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2400); };
+
+  // Tareas pendientes asignadas a la persona logueada (para el banner de aviso)
+  const cargarMisTareas=(nombre)=>{ if(!nombre){ setMisT({pend:0,venc:0}); return; } db.listTareas({asignado:nombre}).then(ts=>{ const h=fLocalDia(new Date()); const p=(ts||[]).filter(t=>t.estado!=='hecha'); setMisT({pend:p.length, venc:p.filter(t=>t.fecha_limite&&t.fecha_limite<h).length}); }).catch(()=>{}); };
+  useEffect(()=>{ if(auth) cargarMisTareas(auth.nombre); else setMisT({pend:0,venc:0}); },[auth]);
 
   const intentar=async(p)=>{
     setBusy(true);
@@ -857,10 +895,16 @@ function App(){
     <div className="app">
       {DEMO_MODE && <div className="demo-banner">MODO DEMO — los cambios no se guardan (conecta Supabase para que persistan)</div>}
       {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+      {misT.pend>0 && (
+        <div style={{background:misT.venc>0?"var(--red-d)":"var(--amber-d)",color:misT.venc>0?"var(--red)":"var(--amber)",fontSize:13,fontWeight:700,padding:"9px 16px",display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid "+(misT.venc>0?"rgba(239,68,68,.25)":"rgba(245,158,11,.25)")}}>
+          📋 Tienes {misT.pend} tarea{misT.pend>1?"s":""} pendiente{misT.pend>1?"s":""}{misT.venc>0?(" · "+misT.venc+" vencida"+(misT.venc>1?"s":"")+" 🔴"):""}
+          {tab!=='tareas' && <button className="btn btn-sm btn-ghost" style={{marginLeft:"auto"}} onClick={()=>{setTab('tareas');setNavOpen(false);}}>Ver</button>}
+        </div>
+      )}
       {(() => {
         const NAV = auth.rol==='supervisor'
-          ? [["mantenimiento","🔧","Mantenimiento"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          ? [["mantenimiento","🔧","Mantenimiento"],["tareas","✅","Tareas"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -892,6 +936,7 @@ function App(){
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
+                {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
@@ -2557,6 +2602,207 @@ function Mantenimiento({showToast}){
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: TAREAS — asignaciones a empleados con fecha límite y casilla "hecho"
+// ============================================================
+// Modal para crear tareas (se usa en la pestaña Tareas).
+function NuevaTareaModal({sedes, emps, quien, defSede, onClose, onCreated, showToast}){
+  const sede0=(defSede || (sedes.find(s=>!s.es_bodega)||sedes[0]||{}).nombre) || "";
+  const [n,setN]=useState({titulo:"",descripcion:"",prioridad:"normal",fecha_limite:"",modo:"persona",sede:sede0,persona:""});
+  const [busy,setBusy]=useState(false);
+  const activos=emps.filter(e=>e.activo!==false);                  // cualquier empleado activo (cajero, supervisor, etc.)
+  const deSede=s=>activos.filter(e=>(e.sedes||[]).includes(s));    // los de una sede (para el modo "todos")
+
+  const crear=async()=>{
+    const titulo=(n.titulo||"").trim();
+    if(!titulo){ showToast("Ponle un título a la tarea","err"); return; }
+    if(!n.sede){ showToast("Elige la sede","err"); return; }
+    let asignados=[];
+    if(n.modo==='persona'){
+      if(!n.persona){ showToast("Elige a quién se la asignas","err"); return; }
+      const e=activos.find(x=>x.nombre===n.persona);
+      asignados=[{nombre:n.persona, rol:e?e.rol:null}];
+    } else {
+      asignados=deSede(n.sede).map(e=>({nombre:e.nombre, rol:e.rol}));
+      if(!asignados.length){ showToast("No hay empleados activos en "+n.sede,"err"); return; }
+    }
+    setBusy(true);
+    try{
+      await db.crearTareas({titulo, descripcion:(n.descripcion||"").trim(), sede:n.sede, fecha_limite:n.fecha_limite||null, prioridad:n.prioridad, creado_por:quien||null}, asignados);
+      showToast(asignados.length>1?("Tarea asignada a "+asignados.length+" personas ✓"):"Tarea creada ✓","ok");
+      onCreated&&onCreated();
+      onClose();
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  return (
+    <div className="modal-bg" onClick={()=>!busy&&onClose()}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-t">✅ Nueva tarea</div>
+        <label className="label">Título</label>
+        <input className="input" autoFocus value={n.titulo} onChange={e=>setN({...n,titulo:e.target.value})} placeholder="Ej. Limpiar trampa de grasa"/>
+        <label className="label">Descripción / instrucciones (opcional)</label>
+        <input className="input" value={n.descripcion} onChange={e=>setN({...n,descripcion:e.target.value})} placeholder="Detalle de qué hacer…"/>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <div style={{flex:"1 1 160px"}}>
+            <label className="label">Sede</label>
+            <select className="select" value={n.sede} onChange={e=>setN({...n,sede:e.target.value})}>
+              {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+            </select>
+          </div>
+          <div style={{flex:"1 1 120px"}}>
+            <label className="label">Fecha límite</label>
+            <input className="input" type="date" value={n.fecha_limite} onChange={e=>setN({...n,fecha_limite:e.target.value})}/>
+          </div>
+          <div style={{flex:"1 1 120px"}}>
+            <label className="label">Prioridad</label>
+            <select className="select" value={n.prioridad} onChange={e=>setN({...n,prioridad:e.target.value})}>
+              <option value="alta">Alta</option><option value="normal">Normal</option><option value="baja">Baja</option>
+            </select>
+          </div>
+        </div>
+        <label className="label">Asignar a</label>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <button className={"btn btn-sm "+(n.modo==='persona'?'btn-amber':'btn-ghost')} onClick={()=>setN({...n,modo:'persona'})}>👤 Una persona</button>
+          <button className={"btn btn-sm "+(n.modo==='sede'?'btn-amber':'btn-ghost')} onClick={()=>setN({...n,modo:'sede'})}>👥 Todos los de la sede</button>
+        </div>
+        {n.modo==='persona'
+          ? <select className="select" value={n.persona} onChange={e=>setN({...n,persona:e.target.value})}>
+              <option value="">— Elige empleado —</option>
+              {activos.map(e=><option key={e.id} value={e.nombre}>{e.nombre} ({e.rol})</option>)}
+            </select>
+          : <div className="card" style={{marginBottom:12,fontSize:13}}>Se creará una tarea (con su propia casilla) para cada uno de los <b>{deSede(n.sede).length}</b> empleados de <b>{n.sede}</b>: <span className="muted">{deSede(n.sede).map(e=>e.nombre).join(", ")||"(ninguno)"}</span></div>}
+        <div className="modal-actions">
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={busy} onClick={crear}>{busy?"Creando…":"Crear tarea"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Tareas({showToast, quien, rol, onTareasChange}){
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [sedeF,setSedeF]=useState("");        // filtro de sede ("" = todas)
+  const [asigF,setAsigF]=useState("");        // filtro por persona ("" = todos)
+  const [verHechas,setVerHechas]=useState(false);
+  const [tareas,setTareas]=useState(null);
+  const [nueva,setNueva]=useState(false);     // abre el modal de creación
+
+  useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados()]).then(([s,e])=>{ setSedes(s); setEmps(e); }).catch(()=>{}); },[]);
+  const load=async()=>{
+    try{ const t=await db.listTareas({sede:sedeF||undefined, asignado:asigF||undefined}); setTareas(t); }
+    catch(e){ showToast(""+(e.message||e),"err"); setTareas([]); }
+  };
+  useEffect(()=>{ setTareas(null); load(); },[sedeF,asigF]);
+
+  const hoy=fLocalDia(new Date());
+  const all=tareas||[];
+  const pend=all.filter(t=>t.estado!=='hecha');
+  const hechas=all.filter(t=>t.estado==='hecha');
+  const vencidas=pend.filter(t=>t.fecha_limite && t.fecha_limite<hoy);
+  const deHoy=pend.filter(t=>t.fecha_limite===hoy);
+  const prox=pend.filter(t=>!t.fecha_limite || t.fecha_limite>hoy);
+  const total=all.length;
+  const cumpl=total?Math.round(hechas.length/total*100):0;
+
+  // personas que aparecen en el filtro por persona
+  const personasFiltro=[...new Set(all.map(t=>t.asignado_a))].sort();
+
+  const toggle=async t=>{
+    const nuevo=t.estado!=='hecha';
+    setTareas(prev=>prev.map(x=>x.id===t.id?{...x,estado:nuevo?'hecha':'pendiente',completado_at:nuevo?new Date().toISOString():null}:x));
+    try{ await db.marcarTarea(t.id,nuevo); onTareasChange&&onTareasChange(); }
+    catch(e){ showToast(""+(e.message||e),"err"); load(); }
+  };
+  const borrar=async t=>{
+    if(t.grupo_id){
+      if(!confirm("Esta tarea fue asignada a varias personas.\n\nAceptar = borrar la del grupo COMPLETO.\nCancelar = no borrar.")) return;
+      try{ await db.deleteGrupoTarea(t.grupo_id); load(); showToast("Tarea (grupo) eliminada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); }
+    } else {
+      if(!confirm("¿Borrar la tarea \""+t.titulo+"\" de "+t.asignado_a+"?")) return;
+      try{ await db.deleteTarea(t.id); load(); showToast("Tarea eliminada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); }
+    }
+  };
+
+  const abrirNueva=()=>setNueva(true);
+
+  const prioPill=p=> p==='alta'?<span className="pill pill-off" style={{marginLeft:6}}>Alta</span> : p==='baja'?<span className="pill" style={{marginLeft:6,background:"var(--sf3)",color:"var(--td)"}}>Baja</span> : null;
+  const dueLabel=t=>{
+    if(t.estado==='hecha') return <span style={{color:"var(--green)"}}>✅ Hecha{t.completado_at?(" · "+fLocalDia(t.completado_at)):""}</span>;
+    if(!t.fecha_limite) return <span className="muted">Sin fecha</span>;
+    if(t.fecha_limite<hoy) return <span style={{color:"var(--red)",fontWeight:700}}>🔴 Vencida · {t.fecha_limite}</span>;
+    if(t.fecha_limite===hoy) return <span style={{color:"var(--amber)",fontWeight:700}}>🟡 Para hoy</span>;
+    return <span className="muted">⚪ {t.fecha_limite}</span>;
+  };
+
+  const Fila=({t})=>(
+    <div className="card" style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:8,padding:"12px 14px",opacity:t.estado==='hecha'?0.6:1}}>
+      <div onClick={()=>toggle(t)} title="Marcar hecho/pendiente" style={{cursor:"pointer",width:24,height:24,borderRadius:7,flexShrink:0,marginTop:1,border:"2px solid "+(t.estado==='hecha'?"var(--green)":"var(--bd2)"),background:t.estado==='hecha'?"var(--green)":"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:900}}>{t.estado==='hecha'?"✓":""}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:700,color:"var(--tb)",textDecoration:t.estado==='hecha'?"line-through":"none"}}>{t.titulo}{prioPill(t.prioridad)}</div>
+        {t.descripcion && <div className="muted" style={{fontSize:13,marginTop:2}}>{t.descripcion}</div>}
+        <div className="muted" style={{fontSize:12,marginTop:4,display:"flex",gap:10,flexWrap:"wrap"}}>
+          <span>👤 {t.asignado_a}</span>
+          {!sedeF && <span>🏬 {t.sede}</span>}
+          {t.grupo_id && <span title="Asignada a varias personas">👥 grupo</span>}
+          <span>{dueLabel(t)}</span>
+          {t.creado_por && <span>· creó {t.creado_por}</span>}
+        </div>
+      </div>
+      <button className="btn btn-ghost btn-sm" style={{flexShrink:0}} onClick={()=>borrar(t)} title="Borrar">✕</button>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Tareas</div>
+        <button className="btn btn-amber btn-sm" onClick={abrirNueva}>＋ Nueva tarea</button>
+      </div>
+
+      <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        <div className="card" style={{flex:"1 1 140px"}}><div className="muted">Pendientes</div><div style={{fontSize:24,fontWeight:800}}>{pend.length}</div></div>
+        <div className="card" style={{flex:"1 1 140px"}}><div className="muted">Vencidas</div><div style={{fontSize:24,fontWeight:800,color:vencidas.length?"var(--red)":"var(--green)"}}>{vencidas.length}</div></div>
+        <div className="card" style={{flex:"1 1 140px"}}><div className="muted">Para hoy</div><div style={{fontSize:24,fontWeight:800,color:deHoy.length?"var(--amber)":"var(--t)"}}>{deHoy.length}</div></div>
+        <div className="card" style={{flex:"1 1 140px"}}><div className="muted">Cumplimiento</div><div style={{fontSize:24,fontWeight:800,color:cumpl>=80?"var(--green)":cumpl>=50?"var(--amber)":"var(--red)"}}>{cumpl}%</div></div>
+      </div>
+
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <select className="select" style={{maxWidth:220,margin:0}} value={sedeF} onChange={e=>setSedeF(e.target.value)}>
+          <option value="">🏬 Todas las sedes</option>
+          {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+        </select>
+        <select className="select" style={{maxWidth:200,margin:0}} value={asigF} onChange={e=>setAsigF(e.target.value)}>
+          <option value="">👤 Todos</option>
+          {personasFiltro.map(p=><option key={p} value={p}>{p}</option>)}
+        </select>
+      </div>
+
+      {tareas===null ? <div className="empty">Cargando…</div> : (
+        <div>
+          {vencidas.length>0 && <div className="sec-title" style={{margin:"14px 0 8px",color:"var(--red)"}}>🔴 Vencidas ({vencidas.length})</div>}
+          {vencidas.map(t=><Fila key={t.id} t={t}/>)}
+
+          {deHoy.length>0 && <div className="sec-title" style={{margin:"14px 0 8px",color:"var(--amber)"}}>🟡 Para hoy ({deHoy.length})</div>}
+          {deHoy.map(t=><Fila key={t.id} t={t}/>)}
+
+          {prox.length>0 && <div className="sec-title" style={{margin:"14px 0 8px"}}>⚪ Próximas / sin fecha ({prox.length})</div>}
+          {prox.map(t=><Fila key={t.id} t={t}/>)}
+
+          {pend.length===0 && <div className="card" style={{textAlign:"center",color:"var(--green)",fontWeight:700}}>✓ No hay tareas pendientes 🎉</div>}
+
+          <div className="sec-title" style={{margin:"18px 0 8px",cursor:"pointer"}} onClick={()=>setVerHechas(v=>!v)}>{verHechas?"▾":"▸"} Hechas ({hechas.length})</div>
+          {verHechas && hechas.map(t=><Fila key={t.id} t={t}/>)}
+        </div>
+      )}
+
+      {nueva && <NuevaTareaModal sedes={sedes} emps={emps} quien={quien} defSede={sedeF} onClose={()=>setNueva(false)} onCreated={()=>{load(); onTareasChange&&onTareasChange();}} showToast={showToast}/>}
     </div>
   );
 }

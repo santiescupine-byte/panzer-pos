@@ -236,6 +236,22 @@ async function vipUltimasTx(n=50){
   const {data,error}=await sb.from('transacciones_vip').select('created_at,id_vip,nombre,tipo,monto,tokens,sede,operador').order('created_at',{ascending:false}).limit(n);
   return error?[]:(data||[]);
 }
+// Todas las transacciones VIP en un rango (paginado, por si superan el tope de 1000 de PostgREST)
+async function vipMovimientosRango(desdeISO, hastaISO){
+  if(DEMO_MODE) return [];
+  const all=[]; const page=1000; let from=0;
+  for(;;){
+    const {data,error}=await sb.from('transacciones_vip')
+      .select('created_at,id_vip,nombre,tipo,monto,tokens,sede,operador')
+      .gte('created_at',desdeISO).lt('created_at',hastaISO)
+      .order('created_at',{ascending:false}).range(from, from+page-1);
+    if(error) break;
+    all.push(...(data||[]));
+    if(!data || data.length<page) break;
+    from+=page;
+  }
+  return all;
+}
 
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
@@ -3114,6 +3130,9 @@ function Membresias({showToast, admin}){
   const [edCup,setEdCup]=useState(null);         // cupón en edición
   const [busyC,setBusyC]=useState(false);
   const [bitacora,setBitacora]=useState(null);   // últimas transacciones
+  const [mes,setMes]=useState(()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
+  const [movs,setMovs]=useState(null);           // transacciones del mes (movimientos por sede)
+  const [detSede,setDetSede]=useState(null);     // sede expandida en el detalle
 
   useEffect(()=>{
     vipApi({accion:'listar_clientes'}).then(r=>{
@@ -3123,7 +3142,9 @@ function Membresias({showToast, admin}){
 
   const cargarCupones=()=>vipListCupones().then(setCupones).catch(()=>setCupones([]));
   const cargarBitacora=()=>{ setBitacora(null); vipUltimasTx(50).then(setBitacora).catch(()=>setBitacora([])); };
-  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); if(vista==='bitacora') cargarBitacora(); },[vista]);
+  const cargarMovs=()=>{ setMovs(null); const [y,m]=mes.split('-').map(Number); const desde=new Date(y,m-1,1).toISOString(); const hasta=new Date(y,m,1).toISOString(); vipMovimientosRango(desde,hasta).then(setMovs).catch(()=>setMovs([])); };
+  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); if(vista==='bitacora') cargarBitacora(); if(vista==='movimientos') cargarMovs(); },[vista]);
+  useEffect(()=>{ if(vista==='movimientos') cargarMovs(); },[mes]);
 
   // editar ficha del cliente
   const guardarCliente=async()=>{
@@ -3203,6 +3224,7 @@ function Membresias({showToast, admin}){
           <button className={"btn btn-sm "+(vista==='clientes'?'btn-amber':'btn-ghost')} onClick={()=>setVista('clientes')}>👥 Clientes</button>
           <button className={"btn btn-sm "+(vista==='cupones'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cupones')}>🎁 Cupones</button>
           <button className={"btn btn-sm "+(vista==='bitacora'?'btn-amber':'btn-ghost')} onClick={()=>setVista('bitacora')}>📋 Bitácora</button>
+          <button className={"btn btn-sm "+(vista==='movimientos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('movimientos')}>📍 Por sede</button>
         </div>
       </div>
 
@@ -3300,6 +3322,78 @@ function Membresias({showToast, admin}){
           )}
         </div>
       )}
+
+      {/* ===== MOVIMIENTOS POR SEDE ===== */}
+      {vista==='movimientos' && (
+        <div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>Movimientos VIP por sede en el mes: nuevas membresías, recargas, canjes y cupones. Toca una sede para el detalle.</div>
+            <input type="month" className="input" style={{maxWidth:170,margin:0}} value={mes} onChange={e=>setMes(e.target.value)}/>
+            <button className="btn btn-ghost btn-sm" onClick={cargarMovs}>🔄</button>
+          </div>
+          {movs===null ? <div className="empty">Cargando movimientos…</div> : (()=>{
+            const porSede={};
+            movs.forEach(t=>{ const s=(t.sede||'(sin sede)').trim(); const o=porSede[s]||(porSede[s]={sede:s,nuevas:0,recargas:0,montoRec:0,canjes:0,tokens:0,cupones:0}); const tk=Number(t.tokens)||0, mo=Number(t.monto)||0; if(t.tipo==='Recarga Inicial'){o.nuevas++;o.montoRec+=mo;} else if(t.tipo==='Recarga'){o.recargas++;o.montoRec+=mo;} else if(t.tipo==='Canje'){o.canjes++;o.tokens+=tk;} else if(t.tipo==='Cupon'){o.cupones++;} });
+            const filas=Object.values(porSede).sort((a,b)=>(b.nuevas+b.recargas+b.canjes+b.cupones)-(a.nuevas+a.recargas+a.canjes+a.cupones)||a.sede.localeCompare(b.sede));
+            const T=filas.reduce((a,r)=>({nuevas:a.nuevas+r.nuevas,recargas:a.recargas+r.recargas,montoRec:a.montoRec+r.montoRec,canjes:a.canjes+r.canjes,tokens:a.tokens+r.tokens,cupones:a.cupones+r.cupones}),{nuevas:0,recargas:0,montoRec:0,canjes:0,tokens:0,cupones:0});
+            if(!filas.length) return <div className="empty">No hay movimientos VIP en este mes.</div>;
+            return (
+              <div className="card" style={{padding:0,overflowX:"auto"}}>
+                <table className="tbl">
+                  <thead><tr><th>Sede</th><th className="num">Nuevas memb.</th><th className="num">Recargas</th><th className="num">$ Recargado</th><th className="num">Canjes</th><th className="num">Tokens</th><th className="num">Cupones</th><th></th></tr></thead>
+                  <tbody>
+                    {filas.map(r=>(
+                      <tr key={r.sede} style={{cursor:"pointer"}} onClick={()=>setDetSede(r.sede)}>
+                        <td className="row-name">{r.sede}</td>
+                        <td className="num">{r.nuevas}</td>
+                        <td className="num">{r.recargas}</td>
+                        <td className="num">{fmt(r.montoRec)}</td>
+                        <td className="num">{r.canjes}</td>
+                        <td className="num" style={{fontWeight:700,color:"var(--amber)"}}>{r.tokens}</td>
+                        <td className="num">{r.cupones}</td>
+                        <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();setDetSede(r.sede);}}>Ver</button></td>
+                      </tr>
+                    ))}
+                    <tr style={{fontWeight:800,borderTop:"2px solid var(--bd2)"}}>
+                      <td>TOTAL</td><td className="num">{T.nuevas}</td><td className="num">{T.recargas}</td><td className="num">{fmt(T.montoRec)}</td><td className="num">{T.canjes}</td><td className="num" style={{color:"var(--amber)"}}>{T.tokens}</td><td className="num">{T.cupones}</td><td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* detalle de movimientos de una sede */}
+      {detSede && (()=>{
+        const lst=(movs||[]).filter(t=>(t.sede||'(sin sede)').trim()===detSede).sort((a,b)=> a.created_at<b.created_at?1:-1);
+        return (
+          <div className="modal-bg" onClick={()=>setDetSede(null)}>
+            <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:640}}>
+              <div className="modal-t">📍 {detSede} — {mes}</div>
+              <div className="card" style={{padding:0,overflowX:"auto",maxHeight:"60vh",overflowY:"auto"}}>
+                <table className="tbl">
+                  <thead><tr><th>Fecha</th><th>Cliente</th><th>Tipo</th><th className="num">Monto</th><th className="num">Tokens</th></tr></thead>
+                  <tbody>
+                    {lst.length===0 && <tr><td colSpan="5"><div className="empty">Sin movimientos.</div></td></tr>}
+                    {lst.map((t,i)=>(
+                      <tr key={i}>
+                        <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(t.created_at)} {fLocalHora(t.created_at)}</td>
+                        <td className="row-name">{t.nombre||"—"}<div className="muted" style={{fontSize:11}}>{t.id_vip}</div></td>
+                        <td>{t.tipo}</td>
+                        <td className="num">{fmt(Number(t.monto)||0)}</td>
+                        <td className="num">{Number(t.tokens)||0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDetSede(null)}>Cerrar</button></div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Editor de cupón */}
       {edCup && (

@@ -525,14 +525,54 @@ const db = {
     let q=sb.from('mantenimientos').select('*').eq('estado','abierto'); if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
   },
-  async repararEquipo(equipoId, supervisor, nota){
-    if(DEMO_MODE){ const m=(DEMO.mant||[]).find(x=>x.equipo_id===equipoId&&x.estado==='abierto'); if(m){m.estado='cerrado';m.reparado_at=new Date().toISOString();m.supervisor=supervisor;m.nota_reparacion=nota;} const e=(DEMO.equipos||[]).find(x=>x.id===equipoId); if(e)e.estado='operativa'; return; }
-    const {error}=await sb.rpc('reparar_equipo',{p_equipo_id:equipoId,p_supervisor:supervisor||null,p_nota:nota||null}); if(error) throw error;
+  async repararEquipo(equipoId, supervisor, nota, manoObra=0, repuestos=[]){
+    if(DEMO_MODE){ const m=(DEMO.mant||[]).find(x=>x.equipo_id===equipoId&&x.estado==='abierto'); const cr=(repuestos||[]).reduce((a,r)=>a+(Number(r.cantidad)||1)*(Number(r.valor_unit)||0),0); if(m){m.estado='cerrado';m.reparado_at=new Date().toISOString();m.supervisor=supervisor;m.nota_reparacion=nota;m.costo_repuestos=cr;m.costo_mano_obra=Number(manoObra)||0;m.costo_total=cr+(Number(manoObra)||0);} const e=(DEMO.equipos||[]).find(x=>x.id===equipoId); if(e)e.estado='operativa'; (repuestos||[]).forEach(r=>{ if(r.repuesto_id){ const rep=(DEMO.repuestos||[]).find(x=>x.id===r.repuesto_id); if(rep) rep.stock=(Number(rep.stock)||0)-(Number(r.cantidad)||1); } }); return; }
+    const {error}=await sb.rpc('reparar_equipo',{p_equipo_id:equipoId,p_supervisor:supervisor||null,p_nota:nota||null,p_mano_obra:Number(manoObra)||0,p_repuestos:repuestos||[]}); if(error) throw error;
   },
   async listMantenimientos(sede){
     if(DEMO_MODE) return (DEMO.mant||[]).filter(m=>!sede||m.sede===sede);
     let q=sb.from('mantenimientos').select('*').order('reportado_at',{ascending:false}).limit(200); if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async listMantRepuestos(mantId){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('mantenimiento_repuestos').select('*').eq('mantenimiento_id',mantId); if(error) return []; return data||[];
+  },
+  // ---- REPUESTOS (inventario central) ----
+  async listRepuestos(){
+    if(DEMO_MODE){ DEMO.repuestos=DEMO.repuestos||[]; return DEMO.repuestos.slice(); }
+    const {data,error}=await sb.from('repuestos').select('*').eq('activo',true).order('nombre'); if(error) return []; return data||[];
+  },
+  async saveRepuesto(r){
+    if(DEMO_MODE){ DEMO.repuestos=DEMO.repuestos||[]; if(r.id&&DEMO.repuestos.some(x=>x.id===r.id)){DEMO.repuestos=DEMO.repuestos.map(x=>x.id===r.id?{...x,...r}:x);} else {DEMO.repuestos.push({...r,id:r.id||uid(),activo:true});} return; }
+    const row={nombre:r.nombre,categoria:r.categoria||null,unidad:r.unidad||'unidad',costo:Number(r.costo)||0,stock:Number(r.stock)||0,stock_minimo:Number(r.stock_minimo)||0,activo:r.activo!==false};
+    if(r.id){ const {error}=await sb.from('repuestos').update(row).eq('id',r.id); if(error) throw error; }
+    else { const {error}=await sb.from('repuestos').insert(row); if(error) throw error; }
+  },
+  async deleteRepuesto(id){
+    if(DEMO_MODE){ DEMO.repuestos=(DEMO.repuestos||[]).filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('repuestos').update({activo:false}).eq('id',id); if(error) throw error;
+  },
+  async cargarRepuesto(id, cantidad){   // entrada/compra: suma al stock
+    if(DEMO_MODE){ const r=(DEMO.repuestos||[]).find(x=>x.id===id); if(r) r.stock=(Number(r.stock)||0)+(Number(cantidad)||0); return; }
+    const {data,error}=await sb.from('repuestos').select('stock').eq('id',id).single(); if(error) throw error;
+    const {error:e2}=await sb.from('repuestos').update({stock:(Number(data.stock)||0)+(Number(cantidad)||0)}).eq('id',id); if(e2) throw e2;
+  },
+  // ---- SOLICITUDES DE REPUESTOS ----
+  async listSolicitudes(f={}){
+    if(DEMO_MODE){ let a=(DEMO.solicitudes||[]).slice(); if(f.solicitante)a=a.filter(s=>s.solicitado_por===f.solicitante); return a; }
+    let q=sb.from('solicitudes_repuestos').select('*, solicitud_items(*)').order('created_at',{ascending:false}).limit(300);
+    if(f.solicitante) q=q.eq('solicitado_por',f.solicitante);
+    if(f.estado) q=q.eq('estado',f.estado);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async crearSolicitud(sede, solicitante, nota, items){
+    if(DEMO_MODE){ DEMO.solicitudes=DEMO.solicitudes||[]; DEMO.solicitudes.unshift({id:uid(),sede,solicitado_por:solicitante,estado:'pendiente',nota:nota||null,created_at:new Date().toISOString(),solicitud_items:items.map(i=>({...i,id:uid()}))}); return; }
+    const {error}=await sb.rpc('crear_solicitud_repuestos',{p_sede:sede||null,p_solicitado_por:solicitante||null,p_nota:nota||null,p_items:items||[]}); if(error) throw error;
+  },
+  async resolverSolicitud(id, estado, quien){
+    if(DEMO_MODE){ const s=(DEMO.solicitudes||[]).find(x=>x.id===id); if(s){s.estado=estado;s.resuelto_por=quien;s.resuelto_at=new Date().toISOString();} return; }
+    const {error}=await sb.from('solicitudes_repuestos').update({estado,resuelto_por:quien||null,resuelto_at:new Date().toISOString()}).eq('id',id); if(error) throw error;
   },
   // ---- TAREAS ----
   async listTareas(f={}){
@@ -903,8 +943,8 @@ function App(){
       )}
       {(() => {
         const NAV = auth.rol==='supervisor'
-          ? [["mantenimiento","🔧","Mantenimiento"],["tareas","✅","Tareas"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -936,6 +976,7 @@ function App(){
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
+                {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
@@ -2425,7 +2466,12 @@ function Mantenimiento({showToast}){
   const [vista,setVista]=useState('panorama');   // 'panorama' (todas las sedes) | 'sede'
   const [allEq,setAllEq]=useState(null);          // todos los equipos (panorama)
   const [allAb,setAllAb]=useState([]);            // todos los reportes abiertos (panorama)
+  const [repuestos,setRepuestos]=useState([]);    // catálogo de repuestos (para el formulario)
+  const [manoObra,setManoObra]=useState("");      // costo de mano de obra de la reparación
+  const [repsUsados,setRepsUsados]=useState([]);  // repuestos consumidos en la reparación
 
+  useEffect(()=>{ db.listRepuestos().then(setRepuestos).catch(()=>{}); },[]);
+  useEffect(()=>{ if(rep){ setManoObra(""); setRepsUsados([]); } },[rep]);
   useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); },[]);
   const loadPanorama=async()=>{ try{ const [eq,ab]=await Promise.all([db.listEquipos(),db.mantAbiertos()]); setAllEq(eq); setAllAb(ab); }catch(e){ setAllEq([]); } };
   useEffect(()=>{ loadPanorama(); },[]);
@@ -2455,11 +2501,23 @@ function Mantenimiento({showToast}){
     if(!confirm("¿Borrar el equipo \""+eq.nombre+"\"?")) return;
     try{ await db.deleteEquipo(eq.id); load(); }catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  // ---- repuestos consumidos en el formulario de reparación ----
+  const addRepUsado=()=>setRepsUsados(a=>[...a,{key:uid(),repuesto_id:"",nombre:"",cantidad:1,valor_unit:0,condicion:'nuevo'}]);
+  const setRepUsado=(k,patch)=>setRepsUsados(a=>a.map(l=>l.key===k?{...l,...patch}:l));
+  const delRepUsado=(k)=>setRepsUsados(a=>a.filter(l=>l.key!==k));
+  const pickRepuesto=(k,id)=>{ const r=repuestos.find(x=>x.id===id); setRepUsado(k,{repuesto_id:id, nombre:r?r.nombre:"", valor_unit:r?(Number(r.costo)||0):0}); };
+  const costoReps=repsUsados.reduce((a,l)=>a+(Number(l.cantidad)||0)*(Number(l.valor_unit)||0),0);
+  const costoTotalRep=costoReps+(Number(manoObra)||0);
+
   const reparar=async()=>{
-    if(!rep) return; setBusy(true);
+    if(!rep) return;
+    const items=repsUsados
+      .map(l=>({repuesto_id:l.repuesto_id||"", nombre:(l.nombre||"").trim(), cantidad:Number(l.cantidad)||1, valor_unit:Number(l.valor_unit)||0, condicion:l.condicion||'nuevo'}))
+      .filter(i=>i.nombre);
+    setBusy(true);
     try{
-      await db.repararEquipo(rep.equipo.id, supervisor.trim(), notaRep.trim());
-      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load(); loadPanorama();
+      await db.repararEquipo(rep.equipo.id, supervisor.trim(), notaRep.trim(), Number(manoObra)||0, items);
+      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load(); loadPanorama(); db.listRepuestos().then(setRepuestos).catch(()=>{});
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
 
@@ -2530,6 +2588,7 @@ function Mantenimiento({showToast}){
         <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Equipos</div><div style={{fontSize:24,fontWeight:800}}>{(equipos||[]).length}</div></div>
         <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Paradas ahora</div><div style={{fontSize:24,fontWeight:800,color:paradas?"var(--red)":"var(--green)"}}>{paradas}</div></div>
         <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Tiempo prom. solución</div><div style={{fontSize:24,fontWeight:800}}>{cerrados.length?fmtDur(0,promedio):"—"}</div></div>
+        <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Costo mantenimiento</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>${hist.reduce((a,m)=>a+(Number(m.costo_total)||0),0).toLocaleString("es-CO")}</div></div>
       </div>
 
       <div className="toolbar">
@@ -2567,9 +2626,9 @@ function Mantenimiento({showToast}){
       <div className="sec-title" style={{margin:"20px 0 8px"}}>Historial de mantenimientos <span className="muted">({hist.length})</span></div>
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Equipo</th><th>Descripción</th><th>Reportó</th><th>Apagada</th><th>Reparada</th><th>Tiempo solución</th><th>Supervisor</th></tr></thead>
+          <thead><tr><th>Equipo</th><th>Descripción</th><th>Reportó</th><th>Apagada</th><th>Reparada</th><th>Tiempo solución</th><th>Supervisor</th><th>Costo</th></tr></thead>
           <tbody>
-            {hist.length===0 && <tr><td colSpan="7"><div className="empty">Sin registros.</div></td></tr>}
+            {hist.length===0 && <tr><td colSpan="8"><div className="empty">Sin registros.</div></td></tr>}
             {hist.map(m=>(
               <tr key={m.id}>
                 <td className="row-name">{m.equipo_nombre}</td>
@@ -2579,6 +2638,7 @@ function Mantenimiento({showToast}){
                 <td className="muted">{m.reparado_at?(fLocalDia(m.reparado_at)+" "+fLocalHora(m.reparado_at)):<span style={{color:"var(--red)"}}>abierto</span>}</td>
                 <td style={{fontWeight:700}}>{m.reparado_at?fmtDur(m.reportado_at,m.reparado_at):fmtDur(m.reportado_at,new Date().toISOString())}</td>
                 <td className="muted">{m.supervisor||"—"}</td>
+                <td style={{fontWeight:700}}>{Number(m.costo_total)>0?("$"+(Number(m.costo_total)).toLocaleString("es-CO")):"—"}</td>
               </tr>
             ))}
           </tbody>
@@ -2594,10 +2654,240 @@ function Mantenimiento({showToast}){
             <label className="label">Supervisor que repara</label>
             <input className="input" value={supervisor} onChange={e=>setSupervisor(e.target.value)} placeholder="Tu nombre"/>
             <label className="label">Nota de reparación (opcional)</label>
-            <input className="input" value={notaRep} onChange={e=>setNotaRep(e.target.value)} placeholder="Qué se hizo / repuesto cambiado…"/>
+            <input className="input" value={notaRep} onChange={e=>setNotaRep(e.target.value)} placeholder="Qué se hizo…"/>
+
+            <label className="label">Repuestos usados</label>
+            {repsUsados.length===0 && <div className="muted" style={{fontSize:12,marginBottom:6}}>Si no usaste repuestos, déjalo vacío.</div>}
+            {repsUsados.map(l=>(
+              <div key={l.key} style={{border:"1px solid var(--bd)",borderRadius:10,padding:8,marginBottom:8}}>
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                  <select className="select" style={{margin:0,flex:1}} value={l.repuesto_id} onChange={e=>pickRepuesto(l.key,e.target.value)}>
+                    <option value="">— Otro (escribir) —</option>
+                    {repuestos.map(r=><option key={r.id} value={r.id}>{r.nombre} (stock {Number(r.stock)||0})</option>)}
+                  </select>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>delRepUsado(l.key)}>✕</button>
+                </div>
+                {!l.repuesto_id && <input className="input" style={{marginBottom:6}} value={l.nombre} onChange={e=>setRepUsado(l.key,{nombre:e.target.value})} placeholder="Nombre del repuesto (fuera de catálogo)"/>}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+                  <div style={{flex:"1 1 70px"}}><label className="label" style={{fontSize:11}}>Cantidad</label><input className="input" style={{margin:0}} type="number" value={l.cantidad} onChange={e=>setRepUsado(l.key,{cantidad:e.target.value})}/></div>
+                  <div style={{flex:"1 1 100px"}}><label className="label" style={{fontSize:11}}>Valor unit.</label><input className="input" style={{margin:0}} type="number" value={l.valor_unit} onChange={e=>setRepUsado(l.key,{valor_unit:e.target.value})}/></div>
+                  <div style={{flex:"1 1 130px"}}><label className="label" style={{fontSize:11}}>Condición</label>
+                    <div style={{display:"flex",gap:6}}>
+                      <button className={"btn btn-sm "+(l.condicion==='nuevo'?'btn-amber':'btn-ghost')} onClick={()=>setRepUsado(l.key,{condicion:'nuevo'})}>Nuevo</button>
+                      <button className={"btn btn-sm "+(l.condicion==='usado'?'btn-amber':'btn-ghost')} onClick={()=>setRepUsado(l.key,{condicion:'usado'})}>Usado</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addRepUsado}>＋ Agregar repuesto</button>
+
+            <label className="label" style={{marginTop:10}}>Mano de obra / otros ($)</label>
+            <input className="input" type="number" value={manoObra} onChange={e=>setManoObra(e.target.value)} placeholder="0"/>
+            <div className="card" style={{marginBottom:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+              <span>Costo total de la reparación</span>
+              <span style={{color:"var(--amber)"}}>${costoTotalRep.toLocaleString("es-CO")}</span>
+            </div>
+
             <div className="modal-actions">
               <button className="btn btn-ghost" disabled={busy} onClick={()=>setRep(null)}>Cancelar</button>
               <button className="btn btn-amber" disabled={busy} onClick={reparar}>{busy?"Encendiendo…":"✅ Encender máquina"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: REPUESTOS — inventario central + solicitudes a administración
+// ============================================================
+function Repuestos({showToast, quien, rol}){
+  const esAdmin = rol!=='supervisor';
+  const money=n=>"$"+(Number(n)||0).toLocaleString("es-CO");
+  const [sub,setSub]=useState("inventario");   // 'inventario' | 'solicitudes'
+  const [reps,setReps]=useState(null);
+  const [sols,setSols]=useState([]);
+  const [sedes,setSedes]=useState([]);
+  const [editing,setEditing]=useState(null);    // repuesto en edición (admin)
+  const [cargar,setCargar]=useState(null);       // {repuesto} para sumar stock (admin)
+  const [cargarCant,setCargarCant]=useState("");
+  const [nuevaSol,setNuevaSol]=useState(null);   // modal nueva solicitud
+
+  const loadReps=()=>db.listRepuestos().then(setReps).catch(()=>setReps([]));
+  const loadSols=()=>db.listSolicitudes(esAdmin?{}:{solicitante:quien}).then(setSols).catch(()=>setSols([]));
+  useEffect(()=>{ loadReps(); loadSols(); db.listSedes().then(setSedes).catch(()=>{}); },[]);
+
+  const all=reps||[];
+  const valorTotal=all.reduce((a,r)=>a+(Number(r.stock)||0)*(Number(r.costo)||0),0);
+  const bajos=all.filter(r=>Number(r.stock)<=Number(r.stock_minimo)&&Number(r.stock_minimo)>0);
+  const solPend=sols.filter(s=>s.estado==='pendiente').length;
+
+  const guardarRep=async()=>{
+    const r=editing; if(!(r.nombre||"").trim()){ showToast("Ponle nombre al repuesto","err"); return; }
+    try{ await db.saveRepuesto(r); setEditing(null); loadReps(); showToast("Repuesto guardado","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const borrarRep=async(r)=>{ if(!confirm("¿Quitar \""+r.nombre+"\" del inventario?")) return; try{ await db.deleteRepuesto(r.id); loadReps(); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const hacerCargar=async()=>{ const c=Number(cargarCant)||0; if(c<=0){ setCargar(null); return; } try{ await db.cargarRepuesto(cargar.repuesto.id,c); setCargar(null); setCargarCant(""); loadReps(); showToast("Stock cargado","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+
+  // ---- nueva solicitud ----
+  const abrirSol=()=>{ const s0=(sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre||""; setNuevaSol({sede:s0,nota:"",lineas:[{key:uid(),repuesto_id:"",nombre:"",cantidad:1}]}); };
+  const setLinea=(k,patch)=>setNuevaSol(s=>({...s,lineas:s.lineas.map(l=>l.key===k?{...l,...patch}:l)}));
+  const addLinea=()=>setNuevaSol(s=>({...s,lineas:[...s.lineas,{key:uid(),repuesto_id:"",nombre:"",cantidad:1}]}));
+  const delLinea=(k)=>setNuevaSol(s=>({...s,lineas:s.lineas.filter(l=>l.key!==k)}));
+  const enviarSol=async()=>{
+    const items=nuevaSol.lineas
+      .map(l=>{ const rep=all.find(x=>x.id===l.repuesto_id); return {repuesto_id:l.repuesto_id||"", nombre:rep?rep.nombre:(l.nombre||"").trim(), cantidad:Number(l.cantidad)||1}; })
+      .filter(i=>i.nombre);
+    if(!items.length){ showToast("Agrega al menos un repuesto","err"); return; }
+    try{ await db.crearSolicitud(nuevaSol.sede, quien, nuevaSol.nota.trim(), items); setNuevaSol(null); loadSols(); showToast("Solicitud enviada a administración","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const resolver=async(s,estado)=>{ try{ await db.resolverSolicitud(s.id,estado,quien); loadSols(); showToast(estado==='aprobada'?"Solicitud aprobada":"Solicitud rechazada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+
+  const itemsTxt=s=>(s.solicitud_items||[]).map(i=>i.cantidad+"× "+i.nombre).join(", ")||"—";
+  const pillSol=e=> e==='aprobada'?<span className="pill pill-prod">Aprobada</span> : e==='rechazada'?<span className="pill pill-off">Rechazada</span> : <span className="pill pill-token">Pendiente</span>;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Repuestos</div>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+          <button className={"btn btn-sm "+(sub==='inventario'?'btn-amber':'btn-ghost')} onClick={()=>setSub('inventario')}>🔩 Inventario</button>
+          <button className={"btn btn-sm "+(sub==='solicitudes'?'btn-amber':'btn-ghost')} onClick={()=>setSub('solicitudes')}>📨 Solicitudes{solPend>0?(" ("+solPend+")"):""}</button>
+        </div>
+      </div>
+
+      {/* ===== INVENTARIO ===== */}
+      {sub==='inventario' && (<div>
+        <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Tipos de repuesto</div><div style={{fontSize:24,fontWeight:800}}>{all.length}</div></div>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Valor del inventario</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{money(valorTotal)}</div></div>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Stock bajo</div><div style={{fontSize:24,fontWeight:800,color:bajos.length?"var(--red)":"var(--green)"}}>{bajos.length}</div></div>
+        </div>
+        {esAdmin && <div className="toolbar"><button className="btn btn-amber btn-sm" style={{marginLeft:"auto"}} onClick={()=>setEditing({nombre:"",categoria:"",unidad:"unidad",costo:0,stock:0,stock_minimo:0})}>＋ Nuevo repuesto</button></div>}
+        {reps===null ? <div className="empty">Cargando…</div> : (
+          <div className="card" style={{padding:0,overflowX:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th>Repuesto</th><th>Categoría</th><th>Stock</th><th>Costo unit.</th><th>Valor</th>{esAdmin&&<th></th>}</tr></thead>
+              <tbody>
+                {all.length===0 && <tr><td colSpan={esAdmin?6:5}><div className="empty">No hay repuestos. {esAdmin?"Agrega el primero.":""}</div></td></tr>}
+                {all.map(r=>{ const bajo=Number(r.stock)<=Number(r.stock_minimo)&&Number(r.stock_minimo)>0; return (
+                  <tr key={r.id}>
+                    <td className="row-name">{r.nombre}</td>
+                    <td className="muted">{r.categoria||"—"}</td>
+                    <td style={{fontWeight:700,color:bajo?"var(--red)":"var(--t)"}}>{Number(r.stock)||0} {r.unidad||""}{bajo?" ⚠":""}</td>
+                    <td className="muted">{money(r.costo)}</td>
+                    <td style={{fontWeight:700}}>{money((Number(r.stock)||0)*(Number(r.costo)||0))}</td>
+                    {esAdmin&&<td style={{whiteSpace:"nowrap"}}><div className="actions">
+                      <button className="btn btn-ghost btn-sm" onClick={()=>{setCargar({repuesto:r});setCargarCant("");}} title="Cargar stock (compra/entrada)">＋ Cargar</button>
+                      <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...r})}>Editar</button>
+                      <button className="btn btn-danger btn-sm" onClick={()=>borrarRep(r)}>✕</button>
+                    </div></td>}
+                  </tr>
+                );})}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>)}
+
+      {/* ===== SOLICITUDES ===== */}
+      {sub==='solicitudes' && (<div>
+        <div className="toolbar">
+          <div className="muted" style={{marginRight:"auto"}}>{esAdmin?"Todas las solicitudes":"Tus solicitudes"}</div>
+          <button className="btn btn-amber btn-sm" onClick={abrirSol}>＋ Nueva solicitud</button>
+        </div>
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Fecha</th><th>Sede</th><th>Solicita</th><th>Repuestos</th><th>Estado</th>{esAdmin&&<th></th>}</tr></thead>
+            <tbody>
+              {sols.length===0 && <tr><td colSpan={esAdmin?6:5}><div className="empty">Sin solicitudes.</div></td></tr>}
+              {sols.map(s=>(
+                <tr key={s.id}>
+                  <td className="muted">{fLocalDia(s.created_at)}</td>
+                  <td>{s.sede||"—"}</td>
+                  <td className="muted">{s.solicitado_por||"—"}</td>
+                  <td>{itemsTxt(s)}{s.nota?<div className="muted" style={{fontSize:12}}>📝 {s.nota}</div>:null}</td>
+                  <td>{pillSol(s.estado)}</td>
+                  {esAdmin&&<td style={{whiteSpace:"nowrap"}}>{s.estado==='pendiente'
+                    ? <div className="actions"><button className="btn btn-amber btn-sm" onClick={()=>resolver(s,'aprobada')}>Aprobar</button><button className="btn btn-ghost btn-sm" onClick={()=>resolver(s,'rechazada')}>Rechazar</button></div>
+                    : <span className="muted">{s.resuelto_por||""}</span>}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>)}
+
+      {/* editor de repuesto */}
+      {editing && (
+        <div className="modal-bg" onClick={()=>setEditing(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{editing.id?"Editar repuesto":"Nuevo repuesto"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" autoFocus value={editing.nombre} onChange={e=>setEditing({...editing,nombre:e.target.value})} placeholder="Ej. Rodamiento 6203"/>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 160px"}}><label className="label">Categoría</label><input className="input" value={editing.categoria||""} onChange={e=>setEditing({...editing,categoria:e.target.value})} placeholder="Ej. Motor, Eléctrico…"/></div>
+              <div style={{flex:"1 1 100px"}}><label className="label">Unidad</label><input className="input" value={editing.unidad||""} onChange={e=>setEditing({...editing,unidad:e.target.value})} placeholder="unidad"/></div>
+            </div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 120px"}}><label className="label">Costo unitario</label><input className="input" type="number" value={editing.costo} onChange={e=>setEditing({...editing,costo:e.target.value})}/></div>
+              <div style={{flex:"1 1 90px"}}><label className="label">Stock</label><input className="input" type="number" value={editing.stock} onChange={e=>setEditing({...editing,stock:e.target.value})}/></div>
+              <div style={{flex:"1 1 90px"}}><label className="label">Stock mín.</label><input className="input" type="number" value={editing.stock_minimo} onChange={e=>setEditing({...editing,stock_minimo:e.target.value})}/></div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
+              <button className="btn btn-amber" onClick={guardarRep}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* cargar stock */}
+      {cargar && (
+        <div className="modal-bg" onClick={()=>setCargar(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:360}}>
+            <div className="modal-t">＋ Cargar stock — {cargar.repuesto.nombre}</div>
+            <div className="muted" style={{marginBottom:8}}>Stock actual: <b>{Number(cargar.repuesto.stock)||0}</b>. ¿Cuántas unidades entran?</div>
+            <input className="input" type="number" autoFocus value={cargarCant} onChange={e=>setCargarCant(e.target.value)} placeholder="Cantidad que entra"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setCargar(null)}>Cancelar</button>
+              <button className="btn btn-amber" onClick={hacerCargar}>Cargar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* nueva solicitud */}
+      {nuevaSol && (
+        <div className="modal-bg" onClick={()=>setNuevaSol(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">📨 Nueva solicitud de repuestos</div>
+            <label className="label">Sede</label>
+            <select className="select" value={nuevaSol.sede} onChange={e=>setNuevaSol({...nuevaSol,sede:e.target.value})}>
+              {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+            </select>
+            <label className="label">Repuestos que necesitas</label>
+            {nuevaSol.lineas.map(l=>(
+              <div key={l.key} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+                <select className="select" style={{margin:0,flex:1}} value={l.repuesto_id} onChange={e=>setLinea(l.key,{repuesto_id:e.target.value})}>
+                  <option value="">— Otro (escribir) —</option>
+                  {all.map(r=><option key={r.id} value={r.id}>{r.nombre}</option>)}
+                </select>
+                {!l.repuesto_id && <input className="input" style={{margin:0,flex:1}} value={l.nombre} onChange={e=>setLinea(l.key,{nombre:e.target.value})} placeholder="Nombre del repuesto"/>}
+                <input className="input" style={{margin:0,width:70}} type="number" value={l.cantidad} onChange={e=>setLinea(l.key,{cantidad:e.target.value})}/>
+                <button className="btn btn-ghost btn-sm" onClick={()=>delLinea(l.key)}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addLinea}>＋ Agregar repuesto</button>
+            <label className="label" style={{marginTop:10}}>Nota (opcional)</label>
+            <input className="input" value={nuevaSol.nota} onChange={e=>setNuevaSol({...nuevaSol,nota:e.target.value})} placeholder="Para qué equipo / urgencia…"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setNuevaSol(null)}>Cancelar</button>
+              <button className="btn btn-amber" onClick={enviarSol}>Enviar solicitud</button>
             </div>
           </div>
         </div>

@@ -623,6 +623,41 @@ const db = {
     if(DEMO_MODE){ DEMO.tareas=(DEMO.tareas||[]).filter(x=>x.grupo_id!==grupoId); return; }
     const {error}=await sb.from('tareas').delete().eq('grupo_id',grupoId); if(error) throw error;
   },
+  // ---- RECAUDO / TESORERÍA ----
+  async recLiqPendientes(sede){
+    if(DEMO_MODE) return [];
+    let q=sb.from('recaudo_liquidaciones').select('*').eq('estado','pendiente').order('created_at',{ascending:false}).limit(500);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async recMaquinas(sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('recaudo_maquinas').select('*').eq('sede',sede).order('nombre'); if(error) return []; return data||[];
+  },
+  async recSaldos(sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('recaudo_saldos_operador').select('*').eq('sede',sede); if(error) return []; return data||[];
+  },
+  async cerrarCiclo(p){
+    if(DEMO_MODE) return 'demo-ciclo';
+    const {data,error}=await sb.rpc('cerrar_ciclo',{p_ciclo:p.ciclo, p_liquidaciones:p.liquidaciones||[], p_maquinas:p.maquinas||[], p_gastos:p.gastos||[], p_reparto:p.reparto||{}});
+    if(error) throw error; return data;
+  },
+  async recCiclos(f={}){
+    if(DEMO_MODE) return [];
+    let q=sb.from('recaudo_ciclos').select('*').order('fecha',{ascending:false}).order('created_at',{ascending:false}).limit(300);
+    if(f.sede) q=q.eq('sede',f.sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async recCicloDetalle(id){
+    if(DEMO_MODE) return {liquidaciones:[],maquinas:[],gastos:[]};
+    const [liq,maq,gas]=await Promise.all([
+      sb.from('recaudo_liquidaciones').select('*').eq('ciclo_id',id),
+      sb.from('recaudo_ciclo_maquinas').select('*').eq('ciclo_id',id),
+      sb.from('recaudo_gastos').select('*').eq('ciclo_id',id),
+    ]);
+    return {liquidaciones:liq.data||[], maquinas:maq.data||[], gastos:gas.data||[]};
+  },
   // ---- EMPLEADOS ----
   async listEmpleados(){
     if(DEMO_MODE) return DEMO.empleados.map(e=>({...e,sedes:[...e.sedes]}));
@@ -910,8 +945,8 @@ function App(){
     try{
       const u=await db.loginAdmin(p);
       if(!u){ showToast("PIN incorrecto","err"); setPin(""); }
-      else if(u.rol!=='admin' && u.rol!=='supervisor'){ showToast("Sin acceso al back office","err"); setPin(""); }
-      else { setAuth(u); setTab(u.rol==='supervisor'?'mantenimiento':'informes'); setPin(""); }
+      else if(u.rol!=='admin' && u.rol!=='supervisor' && u.rol!=='tesorero'){ showToast("Sin acceso al back office","err"); setPin(""); }
+      else { setAuth(u); setTab(u.rol==='supervisor'?'mantenimiento':(u.rol==='tesorero'?'recaudo':'informes')); setPin(""); }
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -958,9 +993,11 @@ function App(){
         </div>
       )}
       {(() => {
-        const NAV = auth.rol==='supervisor'
-          ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+        const NAV = auth.rol==='tesorero'
+          ? [["recaudo","💰","Recaudo"]]
+          : auth.rol==='supervisor'
+          ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -992,6 +1029,7 @@ function App(){
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
+                {tab==="recaudo"    && <Recaudo showToast={showToast} quien={auth.nombre}/>}
                 {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
@@ -2709,6 +2747,420 @@ function Mantenimiento({showToast}){
               <button className="btn btn-ghost" disabled={busy} onClick={()=>setRep(null)}>Cancelar</button>
               <button className="btn btn-amber" disabled={busy} onClick={reparar}>{busy?"Encendiendo…":"✅ Encender máquina"}</button>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: RECAUDO / TESORERÍA — ciclo de cierre por sede (migrado de Sheets)
+// ============================================================
+const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina 5','Máquina 6','Aspiradora','Canillita'];
+function Recaudo({showToast, quien}){
+  const [paso,setPaso]=useState('inicio');   // inicio|liquidaciones|maquinas|conteo|gastos|reparto|resumen|historial
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [sede,setSede]=useState("");
+  const [tesorero,setTesorero]=useState("");
+  const [pend,setPend]=useState([]);          // liquidaciones pendientes para importar
+  const [liqs,setLiqs]=useState([]);          // liquidaciones del ciclo
+  const [maquinas,setMaquinas]=useState([]);
+  const [conteo,setConteo]=useState({tokens_fisicos:"",efectivo_total_monedas:""});
+  const [gastos,setGastos]=useState([]);
+  const [saldosPrev,setSaldosPrev]=useState({});  // operador -> saldo anterior
+  const [reparto,setReparto]=useState({modo:'operadores',baseRecogida:"",baseNueva:"",ajusteTokens:"",ajusteMotivo:""});
+  const [busy,setBusy]=useState(false);
+  const [impSel,setImpSel]=useState({});      // ids seleccionados para importar
+  const [manual,setManual]=useState(null);    // liquidación manual en edición
+  const [histo,setHisto]=useState(null);
+  const [detalle,setDetalle]=useState(null);
+
+  useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados()]).then(([s,e])=>{ setSedes(s); setEmps(e); }).catch(()=>{}); },[]);
+  // los supervisores hacen de tesoreros (también admin/tesorero por si existieran)
+  const tesoreros=emps.filter(e=>['supervisor','tesorero','admin'].includes(e.rol)&&e.activo!==false);
+  const sedeObj=sedes.find(s=>s.nombre===sede)||{};
+  const baseConfigurada=Number(sedeObj.base_efectivo)||0;
+  const cajerosDeSede=emps.filter(e=>e.activo!==false && (e.sedes||[]).includes(sede) && (e.rol==='cajero'));
+
+  const efEsperado=l=>(Number(l.valor)||0)-(Number(l.qr)||0)-(Number(l.devoluciones)||0);
+  const descuadreDe=l=>(l.efectivo_contado===""||l.efectivo_contado==null)?0:((Number(l.efectivo_contado)||0)-efEsperado(l));
+
+  const iniciar=async()=>{
+    if(!sede||!tesorero){ showToast("Elige sede y tesorero","err"); return; }
+    setBusy(true);
+    try{
+      const [p,m,s]=await Promise.all([db.recLiqPendientes(sede), db.recMaquinas(sede), db.recSaldos(sede)]);
+      setPend(p); setImpSel({});
+      const prev={}; (s||[]).forEach(x=>prev[x.operador]=Number(x.saldo)||0); setSaldosPrev(prev);
+      const byName={}; (m||[]).forEach(x=>byName[x.nombre]=x);
+      const nombres=(m&&m.length)?m.map(x=>x.nombre):MAQ_DEFAULT;
+      setMaquinas(nombres.map(nm=>({nombre:nm,
+        gen_anterior:Number((byName[nm]||{}).gen_actual)||0,
+        gen_token_anterior:Number((byName[nm]||{}).gen_token_actual)||0,
+        gen_actual:"", gen_token_actual:"", token_dia:"", mone_dia:""})));
+      setLiqs([]); setGastos([]); setConteo({tokens_fisicos:"",efectivo_total_monedas:""});
+      setReparto({modo:'operadores',baseRecogida:"",baseNueva:String(baseConfigurada),ajusteTokens:"",ajusteMotivo:""});
+      setPaso('liquidaciones');
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // importar pendientes seleccionadas
+  const importar=()=>{
+    const sel=pend.filter(p=>impSel[p.id]);
+    const nuevas=sel.map(p=>({ id:p.id, operador:p.operador, num_recibo:p.num_recibo,
+      tokens_base:p.tokens_base, tokens_vendidos:p.tokens_vendidos, dev_tokens:p.dev_tokens,
+      tokens_membresia:p.tokens_membresia, tokens_restantes:p.tokens_restantes, valor:p.valor, qr:p.qr,
+      devoluciones:p.devoluciones, efectivo:p.efectivo, efectivo_contado:"", observaciones:p.observaciones||"" }));
+    setLiqs(l=>[...l, ...nuevas]);
+    setPend(pe=>pe.filter(p=>!impSel[p.id])); setImpSel({});
+    showToast(nuevas.length+" importada(s)","ok");
+  };
+  const nuevaManual=()=>setManual({operador:"",num_recibo:"",tokens_base:0,tokens_vendidos:0,dev_tokens:0,tokens_membresia:0,valor:0,qr:0,devoluciones:0,efectivo_contado:"",observaciones:""});
+  const guardarManual=()=>{
+    const m=manual; if(!m.operador){ showToast("Elige operador","err"); return; }
+    const tr=(Number(m.tokens_base)||0)-(Number(m.tokens_vendidos)||0)-(Number(m.dev_tokens)||0)-(Number(m.tokens_membresia)||0);
+    setLiqs(l=>[...l,{...m, tokens_restantes:tr, efectivo:efEsperado(m)}]); setManual(null);
+  };
+  const setLiqContado=(i,v)=>setLiqs(l=>l.map((x,j)=>j===i?{...x,efectivo_contado:v}:x));
+  const quitarLiq=(i)=>setLiqs(l=>l.filter((_,j)=>j!==i));
+
+  const setMaq=(i,patch)=>setMaquinas(m=>m.map((x,j)=>j===i?{...x,...patch}:x));
+  const addGasto=()=>setGastos(g=>[...g,{concepto:"",monto:0}]);
+  const setGasto=(i,patch)=>setGastos(g=>g.map((x,j)=>j===i?{...x,...patch}:x));
+  const delGasto=(i)=>setGastos(g=>g.filter((_,j)=>j!==i));
+
+  // ---- cálculos ----
+  const sumTokenDia=maquinas.reduce((a,m)=>a+(Number(m.token_dia)||0),0);
+  const sumMoneDia=maquinas.reduce((a,m)=>a+(Number(m.mone_dia)||0),0);
+  const tokensFis=Number(conteo.tokens_fisicos)||0;
+  const monedasFis=Number(conteo.efectivo_total_monedas)||0;
+  const difTokens=sumTokenDia-tokensFis;
+  const difMonedas=sumMoneDia-monedasFis;
+  const totalGastos=gastos.reduce((a,g)=>a+(Number(g.monto)||0),0);
+  const baseEsperada=baseConfigurada-totalGastos;
+  const difBase=(Number(reparto.baseRecogida)||0)-baseEsperada;
+  const efLiquidaciones=liqs.reduce((a,l)=>a+(Number(l.efectivo_contado)||0),0);
+  const totalRecaudo=efLiquidaciones+monedasFis;
+  const aConsignar=totalRecaudo-totalGastos;
+  const totalDescuadre=liqs.reduce((a,l)=>a+descuadreDe(l),0);
+
+  // control de tokens por operador (alineado al cálculo exacto del recaudo viejo)
+  const normOp=s=>s?(s.charAt(0).toUpperCase()+s.slice(1).toLowerCase()):s;
+  const opsSet=[...new Set(liqs.map(l=>l.operador).filter(Boolean))];
+  const controlTokens=opsSet.map(op=>{
+    const sus=liqs.filter(l=>l.operador===op);
+    const vendidos=sus.reduce((a,l)=>a+(Number(l.tokens_vendidos)||0),0);
+    const devTokens=sus.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
+    const membresia=sus.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
+    const saldoAnterior=Number(saldosPrev[normOp(op)] ?? saldosPrev[op])||0;
+    const saldoEsperado=saldoAnterior-vendidos-devTokens-membresia;
+    return {nombre:op, historial:{saldo:saldoAnterior}, saldoAnterior, vendidos,
+            vendidosEsteC:vendidos, devTokens, devTokensEsteC:devTokens, membresia, membresiaEsteC:membresia, saldoEsperado};
+  });
+  const totSaldoAnt=controlTokens.reduce((a,c)=>a+c.saldoAnterior,0);
+  const totVendidos=controlTokens.reduce((a,c)=>a+c.vendidos,0);
+  const totDevTokens=controlTokens.reduce((a,c)=>a+c.devTokens,0);
+  const totSaldoEsp=controlTokens.reduce((a,c)=>a+c.saldoEsperado,0);
+  const ajusteNum=Number(reparto.ajusteTokens)||0;
+  const tokensDisponibles=tokensFis+totSaldoEsp+ajusteNum;            // = tokensTotalBase del recaudo viejo
+  const tokensPerdidos=Math.max(0, totSaldoAnt - totVendidos - totDevTokens - tokensFis - totSaldoEsp);
+
+  const cerrar=async()=>{
+    setBusy(true);
+    try{
+      const repObj={ modoReparto:reparto.modo, ajusteTokens:ajusteNum, ajusteMotivo:reparto.ajusteMotivo||"",
+        baseRecogida:Number(reparto.baseRecogida)||0, baseNueva:Number(reparto.baseNueva)||0,
+        baseConfigurada, baseEsperada, difBase, tokensTotalBase:tokensDisponibles, totalGastosDeSede:totalGastos,
+        controlTokens, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
+        totalDevTokensCiclo:totDevTokens, totalSaldoEsperado:totSaldoEsp, tokensPerdidos };
+      const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
+        total_recaudo:totalRecaudo, a_consignar:aConsignar, total_descuadre:totalDescuadre,
+        total_gastos:totalGastos, tokens_perdidos:tokensPerdidos, tokens_fisicos:tokensFis,
+        efectivo_total_monedas:monedasFis, base_recogida:Number(reparto.baseRecogida)||0,
+        base_nueva:Number(reparto.baseNueva)||0, base_configurada:baseConfigurada,
+        resumen:{ sumTokenDia, sumMoneDia, difTokens, difMonedas, efLiquidaciones } };
+      const liquidaciones=liqs.map(l=>({ id:l.id||"", sede, operador:l.operador, num_recibo:l.num_recibo,
+        tokens_base:l.tokens_base, tokens_vendidos:l.tokens_vendidos, dev_tokens:l.dev_tokens,
+        tokens_membresia:l.tokens_membresia, tokens_restantes:l.tokens_restantes, valor:l.valor, qr:l.qr,
+        devoluciones:l.devoluciones, efectivo:efEsperado(l), efectivo_contado:l.efectivo_contado, descuadre:descuadreDe(l),
+        observaciones:l.observaciones }));
+      const maqs=maquinas.map(m=>({ nombre:m.nombre, gen_anterior:m.gen_anterior, gen_actual:Number(m.gen_actual)||0,
+        gen_token_anterior:m.gen_token_anterior, gen_token_actual:Number(m.gen_token_actual)||0,
+        producido:(Number(m.gen_actual)||0)-m.gen_anterior, producido_tokens:(Number(m.gen_token_actual)||0)-m.gen_token_anterior,
+        token_dia:Number(m.token_dia)||0, mone_dia:Number(m.mone_dia)||0 }));
+      await db.cerrarCiclo({ ciclo, liquidaciones, maquinas:maqs, gastos:gastos.filter(g=>g.concepto||g.monto), reparto:repObj });
+      showToast("Ciclo cerrado y guardado ✓","ok");
+      setPaso('inicio'); setSede(""); setTesorero("");
+    }catch(e){ showToast("No se pudo cerrar: "+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  const verHistorial=async()=>{ setPaso('historial'); setHisto(null); setHisto(await db.recCiclos({})); };
+  const verDetalle=async(c)=>{ const d=await db.recCicloDetalle(c.id); setDetalle({ciclo:c,...d}); };
+
+  const PASOS=[['liquidaciones','Liquidaciones'],['maquinas','Máquinas'],['conteo','Conteo físico'],['gastos','Gastos'],['reparto','Reparto'],['resumen','Cierre']];
+  const idxPaso=PASOS.findIndex(p=>p[0]===paso);
+  const irA=(d)=>{ const n=idxPaso+d; if(n>=0&&n<PASOS.length) setPaso(PASOS[n][0]); };
+  const num=(v,set)=> <input className="input" style={{margin:0}} type="number" value={v} onChange={e=>set(e.target.value)}/>;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
+        {paso!=='historial' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
+        {paso==='historial' && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
+      </div>
+
+      {/* INICIO */}
+      {paso==='inicio' && (
+        <div className="card" style={{maxWidth:460}}>
+          <div className="card-t">Iniciar ciclo de recaudo</div>
+          <label className="label">Sede</label>
+          <select className="select" value={sede} onChange={e=>setSede(e.target.value)}>
+            <option value="">— Elige sede —</option>
+            {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+          </select>
+          <label className="label">Tesorero</label>
+          <select className="select" value={tesorero} onChange={e=>setTesorero(e.target.value)}>
+            <option value="">— Elige tesorero —</option>
+            {tesoreros.map(t=><option key={t.id} value={t.nombre}>{t.nombre}</option>)}
+          </select>
+          {sede && <div className="muted" style={{marginBottom:10}}>Base configurada de {sede}: <b>{fmt(baseConfigurada)}</b></div>}
+          <button className="btn btn-amber" style={{width:"100%"}} disabled={busy} onClick={iniciar}>{busy?"Cargando…":"Iniciar ciclo →"}</button>
+        </div>
+      )}
+
+      {/* STEPPER */}
+      {idxPaso>=0 && (<div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+          {PASOS.map((p,i)=>(<div key={p[0]} onClick={()=>setPaso(p[0])} style={{cursor:"pointer",padding:"6px 12px",borderRadius:20,fontSize:12,fontWeight:700,background:i===idxPaso?"var(--amber)":"var(--sf2)",color:i===idxPaso?"#fff":(i<idxPaso?"var(--green)":"var(--td)")}}>{i<idxPaso?"✓ ":""}{p[1]}</div>))}
+        </div>
+        <div className="muted" style={{marginBottom:10}}>{sede} · Tesorero {tesorero}</div>
+
+        {/* LIQUIDACIONES */}
+        {paso==='liquidaciones' && (<div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>Importa las pendientes del POS/operadores o agrega manual. Cuenta el efectivo de cada una.</div>
+            <button className="btn btn-ghost btn-sm" onClick={nuevaManual}>＋ Manual</button>
+          </div>
+          {pend.length>0 && (
+            <div className="card">
+              <div className="card-t">Pendientes por importar ({pend.length})</div>
+              {pend.map(p=>(
+                <label key={p.id} className="check" style={{display:"flex",gap:8,padding:"4px 0"}}>
+                  <input type="checkbox" checked={!!impSel[p.id]} onChange={e=>setImpSel(s=>({...s,[p.id]:e.target.checked}))}/>
+                  <span>{p.operador} · {p.num_recibo||"s/recibo"} · valor {fmt(p.valor)} · {p.fecha||""}</span>
+                </label>
+              ))}
+              <button className="btn btn-amber btn-sm" style={{marginTop:8}} onClick={importar}>Importar seleccionadas</button>
+            </div>
+          )}
+          <div className="card" style={{padding:0,overflowX:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th className="num">QR</th><th className="num">Efectivo esperado</th><th className="num">Efectivo contado</th><th className="num">Descuadre</th><th></th></tr></thead>
+              <tbody>
+                {liqs.length===0 && <tr><td colSpan="8"><div className="empty">Sin liquidaciones aún.</div></td></tr>}
+                {liqs.map((l,i)=>{ const d=descuadreDe(l); return (
+                  <tr key={i}>
+                    <td className="row-name">{l.operador}</td>
+                    <td className="muted">{l.num_recibo||"—"}</td>
+                    <td className="num">{fmt(l.valor)}</td>
+                    <td className="num">{fmt(l.qr)}</td>
+                    <td className="num">{fmt(efEsperado(l))}</td>
+                    <td className="num" style={{width:130}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={l.efectivo_contado} onChange={e=>setLiqContado(i,e.target.value)} placeholder="Contar"/></td>
+                    <td className="num" style={{fontWeight:700,color:d===0?"var(--muted)":(d>0?"var(--green)":"var(--red)")}}>{l.efectivo_contado===""?"—":fmt(d)}</td>
+                    <td><button className="btn btn-ghost btn-sm" onClick={()=>quitarLiq(i)}>✕</button></td>
+                  </tr>
+                );})}
+              </tbody>
+            </table>
+          </div>
+        </div>)}
+
+        {/* MAQUINAS */}
+        {paso==='maquinas' && (
+          <div className="card" style={{padding:0,overflowX:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th>Máquina</th><th className="num">GEN ant.</th><th className="num">GEN actual</th><th className="num">Producido</th><th className="num">Tok ant.</th><th className="num">Tok actual</th><th className="num">Token día</th><th className="num">Mone día</th></tr></thead>
+              <tbody>
+                {maquinas.map((m,i)=>(
+                  <tr key={i}>
+                    <td className="row-name">{m.nombre}</td>
+                    <td className="num muted">{fmt(m.gen_anterior)}</td>
+                    <td className="num" style={{width:120}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={m.gen_actual} onChange={e=>setMaq(i,{gen_actual:e.target.value})}/></td>
+                    <td className="num" style={{fontWeight:700}}>{fmt((Number(m.gen_actual)||0)-m.gen_anterior)}</td>
+                    <td className="num muted">{m.gen_token_anterior}</td>
+                    <td className="num" style={{width:100}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={m.gen_token_actual} onChange={e=>setMaq(i,{gen_token_actual:e.target.value})}/></td>
+                    <td className="num" style={{width:90}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={m.token_dia} onChange={e=>setMaq(i,{token_dia:e.target.value})}/></td>
+                    <td className="num" style={{width:110}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={m.mone_dia} onChange={e=>setMaq(i,{mone_dia:e.target.value})}/></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* CONTEO FISICO */}
+        {paso==='conteo' && (
+          <div className="card" style={{maxWidth:520}}>
+            <div className="card-t">Conteo físico (después de vaciar y mezclar todas las máquinas)</div>
+            <label className="label">Tokens físicos contados</label>
+            {num(conteo.tokens_fisicos,(v)=>setConteo(c=>({...c,tokens_fisicos:v})))}
+            <div className="muted" style={{margin:"4px 0 10px"}}>Σ Token día de máquinas: <b>{sumTokenDia}</b> · Diferencia: <b style={{color:difTokens?"var(--red)":"var(--green)"}}>{difTokens}</b></div>
+            <label className="label">Efectivo en monedas contado ($)</label>
+            {num(conteo.efectivo_total_monedas,(v)=>setConteo(c=>({...c,efectivo_total_monedas:v})))}
+            <div className="muted" style={{marginTop:4}}>Σ Mone día de máquinas: <b>{fmt(sumMoneDia)}</b> · Diferencia: <b style={{color:difMonedas?"var(--red)":"var(--green)"}}>{fmt(difMonedas)}</b></div>
+          </div>
+        )}
+
+        {/* GASTOS */}
+        {paso==='gastos' && (
+          <div className="card">
+            <div className="card-t">Gastos de caja menor</div>
+            {gastos.map((g,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:8}}>
+                <input className="input" style={{margin:0,flex:1}} value={g.concepto} onChange={e=>setGasto(i,{concepto:e.target.value})} placeholder="Concepto"/>
+                <input className="input" style={{margin:0,width:130}} type="number" value={g.monto} onChange={e=>setGasto(i,{monto:e.target.value})} placeholder="Monto"/>
+                <button className="btn btn-ghost btn-sm" onClick={()=>delGasto(i)}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addGasto}>＋ Agregar gasto</button>
+            <div style={{marginTop:10,fontWeight:700}}>Total gastos: {fmt(totalGastos)}</div>
+          </div>
+        )}
+
+        {/* REPARTO */}
+        {paso==='reparto' && (<div>
+          <div className="card" style={{maxWidth:560}}>
+            <div className="card-t">Base de efectivo</div>
+            <div className="muted">Base configurada: <b>{fmt(baseConfigurada)}</b> · Esperada (− gastos): <b>{fmt(baseEsperada)}</b></div>
+            <label className="label">Base recogida (efectivo de la base anterior)</label>
+            {num(reparto.baseRecogida,(v)=>setReparto(r=>({...r,baseRecogida:v})))}
+            <div className="muted" style={{margin:"-4px 0 10px"}}>Diferencia base: <b style={{color:difBase?"var(--red)":"var(--green)"}}>{fmt(difBase)}</b></div>
+            <label className="label">Base nueva que se deja</label>
+            {num(reparto.baseNueva,(v)=>setReparto(r=>({...r,baseNueva:v})))}
+          </div>
+          <div className="card">
+            <div className="card-t">Control de tokens por operador</div>
+            <div style={{display:"flex",gap:8,marginBottom:10}}>
+              <button className={"btn btn-sm "+(reparto.modo==='operadores'?'btn-amber':'btn-ghost')} onClick={()=>setReparto(r=>({...r,modo:'operadores'}))}>Por operador</button>
+              <button className={"btn btn-sm "+(reparto.modo==='sede'?'btn-amber':'btn-ghost')} onClick={()=>setReparto(r=>({...r,modo:'sede'}))}>Por sede</button>
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev.</th><th className="num">Membresía</th><th className="num">Saldo esperado</th></tr></thead>
+                <tbody>
+                  {controlTokens.length===0 && <tr><td colSpan="6"><div className="empty">Sin operadores.</div></td></tr>}
+                  {controlTokens.map(c=>(
+                    <tr key={c.nombre}>
+                      <td className="row-name">{c.nombre}</td>
+                      <td className="num muted">{c.saldoAnterior}</td>
+                      <td className="num">{c.vendidos}</td>
+                      <td className="num">{c.devTokens}</td>
+                      <td className="num">{c.membresia}</td>
+                      <td className="num" style={{fontWeight:700,color:c.saldoEsperado<0?"var(--red)":"var(--t)"}}>{c.saldoEsperado}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{marginTop:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div style={{flex:"1 1 200px"}}>
+                <label className="label">Ajuste de tokens (+ ingresan / − salen a otra sede)</label>
+                <input className="input" style={{margin:0}} type="number" value={reparto.ajusteTokens} onChange={e=>setReparto(r=>({...r,ajusteTokens:e.target.value}))}/>
+              </div>
+              <div style={{flex:"2 1 240px"}}>
+                <label className="label">Motivo del ajuste (opcional)</label>
+                <input className="input" style={{margin:0}} value={reparto.ajusteMotivo} onChange={e=>setReparto(r=>({...r,ajusteMotivo:e.target.value}))}/>
+              </div>
+            </div>
+            <div className="card" style={{marginTop:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+              <span>Tokens disponibles (base)</span><span style={{color:"var(--amber)"}}>{tokensDisponibles}</span>
+            </div>
+            <div className="muted" style={{fontSize:12,marginTop:-4}}>= {tokensFis} máquinas {totSaldoEsp>=0?"+ ":"− "}{Math.abs(totSaldoEsp)} saldos {ajusteNum>=0?"+ ":"− "}{Math.abs(ajusteNum)} ajuste</div>
+            {tokensPerdidos>0 && <div style={{marginTop:8,color:"var(--red)",fontWeight:700}}>⚠ Tokens perdidos (no justificados): {tokensPerdidos} · ≈ {fmt(tokensPerdidos*5000)}</div>}
+          </div>
+        </div>)}
+
+        {/* RESUMEN / CIERRE */}
+        {paso==='resumen' && (
+          <div className="card" style={{maxWidth:560}}>
+            <div className="card-t">Resumen del ciclo</div>
+            {[['Liquidaciones',liqs.length],['Efectivo de liquidaciones',fmt(efLiquidaciones)],['Monedas de máquinas',fmt(monedasFis)],['Total recaudo',fmt(totalRecaudo)],['Gastos',fmt(totalGastos)],['A consignar',fmt(aConsignar)],['Descuadre total',fmt(totalDescuadre)],['Tokens perdidos',tokensPerdidos]].map(([l,v])=>(
+              <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid var(--bd)"}}><span className="muted">{l}</span><b>{v}</b></div>
+            ))}
+            <button className="btn btn-amber" style={{width:"100%",marginTop:14}} disabled={busy} onClick={cerrar}>{busy?"Cerrando…":"✅ Cerrar ciclo y guardar"}</button>
+          </div>
+        )}
+
+        <div className="toolbar" style={{marginTop:14}}>
+          <button className="btn btn-ghost btn-sm" disabled={idxPaso<=0} onClick={()=>irA(-1)}>← Atrás</button>
+          {idxPaso<PASOS.length-1 && <button className="btn btn-amber btn-sm" style={{marginLeft:"auto"}} onClick={()=>irA(1)}>Siguiente →</button>}
+        </div>
+      </div>)}
+
+      {/* HISTORIAL */}
+      {paso==='historial' && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Fecha</th><th>Sede</th><th>Tesorero</th><th className="num">Total recaudo</th><th className="num">A consignar</th><th className="num">Descuadre</th><th></th></tr></thead>
+            <tbody>
+              {histo===null && <tr><td colSpan="7"><div className="empty">Cargando…</div></td></tr>}
+              {histo&&histo.length===0 && <tr><td colSpan="7"><div className="empty">Sin ciclos cerrados todavía.</div></td></tr>}
+              {(histo||[]).map(c=>(
+                <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>verDetalle(c)}>
+                  <td className="muted">{c.fecha}</td><td className="row-name">{c.sede}</td><td className="muted">{c.tesorero}</td>
+                  <td className="num">{fmt(c.total_recaudo)}</td><td className="num">{fmt(c.a_consignar)}</td>
+                  <td className="num" style={{color:Number(c.total_descuadre)?"var(--red)":"var(--green)"}}>{fmt(c.total_descuadre)}</td>
+                  <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();verDetalle(c);}}>Ver</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* manual liquidación */}
+      {manual && (
+        <div className="modal-bg" onClick={()=>setManual(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Liquidación manual</div>
+            <label className="label">Operador</label>
+            <select className="select" value={manual.operador} onChange={e=>setManual({...manual,operador:e.target.value})}>
+              <option value="">— Elige —</option>
+              {cajerosDeSede.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+            </select>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 100px"}}><label className="label">Recibo</label><input className="input" value={manual.num_recibo} onChange={e=>setManual({...manual,num_recibo:e.target.value})}/></div>
+              <div style={{flex:"1 1 100px"}}><label className="label">Valor</label><input className="input" type="number" value={manual.valor} onChange={e=>setManual({...manual,valor:e.target.value})}/></div>
+              <div style={{flex:"1 1 100px"}}><label className="label">QR</label><input className="input" type="number" value={manual.qr} onChange={e=>setManual({...manual,qr:e.target.value})}/></div>
+              <div style={{flex:"1 1 100px"}}><label className="label">Devoluciones</label><input className="input" type="number" value={manual.devoluciones} onChange={e=>setManual({...manual,devoluciones:e.target.value})}/></div>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 90px"}}><label className="label">Tok base</label><input className="input" type="number" value={manual.tokens_base} onChange={e=>setManual({...manual,tokens_base:e.target.value})}/></div>
+              <div style={{flex:"1 1 90px"}}><label className="label">Tok vend.</label><input className="input" type="number" value={manual.tokens_vendidos} onChange={e=>setManual({...manual,tokens_vendidos:e.target.value})}/></div>
+              <div style={{flex:"1 1 90px"}}><label className="label">Dev tok</label><input className="input" type="number" value={manual.dev_tokens} onChange={e=>setManual({...manual,dev_tokens:e.target.value})}/></div>
+              <div style={{flex:"1 1 90px"}}><label className="label">Tok memb.</label><input className="input" type="number" value={manual.tokens_membresia} onChange={e=>setManual({...manual,tokens_membresia:e.target.value})}/></div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setManual(null)}>Cancelar</button>
+              <button className="btn btn-amber" onClick={guardarManual}>Agregar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* detalle de ciclo */}
+      {detalle && (
+        <div className="modal-bg" onClick={()=>setDetalle(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:680}}>
+            <div className="modal-t">Ciclo {detalle.ciclo.sede} · {detalle.ciclo.fecha}</div>
+            <div className="muted" style={{marginBottom:8}}>Tesorero {detalle.ciclo.tesorero} · A consignar {fmt(detalle.ciclo.a_consignar)} · Descuadre {fmt(detalle.ciclo.total_descuadre)}</div>
+            <div className="card-t">Liquidaciones ({detalle.liquidaciones.length})</div>
+            <div style={{overflowX:"auto",maxHeight:"40vh"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Valor</th><th className="num">Contado</th><th className="num">Descuadre</th></tr></thead>
+              <tbody>{detalle.liquidaciones.map((l,i)=>(<tr key={i}><td className="row-name">{l.operador}</td><td className="num">{fmt(l.valor)}</td><td className="num">{fmt(l.efectivo_contado)}</td><td className="num" style={{color:Number(l.descuadre)?"var(--red)":"var(--green)"}}>{fmt(l.descuadre)}</td></tr>))}</tbody></table></div>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDetalle(null)}>Cerrar</button></div>
           </div>
         </div>
       )}

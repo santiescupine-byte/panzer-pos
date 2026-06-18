@@ -280,12 +280,29 @@ const db = {
     }
     return false;
   },
+  // Guarda la liquidación también en Supabase (recaudo_liquidaciones), en PARALELO a Sheets.
+  // Best-effort durante la transición: si falla, Sheets sigue siendo la red de seguridad.
+  async postLiquidacionSupabase(liq){
+    if(DEMO_MODE || !sb) return;
+    try{
+      await sb.from('recaudo_liquidaciones').insert({
+        sede:liq.sede, operador:liq.operador, num_recibo:liq.numRecibo,
+        tokens_base:Number(liq.tokensBase)||0, tokens_vendidos:Number(liq.tokensVendidos)||0,
+        dev_tokens:Number(liq.devTokens)||0, tokens_membresia:Number(liq.tokensMembresia)||0,
+        tokens_restantes:Number(liq.tokensRestantes)||0, valor:Number(liq.valor)||0,
+        qr:Number(liq.qr)||0, devoluciones:Number(liq.devoluciones)||0, efectivo:Number(liq.efectivo)||0,
+        observaciones:liq.observaciones||null, estado:'pendiente', origen:'pos',
+        fecha:liq.fecha||null, hora:liq.hora||null,
+      });
+    }catch(e){ /* no bloquea: Sheets es el respaldo */ }
+  },
   async enviarLiquidacion(payload){
     const liquidacion = { ...payload,
       fecha: new Date().toLocaleDateString('es-CO'),
       hora: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
       estado: 'pendiente',
     };
+    db.postLiquidacionSupabase(liquidacion);   // paralelo (no se espera ni bloquea)
     const ok = await db.postLiquidacion(liquidacion);
     if(ok) return { success:true };
     liqEncolar(liquidacion);          // Google falló → se guarda local y se reenviará

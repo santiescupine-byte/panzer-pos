@@ -3120,14 +3120,19 @@ function Recaudo({showToast, quien}){
             <tbody>
               {histo===null && <tr><td colSpan="7"><div className="empty">Cargando…</div></td></tr>}
               {histo&&histo.length===0 && <tr><td colSpan="7"><div className="empty">Sin ciclos cerrados todavía.</div></td></tr>}
-              {(histo||[]).map(c=>(
+              {(histo||[]).map(c=>{
+                const rp=c.reparto||{}; const hasAlert=((rp.controlTokens||[]).some(o=>o.saldoEsperado!=null&&o.saldoEsperado<0)) || Number(c.total_descuadre)!==0 || Number(c.tokens_perdidos)>0 || (c.resumen&&Number(c.resumen.faltanteMaqTokens)!==0);
+                return (
                 <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>verDetalle(c)}>
-                  <td className="muted">{c.fecha}</td><td className="row-name">{c.sede}</td><td className="muted">{c.tesorero}</td>
+                  <td className="muted">{c.fecha}</td>
+                  <td className="row-name">{c.sede} {hasAlert ? <span className="pill pill-off" style={{marginLeft:4}}>⚠ revisar</span> : <span style={{color:"var(--green)"}}>✓</span>}</td>
+                  <td className="muted">{c.tesorero}</td>
                   <td className="num">{fmt(c.total_recaudo)}</td><td className="num">{fmt(c.a_consignar)}</td>
                   <td className="num" style={{color:Number(c.total_descuadre)?"var(--red)":"var(--green)"}}>{fmt(c.total_descuadre)}</td>
                   <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();verDetalle(c);}}>Ver</button></td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -3164,18 +3169,73 @@ function Recaudo({showToast, quien}){
       )}
 
       {/* detalle de ciclo */}
-      {detalle && (
+      {detalle && (()=>{
+        const c=detalle.ciclo; const rep=c.reparto||{}; const ct=rep.controlTokens||[];
+        const sumTD=detalle.maquinas.reduce((a,m)=>a+(Number(m.token_dia)||0),0);
+        const sumMD=detalle.maquinas.reduce((a,m)=>a+(Number(m.mone_dia)||0),0);
+        // ---- ALERTAS del ciclo (réplica del admin del recaudo) ----
+        const totVend=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.tokens_vendidos)||0),0);
+        const totDev=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
+        const tokEgr=totVend+totDev; const difEgr=sumTD-tokEgr; const difEgrAbs=Math.abs(difEgr);
+        const difTokFis=sumTD-(Number(c.tokens_fisicos)||0);
+        const difMon=sumMD-(Number(c.efectivo_total_monedas)||0);
+        const descEf=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.descuadre)||0),0);
+        const opsNeg=ct.filter(o=>o.saldoEsperado!=null && o.saldoEsperado<0);
+        const ajuste=Number(rep.ajusteTokens)||0;
+        const alertas=[];
+        if(difEgrAbs>30) alertas.push(['danger','🚨 Descuadre alto de tokens: egresaron '+tokEgr+' (vendidos+dev) vs '+sumTD+' que entraron a máquinas → diferencia '+(difEgr>0?'+':'')+difEgr]);
+        else if(difEgrAbs>10) alertas.push(['warning','⚠️ Revisar tokens: egresados '+tokEgr+' vs máquinas '+sumTD+' → diferencia '+(difEgr>0?'+':'')+difEgr]);
+        if(difTokFis!==0) alertas.push(['danger','🚨 '+Math.abs(difTokFis)+' tokens de diferencia: contadores '+sumTD+' vs físico contado '+(Number(c.tokens_fisicos)||0)+' ('+(difTokFis>0?'faltan físicos':'sobran físicos')+')']);
+        if(difMon!==0) alertas.push(['warning','⚠️ '+fmt(Math.abs(difMon))+' de diferencia en monedas: contadores '+fmt(sumMD)+' vs físico '+fmt(c.efectivo_total_monedas)]);
+        if(descEf!==0) alertas.push(['warning','⚠️ Descuadre de efectivo en liquidaciones: '+fmt(descEf)]);
+        if(opsNeg.length) alertas.push(['danger','🚨 '+opsNeg.length+' operador(es) con saldo negativo (vendieron más de lo que tenían): '+opsNeg.map(o=>o.nombre+' ('+o.saldoEsperado+')').join(', ')]);
+        if(ajuste!==0) alertas.push(['warning',(ajuste<0?'📤 Retiro':'📥 Ingreso')+' de tokens: '+(ajuste>0?'+':'')+ajuste+(rep.ajusteMotivo?(' — '+rep.ajusteMotivo):'')]);
+        return (
         <div className="modal-bg" onClick={()=>setDetalle(null)}>
-          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:680}}>
-            <div className="modal-t">Ciclo {detalle.ciclo.sede} · {detalle.ciclo.fecha}</div>
-            <div className="muted" style={{marginBottom:8}}>Tesorero {detalle.ciclo.tesorero} · A consignar {fmt(detalle.ciclo.a_consignar)} · Descuadre {fmt(detalle.ciclo.total_descuadre)}</div>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:800,maxHeight:"88vh",overflowY:"auto"}}>
+            <div className="modal-t">Ciclo {c.sede} · {c.fecha}</div>
+            <div className="muted" style={{marginBottom:10}}>Tesorero {c.tesorero||"—"} · Reparto: {rep.modoReparto||"—"}{(c.resumen&&c.resumen.importado)?" · (importado de Sheets)":""}</div>
+
+            <div style={{marginBottom:14}}>
+              <div className="card-t">🚨 Alertas / Revisar</div>
+              {alertas.length===0
+                ? <div style={{padding:"11px 14px",borderRadius:10,background:"var(--green-d)",color:"var(--green)",fontWeight:800,border:"1px solid rgba(16,185,129,.3)"}}>✓ Sin alertas — el ciclo cuadra</div>
+                : alertas.map(([niv,txt],i)=>{ const col=niv==='danger'?"var(--red)":"var(--amber)"; const bg=niv==='danger'?"var(--red-d)":"var(--amber-d)"; return (
+                    <div key={i} style={{padding:"11px 14px",borderRadius:10,marginBottom:6,background:bg,color:col,fontWeight:700,border:"1px solid "+col,fontSize:13}}>{txt}</div>
+                  );})}
+            </div>
+
+            <div className="cards" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+              {[['Total recaudo',fmt(c.total_recaudo)],['A consignar',fmt(c.a_consignar)],['Gastos',fmt(c.total_gastos)],['Descuadre',fmt(c.total_descuadre)],['Tokens físicos',c.tokens_fisicos],['Base tokens',(rep.tokensTotalBase!=null?rep.tokensTotalBase:'—')]].map(([l,v])=>(
+                <div key={l} className="card" style={{flex:"1 1 110px",padding:10}}><div className="muted" style={{fontSize:11}}>{l}</div><div style={{fontSize:16,fontWeight:800}}>{v}</div></div>
+              ))}
+            </div>
+
             <div className="card-t">Liquidaciones ({detalle.liquidaciones.length})</div>
-            <div style={{overflowX:"auto",maxHeight:"40vh"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Valor</th><th className="num">Contado</th><th className="num">Descuadre</th></tr></thead>
-              <tbody>{detalle.liquidaciones.map((l,i)=>(<tr key={i}><td className="row-name">{l.operador}</td><td className="num">{fmt(l.valor)}</td><td className="num">{fmt(l.efectivo_contado)}</td><td className="num" style={{color:Number(l.descuadre)?"var(--red)":"var(--green)"}}>{fmt(l.descuadre)}</td></tr>))}</tbody></table></div>
+            <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Valor</th><th className="num">QR</th><th className="num">Efectivo</th><th className="num">Contado</th><th className="num">Descuadre</th></tr></thead>
+              <tbody>{detalle.liquidaciones.map((l,i)=>(<tr key={i}><td className="row-name">{l.operador}</td><td className="num">{fmt(l.valor)}</td><td className="num">{fmt(l.qr)}</td><td className="num">{fmt(l.efectivo)}</td><td className="num">{fmt(l.efectivo_contado)}</td><td className="num" style={{color:Number(l.descuadre)?"var(--red)":"var(--green)"}}>{fmt(l.descuadre)}</td></tr>))}</tbody></table></div>
+
+            <div className="card-t" style={{marginTop:14}}>Máquinas ({detalle.maquinas.length})</div>
+            <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Máquina</th><th className="num">Producido</th><th className="num">Tokens prod.</th><th className="num">Token día</th><th className="num">Mone día</th></tr></thead>
+              <tbody>{detalle.maquinas.map((m,i)=>(<tr key={i}><td className="row-name">{m.nombre}</td><td className="num">{fmt(m.producido)}</td><td className="num">{m.producido_tokens}</td><td className="num">{m.token_dia}</td><td className="num">{fmt(m.mone_dia)}</td></tr>))}</tbody></table></div>
+            <div className="muted" style={{fontSize:12,marginTop:4}}>Σ Token día <b>{sumTD}</b> vs físico <b>{c.tokens_fisicos}</b> · Σ Mone día <b>{fmt(sumMD)}</b> vs monedas <b>{fmt(c.efectivo_total_monedas)}</b></div>
+
+            {ct.length>0 && <div>
+              <div className="card-t" style={{marginTop:14}}>Control de tokens por operador</div>
+              <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev</th><th className="num">Memb.</th><th className="num">Saldo esp.</th></tr></thead>
+                <tbody>{ct.map((o,i)=>(<tr key={i}><td className="row-name">{o.nombre}</td><td className="num muted">{o.historial?o.historial.saldo:0}</td><td className="num">{o.vendidosEsteC}</td><td className="num">{o.devTokensEsteC}</td><td className="num">{o.membresiaEsteC}</td><td className="num" style={{fontWeight:700,color:(o.saldoEsperado!=null&&o.saldoEsperado<0)?"var(--red)":"var(--t)"}}>{o.saldoEsperado==null?"base sede":o.saldoEsperado}</td></tr>))}</tbody></table></div>
+            </div>}
+
+            {detalle.gastos.length>0 && <div>
+              <div className="card-t" style={{marginTop:14}}>Gastos ({detalle.gastos.length})</div>
+              {detalle.gastos.map((g,i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid var(--bd)"}}><span>{g.concepto||"—"}</span><b>{fmt(g.monto)}</b></div>))}
+            </div>}
+
             <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDetalle(null)}>Cerrar</button></div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

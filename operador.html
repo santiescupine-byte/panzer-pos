@@ -736,9 +736,11 @@ function App(){
       // refrescar stock
       const prods=await db.getProductos(sede);
       setProductos(prods);
-      const montoTokens=cart.filter(c=>c.tipo==="token").reduce((s,c)=>s+lineNet(c),0);
-      const montoProductos=totalCart-montoTokens;
-      setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, descuento:descTotal, recibo:res&&res.recibo, ts:Date.now()}]);
+      const esMembresia=c=>(c.nombre||'').trim().toUpperCase().startsWith('MEMBRESIA');
+      const montoMembresias=cart.filter(esMembresia).reduce((s,c)=>s+lineNet(c),0);
+      const montoTokens=cart.filter(c=>c.tipo==="token" && !esMembresia(c)).reduce((s,c)=>s+lineNet(c),0);
+      const montoProductos=totalCart-montoTokens-montoMembresias;
+      setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, membresias:montoMembresias, descuento:descTotal, recibo:res&&res.recibo, ts:Date.now()}]);
       setCart([]); setShowCart(false); setDescTicket(null);
       showToast("Venta registrada "+fmt(totalCart),"ok");
     }catch(e){ showToast(""+(e.message||e),"err"); }
@@ -1071,9 +1073,10 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   },[]);
 
   // automáticos desde las ventas del turno
-  const productosVal=ventas.reduce((s,v)=>s+(v.productos||0),0);  // todo lo vendido que NO son tokens
-  const tokensVal=ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens
-  const valor=productosVal+tokensVal;                              // total
+  const productosVal=ventas.reduce((s,v)=>s+(v.productos||0),0);  // productos (NO tokens, NO membresías)
+  const tokensVal=ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens (fichas)
+  const membresiasVal=ventas.reduce((s,v)=>s+(v.membresias||0),0); // membresías VIP vendidas
+  const valor=productosVal+tokensVal+membresiasVal;                // total
   const qr=ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
   const efectivo=ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
   const dev=Number(devoluciones)||0;
@@ -1085,7 +1088,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
     sede, operador, numRecibo,
     tokensBase:Number(tokensBase)||0, tokensVendidos:Number(tokensVendidos)||0,
     devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
-    valor, valorProductos:productosVal, valorTokens:tokensVal,
+    valor, valorProductos:productosVal, valorTokens:tokensVal, valorMembresias:membresiasVal,
     qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado, observaciones,
   });
 
@@ -1098,6 +1101,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
       '———\n'+
       'Productos: '+fmt(productosVal)+'\n'+
       'Tokens: '+fmt(tokensVal)+'\n'+
+      (membresiasVal>0?('Membresías: '+fmt(membresiasVal)+'\n'):'')+
       'Total vendido: '+fmt(valor)+'\n'+
       'QR/Tarjeta: '+fmt(qr)+'\n'+
       'Efectivo: '+fmt(efectivo)+'\n'+
@@ -1144,6 +1148,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
         <div className="result-row"><span className="result-label">Nº de ventas</span><span className="result-value">{ventas.length}</span></div>
         {row("Productos", productosVal)}
         {row("Tokens", tokensVal, "var(--amber)")}
+        {membresiasVal>0 && row("Membresías", membresiasVal, "var(--amber)")}
         {row("Total vendido", valor, "var(--tb)", true)}
         {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
         {row("Efectivo", efectivo, "var(--green)")}

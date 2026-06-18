@@ -2778,8 +2778,8 @@ function Recaudo({showToast, quien}){
   const [detalle,setDetalle]=useState(null);
 
   useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados()]).then(([s,e])=>{ setSedes(s); setEmps(e); }).catch(()=>{}); },[]);
-  // los supervisores hacen de tesoreros (también admin/tesorero por si existieran)
-  const tesoreros=emps.filter(e=>['supervisor','tesorero','admin'].includes(e.rol)&&e.activo!==false);
+  // los supervisores hacen de tesoreros
+  const tesoreros=emps.filter(e=>e.rol==='supervisor'&&e.activo!==false);
   const sedeObj=sedes.find(s=>s.nombre===sede)||{};
   const baseConfigurada=Number(sedeObj.base_efectivo)||0;
   const cajerosDeSede=emps.filter(e=>e.activo!==false && (e.sedes||[]).includes(sede) && (e.rol==='cajero'));
@@ -2846,41 +2846,51 @@ function Recaudo({showToast, quien}){
   const aConsignar=totalRecaudo-totalGastos;
   const totalDescuadre=liqs.reduce((a,l)=>a+descuadreDe(l),0);
 
-  // control de tokens por operador (alineado al cálculo exacto del recaudo viejo)
+  // control de tokens por operador. tokensMaq = tokens FÍSICOS contados (no el contador).
   const normOp=s=>s?(s.charAt(0).toUpperCase()+s.slice(1).toLowerCase()):s;
+  const baseSedeSaldo = saldosPrev['BASE_SEDE'];          // si el ciclo anterior fue "por sede"
+  const prevSede = baseSedeSaldo!=null;
   const opsSet=[...new Set(liqs.map(l=>l.operador).filter(Boolean))];
   const controlTokens=opsSet.map(op=>{
     const sus=liqs.filter(l=>l.operador===op);
     const vendidos=sus.reduce((a,l)=>a+(Number(l.tokens_vendidos)||0),0);
     const devTokens=sus.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
     const membresia=sus.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
-    const saldoAnterior=Number(saldosPrev[normOp(op)] ?? saldosPrev[op])||0;
-    const saldoEsperado=saldoAnterior-vendidos-devTokens-membresia;
+    const saldoAnterior= prevSede ? 0 : (Number(saldosPrev[normOp(op)] ?? saldosPrev[op])||0);
+    const saldoEsperado= prevSede ? null : (saldoAnterior-vendidos-devTokens-membresia);
     return {nombre:op, historial:{saldo:saldoAnterior}, saldoAnterior, vendidos,
             vendidosEsteC:vendidos, devTokens, devTokensEsteC:devTokens, membresia, membresiaEsteC:membresia, saldoEsperado};
   });
-  const totSaldoAnt=controlTokens.reduce((a,c)=>a+c.saldoAnterior,0);
   const totVendidos=controlTokens.reduce((a,c)=>a+c.vendidos,0);
   const totDevTokens=controlTokens.reduce((a,c)=>a+c.devTokens,0);
-  const totSaldoEsp=controlTokens.reduce((a,c)=>a+c.saldoEsperado,0);
+  const totMembresia=controlTokens.reduce((a,c)=>a+c.membresia,0);
+  const totSaldoAnt= prevSede ? (Number(baseSedeSaldo)||0) : controlTokens.reduce((a,c)=>a+c.saldoAnterior,0);
+  const totSaldoEsp= prevSede ? (totSaldoAnt-totVendidos-totDevTokens-totMembresia) : controlTokens.reduce((a,c)=>a+(c.saldoEsperado||0),0);
   const ajusteNum=Number(reparto.ajusteTokens)||0;
-  const tokensDisponibles=tokensFis+totSaldoEsp+ajusteNum;            // = tokensTotalBase del recaudo viejo
-  const tokensPerdidos=Math.max(0, totSaldoAnt - totVendidos - totDevTokens - tokensFis - totSaldoEsp);
+  const tokensDisponibles=tokensFis+totSaldoEsp+ajusteNum;            // base nueva = saldo + físicos + ajuste
+  // FALTANTES reales (reemplazan el "tokens perdidos" roto del app viejo):
+  const faltanteMaqTokens=sumTokenDia-tokensFis;                      // contadores de máquina vs físico contado
+  const opsNegativos=controlTokens.filter(c=>c.saldoEsperado!=null && c.saldoEsperado<0);
+  const tokensPerdidos=Math.max(0,faltanteMaqTokens);                 // guardado en el ciclo
 
   const cerrar=async()=>{
     setBusy(true);
     try{
+      // base de tokens que se hereda al próximo ciclo (solo en modo "por sede")
+      const nuevoSaldoSede = reparto.modo==='sede' ? tokensDisponibles : null;
       const repObj={ modoReparto:reparto.modo, ajusteTokens:ajusteNum, ajusteMotivo:reparto.ajusteMotivo||"",
         baseRecogida:Number(reparto.baseRecogida)||0, baseNueva:Number(reparto.baseNueva)||0,
         baseConfigurada, baseEsperada, difBase, tokensTotalBase:tokensDisponibles, totalGastosDeSede:totalGastos,
         controlTokens, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
-        totalDevTokensCiclo:totDevTokens, totalSaldoEsperado:totSaldoEsp, tokensPerdidos };
+        totalDevTokensCiclo:totDevTokens, totalSaldoEsperado:totSaldoEsp, tokensPerdidos,
+        faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede };
       const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
         total_recaudo:totalRecaudo, a_consignar:aConsignar, total_descuadre:totalDescuadre,
         total_gastos:totalGastos, tokens_perdidos:tokensPerdidos, tokens_fisicos:tokensFis,
         efectivo_total_monedas:monedasFis, base_recogida:Number(reparto.baseRecogida)||0,
         base_nueva:Number(reparto.baseNueva)||0, base_configurada:baseConfigurada,
-        resumen:{ sumTokenDia, sumMoneDia, difTokens, difMonedas, efLiquidaciones } };
+        resumen:{ sumTokenDia, sumMoneDia, difTokens, difMonedas, efLiquidaciones, tokensDisponibles,
+          faltanteMaqTokens, operadoresNegativos:opsNegativos.length, modoReparto:reparto.modo } };
       const liquidaciones=liqs.map(l=>({ id:l.id||"", sede, operador:l.operador, num_recibo:l.num_recibo,
         tokens_base:l.tokens_base, tokens_vendidos:l.tokens_vendidos, dev_tokens:l.dev_tokens,
         tokens_membresia:l.tokens_membresia, tokens_restantes:l.tokens_restantes, valor:l.valor, qr:l.qr,
@@ -3059,7 +3069,7 @@ function Recaudo({showToast, quien}){
                       <td className="num">{c.vendidos}</td>
                       <td className="num">{c.devTokens}</td>
                       <td className="num">{c.membresia}</td>
-                      <td className="num" style={{fontWeight:700,color:c.saldoEsperado<0?"var(--red)":"var(--t)"}}>{c.saldoEsperado}</td>
+                      <td className="num" style={{fontWeight:700,color:(c.saldoEsperado!=null&&c.saldoEsperado<0)?"var(--red)":"var(--t)"}}>{c.saldoEsperado==null?<span className="muted">base sede</span>:c.saldoEsperado}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3079,7 +3089,9 @@ function Recaudo({showToast, quien}){
               <span>Tokens disponibles (base)</span><span style={{color:"var(--amber)"}}>{tokensDisponibles}</span>
             </div>
             <div className="muted" style={{fontSize:12,marginTop:-4}}>= {tokensFis} máquinas {totSaldoEsp>=0?"+ ":"− "}{Math.abs(totSaldoEsp)} saldos {ajusteNum>=0?"+ ":"− "}{Math.abs(ajusteNum)} ajuste</div>
-            {tokensPerdidos>0 && <div style={{marginTop:8,color:"var(--red)",fontWeight:700}}>⚠ Tokens perdidos (no justificados): {tokensPerdidos} · ≈ {fmt(tokensPerdidos*5000)}</div>}
+            {faltanteMaqTokens!==0 && <div style={{marginTop:8,fontWeight:700,color:faltanteMaqTokens>0?"var(--red)":"var(--amber)"}}>{faltanteMaqTokens>0?("⚠ Faltan "+faltanteMaqTokens+" tokens (contadores de máquina dicen más que lo contado físico) · ≈ "+fmt(faltanteMaqTokens*5000)):("Sobran "+Math.abs(faltanteMaqTokens)+" tokens físicos vs contadores")}</div>}
+            {opsNegativos.length>0 && <div style={{marginTop:6,color:"var(--red)",fontWeight:700}}>⚠ {opsNegativos.length} operador(es) con saldo negativo (vendieron más de lo que tenían): {opsNegativos.map(o=>o.nombre).join(", ")}</div>}
+            {faltanteMaqTokens===0 && opsNegativos.length===0 && <div style={{marginTop:8,color:"var(--green)",fontWeight:700}}>✓ Tokens cuadran</div>}
           </div>
         </div>)}
 
@@ -3087,7 +3099,7 @@ function Recaudo({showToast, quien}){
         {paso==='resumen' && (
           <div className="card" style={{maxWidth:560}}>
             <div className="card-t">Resumen del ciclo</div>
-            {[['Liquidaciones',liqs.length],['Efectivo de liquidaciones',fmt(efLiquidaciones)],['Monedas de máquinas',fmt(monedasFis)],['Total recaudo',fmt(totalRecaudo)],['Gastos',fmt(totalGastos)],['A consignar',fmt(aConsignar)],['Descuadre total',fmt(totalDescuadre)],['Tokens perdidos',tokensPerdidos]].map(([l,v])=>(
+            {[['Liquidaciones',liqs.length],['Efectivo de liquidaciones',fmt(efLiquidaciones)],['Monedas de máquinas',fmt(monedasFis)],['Total recaudo',fmt(totalRecaudo)],['Gastos',fmt(totalGastos)],['A consignar',fmt(aConsignar)],['Descuadre efectivo',fmt(totalDescuadre)],['Base de tokens (nueva)',tokensDisponibles],['Faltante tokens máquina',faltanteMaqTokens],['Operadores con saldo negativo',opsNegativos.length]].map(([l,v])=>(
               <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid var(--bd)"}}><span className="muted">{l}</span><b>{v}</b></div>
             ))}
             <button className="btn btn-amber" style={{width:"100%",marginTop:14}} disabled={busy} onClick={cerrar}>{busy?"Cerrando…":"✅ Cerrar ciclo y guardar"}</button>

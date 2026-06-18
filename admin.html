@@ -2704,7 +2704,7 @@ function Mantenimiento({showToast}){
 // SECCIÓN: REPUESTOS — inventario central + solicitudes a administración
 // ============================================================
 function Repuestos({showToast, quien, rol}){
-  const esAdmin = rol!=='supervisor';
+  const esAdmin = true;   // acceso total para admin Y supervisor (solo estos dos roles entran al back office)
   const money=n=>"$"+(Number(n)||0).toLocaleString("es-CO");
   const [sub,setSub]=useState("inventario");   // 'inventario' | 'solicitudes'
   const [reps,setReps]=useState(null);

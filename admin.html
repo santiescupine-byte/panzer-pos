@@ -222,7 +222,8 @@ async function vipListCupones(){
 }
 async function vipSaveCupon(c){
   if(DEMO_MODE) return {ok:true};
-  const row={id_cupon:c.id_cupon,nombre:c.nombre,descripcion:c.descripcion,emoji:c.emoji||'🎁',membresia:c.membresia||'Todos',activo:!!c.activo};
+  const row={id_cupon:c.id_cupon,nombre:c.nombre,descripcion:c.descripcion,emoji:c.emoji||'🎁',membresia:c.membresia||'Todos',activo:!!c.activo,
+    producto_id:(c.producto_id||null)||null, cantidad:Number(c.cantidad)||1};
   const {error}=await sb.from('cupones_vip').upsert(row,{onConflict:'id_cupon'});
   return error?{ok:false,error:error.message}:{ok:true};
 }
@@ -3061,7 +3062,7 @@ function Recaudo({showToast, quien}){
               <table className="tbl">
                 <thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev.</th><th className="num">Membresía</th><th className="num">Saldo esperado</th></tr></thead>
                 <tbody>
-                  {controlTokens.length===0 && <tr><td colSpan="6"><div className="empty">Sin operadores.</div></td></tr>}
+                  {controlTokens.length===0 && <tr><td colSpan="6"><div className="empty">Aún no hay operadores. Vuelve al paso <b>Liquidaciones</b> e importa o agrega las liquidaciones del turno — los operadores aparecerán aquí automáticamente con su saldo de tokens.</div></td></tr>}
                   {controlTokens.map(c=>(
                     <tr key={c.nombre}>
                       <td className="row-name">{c.nombre}</td>
@@ -3657,6 +3658,8 @@ function Membresias({showToast, admin}){
   const [mes,setMes]=useState(()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
   const [movs,setMovs]=useState(null);           // transacciones del mes (movimientos por sede)
   const [detSede,setDetSede]=useState(null);     // sede expandida en el detalle
+  const [prodList,setProdList]=useState([]);     // productos (para ligar cupón → producto)
+  useEffect(()=>{ if(!DEMO_MODE && sb){ sb.from('productos').select('id,nombre,categoria').eq('activo',true).order('nombre').then(({data})=>setProdList(data||[])); } },[]);
 
   useEffect(()=>{
     vipApi({accion:'listar_clientes'}).then(r=>{
@@ -3687,7 +3690,7 @@ function Membresias({showToast, admin}){
   const nuevoCupon=()=>{
     const nums=(cupones||[]).map(c=>parseInt((c.id_cupon||'').replace(/\D/g,''))||0);
     const next='C'+String((Math.max(0,...nums)+1)).padStart(3,'0');
-    setEdCup({id_cupon:next,nombre:'',descripcion:'',emoji:'🎁',membresia:'Todos',activo:true,_nuevo:true});
+    setEdCup({id_cupon:next,nombre:'',descripcion:'',emoji:'🎁',membresia:'Todos',activo:true,producto_id:'',cantidad:1,_nuevo:true});
   };
   const guardarCupon=async()=>{
     if(!(edCup.nombre||'').trim()){ showToast("El nombre del cupón es obligatorio","err"); return; }
@@ -3934,7 +3937,21 @@ function Membresias({showToast, admin}){
             <select className="select" value={edCup.membresia} onChange={e=>setEdCup({...edCup,membresia:e.target.value})}>
               {["Todos","Standard","Silver","Gold"].map(m=><option key={m} value={m}>{m}</option>)}
             </select>
-            <label className="check" style={{marginTop:10}}><input type="checkbox" checked={!!edCup.activo} onChange={e=>setEdCup({...edCup,activo:e.target.checked})}/> Activo (visible para los clientes)</label>
+
+            <div style={{borderTop:"1px solid var(--bd)",margin:"12px 0 8px",paddingTop:10}}>
+              <label className="label">Producto que entrega (opcional — descuenta de inventario al canjear)</label>
+              <select className="select" value={edCup.producto_id||""} onChange={e=>setEdCup({...edCup,producto_id:e.target.value})}>
+                <option value="">— Ninguno (cupón sin producto: descuento, token, etc.) —</option>
+                {prodList.map(p=><option key={p.id} value={p.id}>{p.nombre}{p.categoria?(" · "+p.categoria):""}</option>)}
+              </select>
+              {edCup.producto_id && <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+                <label className="label" style={{margin:0}}>Cantidad a descontar</label>
+                <input className="input" style={{margin:0,width:90}} type="number" min="1" value={edCup.cantidad||1} onChange={e=>setEdCup({...edCup,cantidad:e.target.value})}/>
+              </div>}
+              {edCup.producto_id && <div className="muted" style={{fontSize:12,marginTop:6}}>Al canjearlo, el POS descontará {edCup.cantidad||1} unidad(es) de este producto del inventario de la sede del cajero.</div>}
+            </div>
+
+            <label className="check" style={{marginTop:6}}><input type="checkbox" checked={!!edCup.activo} onChange={e=>setEdCup({...edCup,activo:e.target.checked})}/> Activo (visible para los clientes)</label>
             <div className="modal-actions">
               <button className="btn btn-ghost" disabled={busyC} onClick={()=>setEdCup(null)}>Cancelar</button>
               <button className="btn btn-amber" disabled={busyC} onClick={guardarCupon}>{busyC?"Guardando…":"Guardar"}</button>

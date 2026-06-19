@@ -1775,9 +1775,22 @@ function VipSheet({sede,operador,showToast,onClose}){
     setBusy(true);
     const d=cupon.data;
     const r=await vipApi({accion:'canjear_cupon',id_cupon:d.id_cupon,id_cliente:d.id_cliente,sede:vSede,operador});
-    setBusy(false);
-    if(r.ok) setCupon({data:d,estado:'entregado'});
+    if(r.ok){
+      // Si el cupón está ligado a un producto, descontarlo del inventario de ESTA sede (POS).
+      try{
+        if(!DEMO_MODE && sb){
+          const { data:cup } = await sb.from('cupones_vip').select('producto_id,cantidad,nombre').eq('id_cupon',d.id_cupon).maybeSingle();
+          if(cup && cup.producto_id){
+            await sb.rpc('ajustar_inventario',{ p_producto_id:cup.producto_id, p_sede:sede, p_tipo:'cupon',
+              p_cantidad:-(Number(cup.cantidad)||1), p_operador:operador,
+              p_nota:'Cupón VIP: '+(cup.nombre||d.nombre_cupon||d.id_cupon)+' · '+(d.nombre_cliente||d.id_cliente) });
+          }
+        }
+      }catch(e){ showToast('Canje OK, pero no se pudo descontar inventario','err'); }
+      setCupon({data:d,estado:'entregado'});
+    }
     else showToast(r.error||'Error al registrar canje','err');
+    setBusy(false);
   };
 
   // ---------- VENDER ----------

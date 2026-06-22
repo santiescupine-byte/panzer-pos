@@ -635,6 +635,13 @@ const db = {
     if(DEMO_MODE) return [];
     const {data,error}=await sb.from('recaudo_maquinas').select('*').eq('sede',sede).order('nombre'); if(error) return []; return data||[];
   },
+  // Editar contadores de una máquina (solo admin). Crea la fila si no existe (sede nueva).
+  async guardarContador(m){
+    if(DEMO_MODE) return;
+    const row={sede:m.sede, nombre:m.nombre, gen_actual:Number(m.gen_actual)||0, gen_token_actual:Number(m.gen_token_actual)||0, updated_at:new Date().toISOString()};
+    if(m.id){ const {error}=await sb.from('recaudo_maquinas').update(row).eq('id',m.id); if(error) throw error; }
+    else { const {error}=await sb.from('recaudo_maquinas').upsert(row,{onConflict:'sede,nombre'}); if(error) throw error; }
+  },
   async recSaldos(sede){
     if(DEMO_MODE) return [];
     const {data,error}=await sb.from('recaudo_saldos_operador').select('*').eq('sede',sede); if(error) return []; return data||[];
@@ -1030,7 +1037,7 @@ function App(){
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
-                {tab==="recaudo"    && <Recaudo showToast={showToast} quien={auth.nombre}/>}
+                {tab==="recaudo"    && <Recaudo showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
@@ -2759,7 +2766,7 @@ function Mantenimiento({showToast}){
 // SECCIÓN: RECAUDO / TESORERÍA — ciclo de cierre por sede (migrado de Sheets)
 // ============================================================
 const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina 5','Máquina 6','Aspiradora','Canillita'];
-function Recaudo({showToast, quien}){
+function Recaudo({showToast, quien, rol}){
   const [paso,setPaso]=useState('inicio');   // inicio|liquidaciones|maquinas|conteo|gastos|reparto|resumen|historial
   const [sedes,setSedes]=useState([]);
   const [emps,setEmps]=useState([]);
@@ -2877,12 +2884,18 @@ function Recaudo({showToast, quien}){
   const cerrar=async()=>{
     setBusy(true);
     try{
-      // base de tokens que se hereda al próximo ciclo (solo en modo "por sede")
-      const nuevoSaldoSede = reparto.modo==='sede' ? tokensDisponibles : null;
+      // Lo que el tesorero DEJA para el próximo ciclo (lo que escribió en el reparto, no el auto).
+      const nuevoSaldoSede = reparto.modo==='sede'
+        ? ((reparto.baseTokensSede!=null && reparto.baseTokensSede!=="") ? (Number(reparto.baseTokensSede)||0) : tokensDisponibles)
+        : null;
+      // controlTokens con el saldo NUEVO asignado por operador (lo que arranca el próximo ciclo)
+      const ctSend = controlTokens.map(c=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0;
+        const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?(Number(reparto.ops[c.nombre])||0):def;
+        return {...c, saldoNuevo:v}; });
       const repObj={ modoReparto:reparto.modo, ajusteTokens:ajusteNum, ajusteMotivo:reparto.ajusteMotivo||"",
         baseRecogida:Number(reparto.baseRecogida)||0, baseNueva:Number(reparto.baseNueva)||0,
         baseConfigurada, baseEsperada, difBase, tokensTotalBase:tokensDisponibles, totalGastosDeSede:totalGastos,
-        controlTokens, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
+        controlTokens:ctSend, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
         totalDevTokensCiclo:totDevTokens, totalSaldoEsperado:totSaldoEsp, tokensPerdidos,
         faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede };
       const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
@@ -2910,6 +2923,25 @@ function Recaudo({showToast, quien}){
   const verHistorial=async()=>{ setPaso('historial'); setHisto(null); setHisto(await db.recCiclos({})); };
   const verDetalle=async(c)=>{ const d=await db.recCicloDetalle(c.id); setDetalle({ciclo:c,...d}); };
 
+  // ---- Contadores de máquina (editar, SOLO admin) ----
+  const [contMaqs,setContMaqs]=useState(null);
+  const [contSede,setContSede]=useState("");
+  const cargarContadores=async(s)=>{
+    setContMaqs(null);
+    const m=await db.recMaquinas(s);
+    const byName={}; (m||[]).forEach(x=>byName[x.nombre]=x);
+    const nombres=(m&&m.length)?m.map(x=>x.nombre):MAQ_DEFAULT;
+    setContMaqs(nombres.map(nm=>{ const r=byName[nm]||{}; return {id:r.id||null, sede:s, nombre:nm, gen_actual:String(Number(r.gen_actual)||0), gen_token_actual:String(Number(r.gen_token_actual)||0)}; }));
+  };
+  const abrirContadores=()=>{ const s=contSede || (sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre || ""; setContSede(s); setPaso('contadores'); if(s) cargarContadores(s); };
+  const setCont=(i,patch)=>setContMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
+  const guardarContadores=async()=>{
+    setBusy(true);
+    try{ for(const m of (contMaqs||[])){ await db.guardarContador(m); } showToast("Contadores actualizados ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+    finally{ setBusy(false); }
+  };
+
   const PASOS=[['liquidaciones','Liquidaciones'],['maquinas','Máquinas'],['conteo','Conteo físico'],['gastos','Gastos'],['reparto','Reparto'],['resumen','Cierre']];
   const idxPaso=PASOS.findIndex(p=>p[0]===paso);
   const irA=(d)=>{ const n=idxPaso+d; if(n>=0&&n<PASOS.length) setPaso(PASOS[n][0]); };
@@ -2919,8 +2951,9 @@ function Recaudo({showToast, quien}){
     <div>
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
-        {paso!=='historial' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
-        {paso==='historial' && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
+        {rol==='admin' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
+        {paso!=='historial' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
+        {(paso==='historial'||paso==='contadores') && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
       </div>
 
       {/* INICIO */}
@@ -3094,6 +3127,30 @@ function Recaudo({showToast, quien}){
             {opsNegativos.length>0 && <div style={{marginTop:6,color:"var(--red)",fontWeight:700}}>⚠ {opsNegativos.length} operador(es) con saldo negativo (vendieron más de lo que tenían): {opsNegativos.map(o=>o.nombre).join(", ")}</div>}
             {faltanteMaqTokens===0 && opsNegativos.length===0 && <div style={{marginTop:8,color:"var(--green)",fontWeight:700}}>✓ Tokens cuadran</div>}
           </div>
+
+          <div className="card">
+            <div className="card-t">🪙 Tokens que quedan para el próximo ciclo</div>
+            {reparto.modo==='sede' ? (
+              <div>
+                <label className="label">Base de tokens que queda en la sede</label>
+                <input className="input" type="number" value={reparto.baseTokensSede!=null?reparto.baseTokensSede:String(tokensDisponibles)} onChange={e=>setReparto(r=>({...r,baseTokensSede:e.target.value}))}/>
+                <div className="muted" style={{fontSize:12,marginTop:-4}}>Disponibles para dejar: <b>{tokensDisponibles}</b>. Ajústalo si dejaste otra cantidad.</div>
+              </div>
+            ) : (
+              <div>
+                <div className="muted" style={{fontSize:12,marginBottom:8}}>Cuántos tokens le dejas a cada operador para arrancar el próximo ciclo:</div>
+                {controlTokens.map(c=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0; const val=(reparto.ops&&reparto.ops[c.nombre]!=null)?reparto.ops[c.nombre]:String(def); return (
+                  <div key={c.nombre} style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+                    <span className="row-name" style={{flex:1}}>{c.nombre}</span>
+                    <input className="input" style={{margin:0,width:120,textAlign:"right"}} type="number" value={val} onChange={e=>setReparto(r=>({...r,ops:{...(r.ops||{}),[c.nombre]:e.target.value}}))}/>
+                  </div>
+                );})}
+                {(()=>{ const rep=controlTokens.reduce((a,c)=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0; const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?Number(reparto.ops[c.nombre]):def; return a+(Number(v)||0); },0); const sin=tokensDisponibles-rep; return (
+                  <div className="card" style={{marginTop:8,display:"flex",justifyContent:"space-between",fontWeight:700}}><span>Disponibles {tokensDisponibles} · Repartidos {rep}</span><span style={{color:sin===0?"var(--green)":"var(--amber)"}}>Sin repartir: {sin}</span></div>
+                );})()}
+              </div>
+            )}
+          </div>
         </div>)}
 
         {/* RESUMEN / CIERRE */}
@@ -3114,6 +3171,39 @@ function Recaudo({showToast, quien}){
       </div>)}
 
       {/* HISTORIAL */}
+      {/* ===== CONTADORES DE MÁQUINA (solo admin) ===== */}
+      {paso==='contadores' && (
+        <div>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+            <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Edita los contadores GEN y tokens de cada máquina (úsalo solo cuando se quema/cambia una máquina y el contador se reinicia). Esto define el "anterior" del próximo ciclo.</span>
+          </div>
+          <div className="toolbar">
+            <select className="select" style={{maxWidth:240,margin:0}} value={contSede} onChange={e=>{setContSede(e.target.value);cargarContadores(e.target.value);}}>
+              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+          </div>
+          {contMaqs===null ? <div className="empty">Cargando…</div> : (
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Máquina</th><th className="num">Contador GEN (pesos)</th><th className="num">Contador tokens</th></tr></thead>
+                <tbody>
+                  {contMaqs.map((m,i)=>(
+                    <tr key={m.nombre}>
+                      <td className="row-name">{m.nombre}</td>
+                      <td className="num"><input className="input" style={{margin:0,textAlign:"right",maxWidth:180}} type="number" value={m.gen_actual} onChange={e=>setCont(i,{gen_actual:e.target.value})}/></td>
+                      <td className="num"><input className="input" style={{margin:0,textAlign:"right",maxWidth:140}} type="number" value={m.gen_token_actual} onChange={e=>setCont(i,{gen_token_actual:e.target.value})}/></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="toolbar" style={{marginTop:12}}>
+            <button className="btn btn-amber" disabled={busy||contMaqs===null} onClick={guardarContadores}>{busy?"Guardando…":"💾 Guardar contadores"}</button>
+          </div>
+        </div>
+      )}
+
       {paso==='historial' && (
         <div className="card" style={{padding:0,overflowX:"auto"}}>
           <table className="tbl">

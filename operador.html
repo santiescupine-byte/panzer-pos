@@ -1121,16 +1121,19 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
     if(onPend){ onPend(); setTimeout(onPend,3000); }   // refresca el banner ahora y tras el envío en segundo plano
     showToast("Liquidación guardada ✓","ok");
   };
-  // Botón WhatsApp: AHORA primero registra la liquidación y luego abre WhatsApp (así no se pierde).
+  // Botón WhatsApp: abre WhatsApp PRIMERO (en el mismo toque → el navegador no lo bloquea),
+  // luego registra (que ya es instantáneo) y cierra. El guardado en cola es síncrono, no se pierde.
   const registrarYWhatsApp=async()=>{
+    if(sending) return;
     setSending(true);
-    await registrarLiq();
-    window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA()),'_blank');
+    try{ window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA()),'_blank'); }catch(e){}
+    try{ await registrarLiq(); }catch(e){}
     onCerrar();
   };
   const registrarYCerrar=async()=>{
+    if(sending) return;
     setSending(true);
-    await registrarLiq();
+    try{ await registrarLiq(); }catch(e){}
     onCerrar();   // cierra caja igual — la liquidación no se pierde (queda en cola)
   };
 

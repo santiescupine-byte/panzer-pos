@@ -1112,20 +1112,24 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
       '*Efectivo esperado: '+fmt(efectivoEsperado)+'*'+
       (observaciones?('\nObs: '+observaciones):'');
   };
-  const enviarWhatsApp=()=>{
-    // Sin número: abre WhatsApp y el operador elige el chat/grupo destino.
-    const url='https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA());
-    window.open(url,'_blank');
-  };
-
-  const registrarYCerrar=async()=>{
-    setSending(true);
-    let r;
-    try{ r=await db.enviarLiquidacion(payload()); }
-    catch(e){ r={success:false,queued:true}; }
+  // Registra la liquidación (Supabase + Sheets) y devuelve el resultado. Usado por ambos botones.
+  const registrarLiq=async()=>{
+    let r; try{ r=await db.enviarLiquidacion(payload()); }catch(e){ r={success:false,queued:true}; }
     if(onPend) onPend();
     if(r.success) showToast("Liquidación registrada ✓","ok");
     else showToast("⚠ Sin conexión: la liquidación quedó GUARDADA y se reenviará sola","err");
+    return r;
+  };
+  // Botón WhatsApp: AHORA primero registra la liquidación y luego abre WhatsApp (así no se pierde).
+  const registrarYWhatsApp=async()=>{
+    setSending(true);
+    await registrarLiq();
+    window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA()),'_blank');
+    onCerrar();
+  };
+  const registrarYCerrar=async()=>{
+    setSending(true);
+    await registrarLiq();
     onCerrar();   // cierra caja igual — la liquidación no se pierde (queda en cola)
   };
 
@@ -1178,11 +1182,13 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
           <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>
         </div>
 
-        {/* WhatsApp: abre el selector de chat para enviar al grupo */}
-        <button className="btn-secondary" style={{marginTop:14,background:"#25D366",color:"#fff",border:"none"}} onClick={enviarWhatsApp}>📱 Enviar por WhatsApp (elegir grupo)</button>
-
-        <button className="btn-primary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
-          {sending?"Registrando…":(listo?"Registrar liquidación y cerrar caja":"Completa el control de tokens")}
+        {/* Acción principal: registra la liquidación Y la envía por WhatsApp (no se pierde) */}
+        <button className="btn-primary" style={{marginTop:14,background:"#25D366",border:"none"}} disabled={!listo||sending} onClick={registrarYWhatsApp}>
+          {sending?"Registrando…":(listo?"📲 Registrar y enviar por WhatsApp":"Completa el control de tokens")}
+        </button>
+        {/* Alternativa: registrar sin enviar WhatsApp */}
+        <button className="btn-secondary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
+          {listo?"Registrar y cerrar caja (sin WhatsApp)":"Completa el control de tokens"}
         </button>
         <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Seguir vendiendo</button>
       </div>

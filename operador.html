@@ -302,14 +302,14 @@ const db = {
       hora: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
       estado: 'pendiente',
     };
-    // 1) Supabase: registro inmediato y autoritativo (rápido, no depende de Google).
-    try{ await db.postLiquidacionSupabase(liquidacion); }catch(e){}
-    // 2) Google Sheets: UN intento corto (8s). Si no responde, se encola y se reenvía solo
-    //    en segundo plano (así la UI NO se congela esperando a Google).
-    let okSheets=false;
-    try{ const res=await apiPost('guardarLiquidacionOperador',{liquidacion},8000); okSheets=!!(res&&res.success); }catch(e){}
-    if(!okSheets) liqEncolar(liquidacion);
-    return { success:true, sheets:okSheets };   // success: ya quedó guardada en Supabase
+    // Guardado INSTANTÁNEO: se encola en local (garantía, no se pierde) y se sincroniza
+    // con Supabase y Sheets en SEGUNDO PLANO. La UI nunca espera a la red → nunca se congela.
+    liqEncolar(liquidacion);
+    (async()=>{
+      try{ await db.postLiquidacionSupabase(liquidacion); }catch(e){}   // red de seguridad (Supabase)
+      try{ await db.reintentarLiqPendientes(); }catch(e){}              // envía a Sheets y saca de la cola
+    })();
+    return { success:true };
   },
   // Reenvía las liquidaciones que quedaron en cola (1 intento c/u; las que fallan quedan).
   async reintentarLiqPendientes(){
@@ -1117,11 +1117,9 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   };
   // Registra la liquidación (Supabase + Sheets) y devuelve el resultado. Usado por ambos botones.
   const registrarLiq=async()=>{
-    let r; try{ r=await db.enviarLiquidacion(payload()); }catch(e){ r={success:true,sheets:false}; }
-    if(onPend) onPend();
-    if(r.sheets) showToast("Liquidación registrada ✓","ok");
-    else showToast("Liquidación guardada ✓ (se sincroniza en segundo plano)","ok");
-    return r;
+    try{ await db.enviarLiquidacion(payload()); }catch(e){}
+    if(onPend){ onPend(); setTimeout(onPend,3000); }   // refresca el banner ahora y tras el envío en segundo plano
+    showToast("Liquidación guardada ✓","ok");
   };
   // Botón WhatsApp: AHORA primero registra la liquidación y luego abre WhatsApp (así no se pierde).
   const registrarYWhatsApp=async()=>{

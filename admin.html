@@ -16,22 +16,24 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     :root{
-      --bg:#080c14;--sf:#0f1520;--sf2:#161e2e;--sf3:#1c2640;
-      --bd:#243049;--bd2:#2d3d5a;
-      --amber:#f59e0b;--amber-d:rgba(245,158,11,0.12);
-      --blue:#3b82f6;--blue-d:rgba(59,130,246,0.12);
-      --green:#10b981;--green-d:rgba(16,185,129,0.10);
-      --red:#ef4444;--red-d:rgba(239,68,68,0.10);
-      --purple:#8b5cf6;
-      --t:#e2e8f0;--td:#64748b;--tb:#f8fafc;
+      /* TEMA CLARO (azules / blancos, acento azul del logo) */
+      --bg:#eaf0f9;--sf:#ffffff;--sf2:#eef4fb;--sf3:#e1eaf7;
+      --bd:#d9e2f0;--bd2:#c5d3e9;
+      --amber:#2563eb;--amber-d:rgba(37,99,235,0.10);
+      --blue:#2563eb;--blue-d:rgba(37,99,235,0.12);
+      --green:#059669;--green-d:rgba(5,150,105,0.10);
+      --red:#dc2626;--red-d:rgba(220,38,38,0.10);
+      --purple:#7c3aed;
+      --t:#334155;--td:#64748b;--tb:#0f172a;
       --font:'Outfit',system-ui,sans-serif;--r:14px;
+      --shadow:0 1px 3px rgba(15,23,42,.06),0 1px 2px rgba(15,23,42,.04);
     }
     *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
     body{background:var(--bg);font-family:var(--font);color:var(--t);}
     input,select,button,textarea{font-family:inherit;}
     input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;}
     input[type="number"]{-moz-appearance:textfield;}
-    ::selection{background:rgba(245,158,11,0.25);}
+    ::selection{background:rgba(37,99,235,0.18);}
     #loading{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;transition:opacity .4s;}
     #loading.hide{opacity:0;pointer-events:none;}
     .loader{width:40px;height:40px;border:3px solid var(--bd);border-top-color:var(--amber);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:16px;}
@@ -42,7 +44,7 @@
     .header h1{font-size:17px;font-weight:800;color:var(--tb);}
     .header-sub{font-size:11px;color:var(--td);}
     .header-badge{margin-left:auto;padding:4px 12px;border-radius:20px;font-size:10px;font-weight:800;background:var(--amber-d);color:var(--amber);letter-spacing:.5px;}
-    .demo-banner{background:var(--amber-d);border-bottom:1px solid rgba(245,158,11,.25);color:var(--amber);font-size:11px;font-weight:600;text-align:center;padding:6px;}
+    .demo-banner{background:var(--amber-d);border-bottom:1px solid rgba(37,99,235,.25);color:var(--amber);font-size:11px;font-weight:600;text-align:center;padding:6px;}
     /* Layout con barra lateral */
     .layout{display:flex;align-items:flex-start;}
     .sidebar{width:210px;flex-shrink:0;background:linear-gradient(180deg,var(--sf),var(--sf2));border-right:1px solid var(--bd);padding:14px 10px;display:flex;flex-direction:column;gap:3px;position:sticky;top:0;height:100vh;overflow-y:auto;scrollbar-width:thin;}
@@ -50,7 +52,7 @@
     .sidebar-logo img{height:26px;}
     .nav-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;font-size:14px;font-weight:600;color:var(--td);cursor:pointer;border:1px solid transparent;white-space:nowrap;transition:background .12s;}
     .nav-item:hover{background:var(--sf2);color:var(--t);}
-    .nav-item.active{background:var(--amber-d);color:var(--amber);border-color:rgba(245,158,11,.25);font-weight:800;}
+    .nav-item.active{background:var(--amber-d);color:var(--amber);border-color:rgba(37,99,235,.25);font-weight:800;}
     .nav-ico{width:20px;text-align:center;font-size:16px;flex-shrink:0;}
     .main{flex:1;min-width:0;}
     .topbar{display:flex;align-items:center;gap:12px;padding:13px 20px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg);z-index:40;}
@@ -67,13 +69,13 @@
     .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap;}
     .toolbar .input{margin-bottom:0;flex:1;min-width:160px;}
     .toolbar .select{margin-bottom:0;width:auto;min-width:140px;}
-    .card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:12px;}
+    .card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:12px;box-shadow:var(--shadow);}
     .label{font-size:12px;font-weight:600;color:var(--td);margin-bottom:6px;display:block;letter-spacing:.3px;}
     .input,.select,.textarea{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:10px;padding:11px 13px;color:var(--tb);font-size:14px;outline:none;margin-bottom:12px;}
     .select{-webkit-appearance:none;}
     .input:focus,.select:focus,.textarea:focus{border-color:var(--amber);}
     .btn{border:none;border-radius:10px;padding:11px 18px;font-size:14px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;}
-    .btn-amber{background:linear-gradient(135deg,var(--amber),#d97706);color:#fff;}
+    .btn-amber{background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;}
     .btn-ghost{background:var(--sf2);border:1px solid var(--bd);color:var(--t);}
     .btn-danger{background:var(--red-d);border:1px solid rgba(239,68,68,.3);color:var(--red);}
     .btn:disabled{opacity:.4;cursor:default;}
@@ -109,18 +111,18 @@
     .stockgrid{display:grid;grid-template-columns:1fr 90px;gap:8px;align-items:center;margin-bottom:8px;}
     .stockgrid .input{margin-bottom:0;}
     /* Informes */
-    .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px;margin-bottom:16px;}
+    .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px;margin-bottom:16px;box-shadow:var(--shadow);}
     .filterbar .fld{display:flex;flex-direction:column;}
     .filterbar .fld .label{margin-bottom:4px;}
     .filterbar .select,.filterbar .input{margin-bottom:0;width:auto;min-width:130px;}
     .kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;}
-    .kpi{flex:1;min-width:160px;background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:16px 18px;}
+    .kpi{flex:1;min-width:160px;background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);}
     .kpi-label{font-size:12px;color:var(--td);font-weight:600;margin-bottom:6px;}
     .kpi-value{font-size:24px;font-weight:800;color:var(--tb);line-height:1.1;}
     .kpi-value.green{color:var(--green);} .kpi-value.red{color:var(--red);} .kpi-value.amber{color:var(--amber);}
-    .chart-wrap{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:16px;}
+    .chart-wrap{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:16px;box-shadow:var(--shadow);}
     .chart{display:flex;align-items:flex-end;gap:3px;height:200px;overflow-x:auto;scrollbar-width:thin;}
-    .bar{flex:1;min-width:10px;background:linear-gradient(180deg,#34d399,#059669);border-radius:3px 3px 0 0;position:relative;cursor:default;transition:opacity .15s;}
+    .bar{flex:1;min-width:10px;background:linear-gradient(180deg,#60a5fa,#2563eb);border-radius:3px 3px 0 0;position:relative;cursor:default;transition:opacity .15s;}
     .bar:hover{opacity:.75;}
     .bar-lbl{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--td);white-space:nowrap;}
     .subnav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
@@ -1062,7 +1064,7 @@ function App(){
       {DEMO_MODE && <div className="demo-banner">MODO DEMO — los cambios no se guardan (conecta Supabase para que persistan)</div>}
       {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
       {misT.pend>0 && (
-        <div style={{background:misT.venc>0?"var(--red-d)":"var(--amber-d)",color:misT.venc>0?"var(--red)":"var(--amber)",fontSize:13,fontWeight:700,padding:"9px 16px",display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid "+(misT.venc>0?"rgba(239,68,68,.25)":"rgba(245,158,11,.25)")}}>
+        <div style={{background:misT.venc>0?"var(--red-d)":"var(--amber-d)",color:misT.venc>0?"var(--red)":"var(--amber)",fontSize:13,fontWeight:700,padding:"9px 16px",display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid "+(misT.venc>0?"rgba(239,68,68,.25)":"rgba(37,99,235,.25)")}}>
           📋 Tienes {misT.pend} tarea{misT.pend>1?"s":""} pendiente{misT.pend>1?"s":""}{misT.venc>0?(" · "+misT.venc+" vencida"+(misT.venc>1?"s":"")+" 🔴"):""}
           {tab!=='tareas' && <button className="btn btn-sm btn-ghost" style={{marginLeft:"auto"}} onClick={()=>{setTab('tareas');setNavOpen(false);}}>Ver</button>}
         </div>
@@ -1775,7 +1777,7 @@ function Inventario({showToast, admin}){
         <div className="muted" style={{marginBottom:12}}>Valor = costo × stock real. Insumos y repuestos son centrales (un solo stock); el producto terminado se suma {valorSede?("solo de "+valorSede):"de todas las sedes"}.</div>
         {d===null ? <div className="empty">Calculando…</div> : (
           <div>
-            <div className="card" style={{marginBottom:12,background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+            <div className="card" style={{marginBottom:12,background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
               <div style={{fontWeight:800,fontSize:16}}>💰 Total inventario valorizado</div>
               <div style={{fontSize:26,fontWeight:900,color:"var(--amber)"}}>{fmt(gran)}</div>
             </div>
@@ -3264,7 +3266,7 @@ function Recaudo({showToast, quien, rol}){
               {tesoreros.map(t=><option key={t.id} value={t.nombre}>{t.nombre}</option>)}
             </select>
           </div>)}
-          {sede && esFranquicia && <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:10}}><b style={{color:"var(--amber)"}}>🏭 Sede franquicia.</b> <span className="muted">Liquidación mensual: contadores de máquina, reparto {frPctFranq}/{frPctPanzer}{frPctAmort?("/"+frPctAmort):""}, devoluciones y productos.</span></div>}
+          {sede && esFranquicia && <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:10}}><b style={{color:"var(--amber)"}}>🏭 Sede franquicia.</b> <span className="muted">Liquidación mensual: contadores de máquina, reparto {frPctFranq}/{frPctPanzer}{frPctAmort?("/"+frPctAmort):""}, devoluciones y productos.</span></div>}
           {sede && !esFranquicia && <div className="muted" style={{marginBottom:10}}>Base configurada de {sede}: <b>{fmt(baseConfigurada)}</b></div>}
           {esFranquicia
             ? <button className="btn btn-amber" style={{width:"100%"}} disabled={busy||!sede} onClick={iniciarFranquicia}>{busy?"Cargando…":"Abrir liquidación de franquicia →"}</button>
@@ -3719,7 +3721,7 @@ function Recaudo({showToast, quien, rol}){
       {/* ===== FRANQUICIA: CONFIG (máquinas + reparto, solo admin) ===== */}
       {paso==='frmaq' && (
         <div>
-          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
             <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Configura máquinas, el reparto % y la amortización de cada franquicia. El "contador" es el último valor leído (= valor anterior del próximo mes); aquí lo siembras la primera vez.</span>
           </div>
           <div className="toolbar">
@@ -3780,7 +3782,7 @@ function Recaudo({showToast, quien, rol}){
       {/* ===== LIQUIDACIONES PENDIENTES (ver/borrar, solo admin) ===== */}
       {paso==='pendientes' && (
         <div>
-          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
             <b style={{color:"var(--amber)"}}>📥 Liquidaciones pendientes por importar.</b> <span className="muted">Aquí puedes borrar las que ya no vas a usar (ej. quedaron de días que no se cerró completo) para que no se acumulen.</span>
           </div>
           <div className="toolbar">
@@ -3818,7 +3820,7 @@ function Recaudo({showToast, quien, rol}){
       {/* ===== CONTADORES DE MÁQUINA (solo admin) ===== */}
       {paso==='contadores' && (
         <div>
-          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
             <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Edita los contadores GEN y tokens de cada máquina (úsalo solo cuando se quema/cambia una máquina y el contador se reinicia). Esto define el "anterior" del próximo ciclo.</span>
           </div>
           <div className="toolbar">

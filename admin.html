@@ -631,6 +631,15 @@ const db = {
     if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
   },
+  async deleteLiquidacion(id){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('recaudo_liquidaciones').delete().eq('id',id); if(error) throw error;
+  },
+  async borrarPendientesSede(sede){
+    if(DEMO_MODE) return;
+    let q=sb.from('recaudo_liquidaciones').delete().eq('estado','pendiente'); if(sede) q=q.eq('sede',sede);
+    const {error}=await q; if(error) throw error;
+  },
   async recMaquinas(sede){
     if(DEMO_MODE) return [];
     const {data,error}=await sb.from('recaudo_maquinas').select('*').eq('sede',sede).order('nombre'); if(error) return []; return data||[];
@@ -2934,6 +2943,14 @@ function Recaudo({showToast, quien, rol}){
     setContMaqs(nombres.map(nm=>{ const r=byName[nm]||{}; return {id:r.id||null, sede:s, nombre:nm, gen_actual:String(Number(r.gen_actual)||0), gen_token_actual:String(Number(r.gen_token_actual)||0)}; }));
   };
   const abrirContadores=()=>{ const s=contSede || (sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre || ""; setContSede(s); setPaso('contadores'); if(s) cargarContadores(s); };
+
+  // ---- Liquidaciones pendientes (ver/borrar, SOLO admin) ----
+  const [pendList,setPendList]=useState(null);
+  const [pendSede,setPendSede]=useState("");
+  const cargarPendientes=async(s)=>{ setPendList(null); setPendList(await db.recLiqPendientes(s||undefined)); };
+  const abrirPendientes=()=>{ setPendSede(""); setPaso('pendientes'); cargarPendientes(""); };
+  const borrarPend=async(l)=>{ if(!confirm("¿Borrar la liquidación pendiente de "+l.operador+" ("+(l.num_recibo||"s/recibo")+", "+fmt(l.valor)+")?")) return; try{ await db.deleteLiquidacion(l.id); cargarPendientes(pendSede); showToast("Liquidación borrada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const borrarTodasPend=async()=>{ if(!pendSede){ showToast("Elige una sede para borrar en bloque","err"); return; } const n=(pendList||[]).length; if(!confirm("⚠ Vas a BORRAR las "+n+" liquidaciones pendientes de "+pendSede+". Esto no se puede deshacer. ¿Continuar?")) return; try{ await db.borrarPendientesSede(pendSede); cargarPendientes(pendSede); showToast("Pendientes de "+pendSede+" borradas","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
   const setCont=(i,patch)=>setContMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
   const guardarContadores=async()=>{
     setBusy(true);
@@ -2951,9 +2968,10 @@ function Recaudo({showToast, quien, rol}){
     <div>
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
-        {rol==='admin' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
-        {paso!=='historial' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
-        {(paso==='historial'||paso==='contadores') && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
+        {rol==='admin' && paso!=='pendientes' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
+        {rol==='admin' && paso!=='contadores' && paso!=='pendientes' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
+        {paso!=='historial' && paso!=='contadores' && paso!=='pendientes' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
+        {(paso==='historial'||paso==='contadores'||paso==='pendientes') && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
       </div>
 
       {/* INICIO */}
@@ -3171,6 +3189,44 @@ function Recaudo({showToast, quien, rol}){
       </div>)}
 
       {/* HISTORIAL */}
+      {/* ===== LIQUIDACIONES PENDIENTES (ver/borrar, solo admin) ===== */}
+      {paso==='pendientes' && (
+        <div>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+            <b style={{color:"var(--amber)"}}>📥 Liquidaciones pendientes por importar.</b> <span className="muted">Aquí puedes borrar las que ya no vas a usar (ej. quedaron de días que no se cerró completo) para que no se acumulen.</span>
+          </div>
+          <div className="toolbar">
+            <select className="select" style={{maxWidth:240,margin:0}} value={pendSede} onChange={e=>{setPendSede(e.target.value);cargarPendientes(e.target.value);}}>
+              <option value="">🏬 Todas las sedes</option>
+              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+            {pendSede && (pendList||[]).length>0 && <button className="btn btn-danger btn-sm" style={{marginLeft:"auto"}} onClick={borrarTodasPend}>🗑 Borrar todas las de {pendSede} ({(pendList||[]).length})</button>}
+          </div>
+          {pendList===null ? <div className="empty">Cargando…</div> : (
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Fecha</th><th>Sede</th><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th>Origen</th><th></th></tr></thead>
+                <tbody>
+                  {pendList.length===0 && <tr><td colSpan="7"><div className="empty">No hay liquidaciones pendientes{pendSede?(" en "+pendSede):""}.</div></td></tr>}
+                  {pendList.map(l=>(
+                    <tr key={l.id}>
+                      <td className="muted" style={{whiteSpace:"nowrap"}}>{l.fecha||fLocalDia(l.created_at)}</td>
+                      <td>{l.sede}</td>
+                      <td className="row-name">{l.operador}</td>
+                      <td className="muted">{l.num_recibo||"—"}</td>
+                      <td className="num">{fmt(l.valor)}</td>
+                      <td className="muted">{l.origen}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={()=>borrarPend(l)}>✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {pendList && pendList.length>0 && <div className="muted" style={{marginTop:8}}>{pendList.length} pendiente(s){pendSede?(" en "+pendSede):" en total"}.</div>}
+        </div>
+      )}
+
       {/* ===== CONTADORES DE MÁQUINA (solo admin) ===== */}
       {paso==='contadores' && (
         <div>

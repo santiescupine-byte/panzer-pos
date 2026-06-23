@@ -155,6 +155,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <!-- Catálogo real (semilla del modo demo) -->
   <script src="catalogo_demo.js"></script>
 
@@ -674,6 +675,41 @@ const db = {
       sb.from('recaudo_gastos').select('*').eq('ciclo_id',id),
     ]);
     return {liquidaciones:liq.data||[], maquinas:maq.data||[], gastos:gas.data||[]};
+  },
+  // ---- RECAUDO DE FRANQUICIAS ----
+  async frMaquinas(sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('franquicia_maquinas').select('*').eq('sede',sede).order('orden').order('nombre');
+    if(error) return []; return data||[];
+  },
+  async frGuardarMaquina(m){
+    if(DEMO_MODE) return;
+    const row={sede:m.sede, nombre:m.nombre, es_lavadora:m.es_lavadora!==false, contador:Number(m.contador)||0, orden:Number(m.orden)||0, updated_at:new Date().toISOString()};
+    if(m.id){ const {error}=await sb.from('franquicia_maquinas').update(row).eq('id',m.id); if(error) throw error; }
+    else { const {error}=await sb.from('franquicia_maquinas').upsert(row,{onConflict:'sede,nombre'}); if(error) throw error; }
+  },
+  async frBorrarMaquina(id){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('franquicia_maquinas').delete().eq('id',id); if(error) throw error;
+  },
+  async frGuardarConfig(sede, patch){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('sedes').update(patch).eq('nombre',sede); if(error) throw error;
+  },
+  async frLiquidaciones(sede){
+    if(DEMO_MODE) return [];
+    let q=sb.from('franquicia_liquidaciones').select('*').order('anio',{ascending:false}).order('mes',{ascending:false}).limit(300);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async frCerrarMes(p){
+    if(DEMO_MODE) return;
+    // upsert la liquidación del mes (sede+anio+mes únicos → si re-cierran, se reemplaza)
+    const {error:e1}=await sb.from('franquicia_liquidaciones').upsert(p.liq,{onConflict:'sede,anio,mes'}); if(e1) throw e1;
+    // mover el contador de cada máquina a su "valor actual" (será el "anterior" del próximo mes)
+    for(const m of (p.maquinas||[])){ await this.frGuardarMaquina({id:m.id, sede:p.liq.sede, nombre:m.nombre, es_lavadora:m.es_lavadora, contador:m.actual, orden:m.orden}); }
+    // actualizar amortización acumulada de la sede
+    const {error:e3}=await sb.from('sedes').update({fr_amort_acumulado:Number(p.liq.amort_acumulado)||0}).eq('nombre',p.liq.sede); if(e3) throw e3;
   },
   // ---- EMPLEADOS ----
   async listEmpleados(){
@@ -2959,6 +2995,138 @@ function Recaudo({showToast, quien, rol}){
     finally{ setBusy(false); }
   };
 
+  // ============================================================
+  //  RECAUDO DE FRANQUICIAS (formato mensual "ASI VA TU PANZER")
+  // ============================================================
+  const esFranquicia = !!sedeObj.es_franquicia;
+  const MESES=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+  const hoy=new Date();
+  const [frMes,setFrMes]=useState(hoy.getMonth()+1);
+  const [frAnio,setFrAnio]=useState(hoy.getFullYear());
+  const [frMaqs,setFrMaqs]=useState(null);          // [{id,nombre,es_lavadora,anterior,actual,orden}]
+  const [frDevol,setFrDevol]=useState("");
+  const [frProds,setFrProds]=useState([]);          // [{concepto,cantidad,valor_unitario}]
+  const [frNotas,setFrNotas]=useState("");
+  const [frHist,setFrHist]=useState(null);
+
+  const frPctFranq=Number(sedeObj.fr_pct_franquiciado)||0;
+  const frPctPanzer=Number(sedeObj.fr_pct_panzer)||0;
+  const frPctAmort=Number(sedeObj.fr_pct_amortizacion)||0;
+  const frCapacidad=Number(sedeObj.fr_capacidad_maquina)||5000000;
+  const frAmortAcumPrev=Number(sedeObj.fr_amort_acumulado)||0;
+  const frAmortObjetivo=Number(sedeObj.fr_amort_objetivo)||0;
+
+  const iniciarFranquicia=async()=>{
+    if(!sede){ showToast("Elige sede","err"); return; }
+    setBusy(true);
+    try{
+      const m=await db.frMaquinas(sede);
+      setFrMaqs((m||[]).map(x=>({id:x.id, nombre:x.nombre, es_lavadora:x.es_lavadora!==false, anterior:Number(x.contador)||0, actual:"", orden:Number(x.orden)||0})));
+      setFrDevol(""); setFrProds([]); setFrNotas("");
+      setFrMes(hoy.getMonth()+1); setFrAnio(hoy.getFullYear());
+      setPaso('fr');
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // cálculos franquicia
+  const frRows=(frMaqs||[]).map(m=>({...m, dif:Math.max(0,(Number(m.actual)||0)-(Number(m.anterior)||0))}));
+  const frRecaudo=frRows.reduce((a,m)=>a+m.dif,0);
+  const frMaqOcupCfg=Number(sedeObj.fr_maquinas_ocupacion)||0;       // 0 = usar lavadoras reales
+  const frNLavado=frMaqOcupCfg>0?frMaqOcupCfg:frRows.filter(m=>m.es_lavadora).length;
+  const frOcupacion=frNLavado>0?((frRecaudo/frNLavado)/frCapacidad*100):0;
+  const frValFranq=Math.round(frRecaudo*frPctFranq/100);
+  const frValPanzer=Math.round(frRecaudo*frPctPanzer/100);
+  const frValAmort=Math.round(frRecaudo*frPctAmort/100);
+  const frDevolNum=Number(frDevol)||0;
+  const frProductos=frProds.reduce((a,p)=>a+((Number(p.cantidad)||0)*(Number(p.valor_unitario)||0)),0);
+  const frTotalPanzer=frValPanzer-frDevolNum+frProductos;
+  const frTotalFranq=frValFranq;
+  const frAmortAcumNuevo=frAmortAcumPrev+frValAmort;
+  const frAddProd=()=>setFrProds(p=>[...p,{concepto:"",cantidad:1,valor_unitario:""}]);
+  const frSetProd=(i,patch)=>setFrProds(p=>p.map((x,j)=>j===i?{...x,...patch}:x));
+  const frDelProd=(i)=>setFrProds(p=>p.filter((_,j)=>j!==i));
+  const frSetMaq=(i,patch)=>setFrMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
+
+  const frCerrar=async()=>{
+    if(!frMaqs||!frMaqs.length){ showToast("Esta franquicia no tiene máquinas configuradas (usa 🏭 Config)","err"); return; }
+    if(frRows.every(m=>!m.actual)){ showToast("Ingresa el valor actual de las máquinas","err"); return; }
+    if(!confirm("¿Cerrar la liquidación de "+sede+" — "+MESES[frMes-1]+" "+frAnio+"?\nTotal a pagar Panzer: "+fmt(frTotalPanzer)+"\nLos contadores 'actual' pasarán a ser el 'anterior' del próximo mes.")) return;
+    setBusy(true);
+    try{
+      const liq={ sede, anio:frAnio, mes:frMes, recaudo_total:frRecaudo,
+        pct_franquiciado:frPctFranq, pct_panzer:frPctPanzer, pct_amortizacion:frPctAmort,
+        val_franquiciado:frValFranq, val_panzer_bruto:frValPanzer, val_amortizacion:frValAmort,
+        devoluciones:frDevolNum, productos:frProductos,
+        productos_detalle:frProds.filter(p=>p.concepto||p.valor_unitario).map(p=>({concepto:p.concepto,cantidad:Number(p.cantidad)||0,valor_unitario:Number(p.valor_unitario)||0,total:(Number(p.cantidad)||0)*(Number(p.valor_unitario)||0)})),
+        ocupacion:Math.round(frOcupacion), n_maquinas_lavado:frNLavado,
+        total_panzer:frTotalPanzer, total_franquiciado:frTotalFranq,
+        amort_acumulado:frAmortAcumNuevo,
+        maquinas:frRows.map(m=>({nombre:m.nombre,anterior:Number(m.anterior)||0,actual:Number(m.actual)||0,dif:m.dif,es_lavadora:m.es_lavadora})),
+        notas:frNotas, creado_por:quien };
+      await db.frCerrarMes({ liq, maquinas:frRows.map(m=>({id:m.id,nombre:m.nombre,es_lavadora:m.es_lavadora,actual:Number(m.actual)||0,orden:m.orden})) });
+      showToast("Liquidación de franquicia cerrada ✓","ok");
+      setSedes(s=>s.map(x=>x.nombre===sede?{...x,fr_amort_acumulado:frAmortAcumNuevo}:x));
+      await abrirReporte(sede, frAnio, frMes);   // muestra el reporte visual para enviar al franquiciado
+    }catch(e){ showToast("No se pudo cerrar: "+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  const verFrHistorial=async()=>{ setPaso('frhist'); setFrHist(null); setFrHist(await db.frLiquidaciones(sede||undefined)); };
+
+  // ---- Reporte visual al franquiciado (imagen para WhatsApp) ----
+  const [frReporte,setFrReporte]=useState(null);   // {sede,anio,mes,hist:[]}
+  const [frShare,setFrShare]=useState(false);
+  const abrirReporte=async(sedeR,anioR,mesR)=>{
+    const hist=await db.frLiquidaciones(sedeR);
+    setFrReporte({sede:sedeR, anio:anioR, mes:mesR, hist:hist||[]});
+    setPaso('frreporte');
+  };
+  const compartirReporte=async()=>{
+    const node=document.getElementById('fr-reporte-card');
+    if(!node){ showToast("No se encontró el reporte","err"); return; }
+    if(typeof html2canvas==='undefined'){ showToast("Generador de imagen no cargó (revisa internet)","err"); return; }
+    setFrShare(true);
+    try{
+      const canvas=await html2canvas(node,{scale:2, backgroundColor:'#ffffff', useCORS:true});
+      const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+      const fname='Panzer_'+(frReporte.sede||'').replace(/[^a-z0-9]+/gi,'_')+'_'+MESES[(frReporte.mes||1)-1]+'_'+frReporte.anio+'.png';
+      const file=new File([blob],fname,{type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        await navigator.share({files:[file], title:'Así va tu Panzer', text:'Así va tu Panzer — '+frReporte.sede+' · '+MESES[(frReporte.mes||1)-1]+' '+frReporte.anio});
+      } else {
+        const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=fname; a.click(); URL.revokeObjectURL(url);
+        showToast("Imagen descargada — adjúntala en WhatsApp","ok");
+      }
+    }catch(e){ if(e&&e.name!=='AbortError') showToast("No se pudo generar la imagen: "+(e.message||e),"err"); }
+    finally{ setFrShare(false); }
+  };
+
+  // ---- Config de franquicia (máquinas + reparto, SOLO admin) ----
+  const [frCfgSede,setFrCfgSede]=useState("");
+  const [frCfgMaqs,setFrCfgMaqs]=useState(null);
+  const [frCfg,setFrCfg]=useState({});
+  const franquicias=sedes.filter(s=>s.es_franquicia);
+  const cargarFrCfg=async(s)=>{
+    setFrCfgMaqs(null);
+    const so=sedes.find(x=>x.nombre===s)||{};
+    setFrCfg({fr_pct_franquiciado:so.fr_pct_franquiciado??70, fr_pct_panzer:so.fr_pct_panzer??30, fr_pct_amortizacion:so.fr_pct_amortizacion??0, fr_amort_objetivo:so.fr_amort_objetivo??0, fr_amort_acumulado:so.fr_amort_acumulado??0, fr_capacidad_maquina:so.fr_capacidad_maquina??5000000, fr_maquinas_ocupacion:so.fr_maquinas_ocupacion??0});
+    const m=await db.frMaquinas(s);
+    setFrCfgMaqs((m||[]).map(x=>({id:x.id, nombre:x.nombre, es_lavadora:x.es_lavadora!==false, contador:String(Number(x.contador)||0), orden:Number(x.orden)||0})));
+  };
+  const abrirFrConfig=()=>{ const s=frCfgSede||(franquicias[0]||{}).nombre||""; setFrCfgSede(s); setPaso('frmaq'); if(s) cargarFrCfg(s); };
+  const frCfgAddMaq=()=>setFrCfgMaqs(a=>[...(a||[]),{id:null,nombre:"",es_lavadora:true,contador:"0",orden:(a||[]).length}]);
+  const frCfgSetMaq=(i,patch)=>setFrCfgMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
+  const frCfgDelMaq=async(i)=>{ const m=(frCfgMaqs||[])[i]; if(m&&m.id){ if(!confirm("¿Borrar la máquina "+m.nombre+"?")) return; try{ await db.frBorrarMaquina(m.id); }catch(e){ showToast(""+(e.message||e),"err"); return; } } setFrCfgMaqs(a=>a.filter((_,j)=>j!==i)); };
+  const guardarFrConfig=async()=>{
+    setBusy(true);
+    try{
+      const cfgPatch={fr_pct_franquiciado:Number(frCfg.fr_pct_franquiciado)||0, fr_pct_panzer:Number(frCfg.fr_pct_panzer)||0, fr_pct_amortizacion:Number(frCfg.fr_pct_amortizacion)||0, fr_amort_objetivo:Number(frCfg.fr_amort_objetivo)||0, fr_amort_acumulado:Number(frCfg.fr_amort_acumulado)||0, fr_capacidad_maquina:Number(frCfg.fr_capacidad_maquina)||5000000, fr_maquinas_ocupacion:Number(frCfg.fr_maquinas_ocupacion)||0};
+      await db.frGuardarConfig(frCfgSede,cfgPatch);
+      for(const m of (frCfgMaqs||[])){ if(!m.nombre) continue; await db.frGuardarMaquina({id:m.id, sede:frCfgSede, nombre:m.nombre, es_lavadora:m.es_lavadora, contador:m.contador, orden:m.orden}); }
+      setSedes(s=>s.map(x=>x.nombre===frCfgSede?{...x,...cfgPatch}:x));
+      showToast("Config de franquicia guardada ✓","ok"); cargarFrCfg(frCfgSede);
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
   const PASOS=[['liquidaciones','Liquidaciones'],['maquinas','Máquinas'],['conteo','Conteo físico'],['gastos','Gastos'],['reparto','Reparto'],['resumen','Cierre']];
   const idxPaso=PASOS.findIndex(p=>p[0]===paso);
   const irA=(d)=>{ const n=idxPaso+d; if(n>=0&&n<PASOS.length) setPaso(PASOS[n][0]); };
@@ -2966,13 +3134,17 @@ function Recaudo({showToast, quien, rol}){
 
   return (
     <div>
+      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='frhist'||paso==='frmaq'); return (
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
-        {rol==='admin' && paso!=='pendientes' && paso!=='contadores' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
-        {rol==='admin' && paso!=='contadores' && paso!=='pendientes' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
-        {paso!=='historial' && paso!=='contadores' && paso!=='pendientes' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
-        {(paso==='historial'||paso==='contadores'||paso==='pendientes') && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('inicio')}>← Volver</button>}
+        {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
+        {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
+        {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirFrConfig}>🏭 Franquicias</button>}
+        {!sub && paso==='fr' && <button className="btn btn-ghost btn-sm" onClick={verFrHistorial}>📚 Historial</button>}
+        {!sub && paso!=='fr' && <button className="btn btn-ghost btn-sm" onClick={verHistorial}>📚 Historial</button>}
+        {sub && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso(esFranquicia?'fr':'inicio')}>← Volver</button>}
       </div>
+      );})()}
 
       {/* INICIO */}
       {paso==='inicio' && (
@@ -2983,13 +3155,18 @@ function Recaudo({showToast, quien, rol}){
             <option value="">— Elige sede —</option>
             {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
           </select>
-          <label className="label">Tesorero</label>
-          <select className="select" value={tesorero} onChange={e=>setTesorero(e.target.value)}>
-            <option value="">— Elige tesorero —</option>
-            {tesoreros.map(t=><option key={t.id} value={t.nombre}>{t.nombre}</option>)}
-          </select>
-          {sede && <div className="muted" style={{marginBottom:10}}>Base configurada de {sede}: <b>{fmt(baseConfigurada)}</b></div>}
-          <button className="btn btn-amber" style={{width:"100%"}} disabled={busy} onClick={iniciar}>{busy?"Cargando…":"Iniciar ciclo →"}</button>
+          {!esFranquicia && (<div>
+            <label className="label">Tesorero</label>
+            <select className="select" value={tesorero} onChange={e=>setTesorero(e.target.value)}>
+              <option value="">— Elige tesorero —</option>
+              {tesoreros.map(t=><option key={t.id} value={t.nombre}>{t.nombre}</option>)}
+            </select>
+          </div>)}
+          {sede && esFranquicia && <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:10}}><b style={{color:"var(--amber)"}}>🏭 Sede franquicia.</b> <span className="muted">Liquidación mensual: contadores de máquina, reparto {frPctFranq}/{frPctPanzer}{frPctAmort?("/"+frPctAmort):""}, devoluciones y productos.</span></div>}
+          {sede && !esFranquicia && <div className="muted" style={{marginBottom:10}}>Base configurada de {sede}: <b>{fmt(baseConfigurada)}</b></div>}
+          {esFranquicia
+            ? <button className="btn btn-amber" style={{width:"100%"}} disabled={busy||!sede} onClick={iniciarFranquicia}>{busy?"Cargando…":"Abrir liquidación de franquicia →"}</button>
+            : <button className="btn btn-amber" style={{width:"100%"}} disabled={busy} onClick={iniciar}>{busy?"Cargando…":"Iniciar ciclo →"}</button>}
         </div>
       )}
 
@@ -3187,6 +3364,273 @@ function Recaudo({showToast, quien, rol}){
           {idxPaso<PASOS.length-1 && <button className="btn btn-amber btn-sm" style={{marginLeft:"auto"}} onClick={()=>irA(1)}>Siguiente →</button>}
         </div>
       </div>)}
+
+      {/* ===== FRANQUICIA: LIQUIDACIÓN MENSUAL ===== */}
+      {paso==='fr' && (
+        <div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>🏭 <b>{sede}</b> · Liquidación mensual</div>
+            <select className="select" style={{maxWidth:150,margin:0}} value={frMes} onChange={e=>setFrMes(Number(e.target.value))}>
+              {MESES.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+            </select>
+            <input className="input" style={{maxWidth:90,margin:0}} type="number" value={frAnio} onChange={e=>setFrAnio(Number(e.target.value))}/>
+          </div>
+
+          {(!frMaqs||!frMaqs.length) ? (
+            <div className="card"><div className="empty">Esta franquicia no tiene máquinas configuradas.<br/>{rol==='admin' ? <button className="btn btn-amber btn-sm" style={{marginTop:8}} onClick={abrirFrConfig}>🏭 Configurar máquinas</button> : "Pídele al admin que las configure."}</div></div>
+          ) : (<div>
+            {/* Contadores de máquina */}
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Máquina</th><th>Tipo</th><th className="num">Valor anterior</th><th className="num">Valor actual</th><th className="num">Recaudo</th></tr></thead>
+                <tbody>
+                  {frRows.map((m,i)=>(
+                    <tr key={m.nombre}>
+                      <td className="row-name">{m.nombre}</td>
+                      <td>{m.es_lavadora ? <span className="pill">Lavado</span> : <span className="pill pill-off">Otro</span>}</td>
+                      <td className="num muted">{fmt(m.anterior)}</td>
+                      <td className="num"><input className="input" style={{margin:0,textAlign:"right",maxWidth:160}} type="number" value={m.actual} onChange={e=>frSetMaq(i,{actual:e.target.value})}/></td>
+                      <td className="num"><b>{fmt(m.dif)}</b></td>
+                    </tr>
+                  ))}
+                  <tr style={{borderTop:"2px solid var(--bd)"}}><td colSpan="4" style={{fontWeight:800}}>RECAUDO TOTAL DEL MES</td><td className="num" style={{fontWeight:800}}>{fmt(frRecaudo)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:12}}>
+              {/* Ajustes */}
+              <div className="card" style={{flex:"1 1 280px"}}>
+                <div className="card-t">Ajustes</div>
+                <label className="label">Devoluciones (se restan a Panzer)</label>
+                <input className="input" type="number" value={frDevol} onChange={e=>setFrDevol(e.target.value)} placeholder="0"/>
+                <div style={{display:"flex",alignItems:"center",marginTop:10,marginBottom:6}}>
+                  <span className="label" style={{margin:0,marginRight:"auto"}}>Productos / membresías (se suman a Panzer)</span>
+                  <button className="btn btn-ghost btn-sm" onClick={frAddProd}>＋ Agregar</button>
+                </div>
+                {frProds.length===0 && <div className="muted" style={{fontSize:12}}>Sin productos. Agrega los que vendiste en la franquicia este mes.</div>}
+                {frProds.map((p,i)=>(
+                  <div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}>
+                    <input className="input" style={{margin:0,flex:"1 1 90px"}} placeholder="Concepto" value={p.concepto} onChange={e=>frSetProd(i,{concepto:e.target.value})}/>
+                    <input className="input" style={{margin:0,width:54,textAlign:"center"}} type="number" placeholder="cant" value={p.cantidad} onChange={e=>frSetProd(i,{cantidad:e.target.value})}/>
+                    <input className="input" style={{margin:0,width:100,textAlign:"right"}} type="number" placeholder="v.unit" value={p.valor_unitario} onChange={e=>frSetProd(i,{valor_unitario:e.target.value})}/>
+                    <button className="btn btn-danger btn-sm" onClick={()=>frDelProd(i)}>✕</button>
+                  </div>
+                ))}
+                {frProds.length>0 && <div className="muted" style={{textAlign:"right",fontWeight:700}}>Total productos: {fmt(frProductos)}</div>}
+                <label className="label" style={{marginTop:10}}>Notas</label>
+                <input className="input" value={frNotas} onChange={e=>setFrNotas(e.target.value)} placeholder="Opcional"/>
+              </div>
+
+              {/* Resumen / reparto */}
+              <div className="card" style={{flex:"1 1 280px"}}>
+                <div className="card-t">Reparto del mes</div>
+                {[
+                  ['Recaudo total',fmt(frRecaudo)],
+                  ['Franquiciado ('+frPctFranq+'%)',fmt(frValFranq)],
+                  ['Panzer ('+frPctPanzer+'%)',fmt(frValPanzer)],
+                ].concat(frPctAmort?[['Amortización ('+frPctAmort+'%)',fmt(frValAmort)]]:[]).concat([
+                  ['– Devoluciones','-'+fmt(frDevolNum)],
+                  ['+ Productos','+'+fmt(frProductos)],
+                ]).map(([l,v])=>(
+                  <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid var(--bd)"}}><span className="muted">{l}</span><b>{v}</b></div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontSize:18}}><span style={{fontWeight:800}}>TOTAL A PAGAR PANZER</span><b style={{color:"var(--green)"}}>{fmt(frTotalPanzer)}</b></div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span className="muted">Total franquiciado</span><b>{fmt(frTotalFranq)}</b></div>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span className="muted">% Ocupación ({frNLavado} máq.{frMaqOcupCfg>0?" config":" lavado"})</span><b style={{color:frOcupacion>=100?"var(--green)":(frOcupacion>=40?"var(--amber)":"var(--red)")}}>{Math.round(frOcupacion)}%</b></div>
+                {frPctAmort>0 && <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span className="muted">Amortización acumulada</span><b>{fmt(frAmortAcumNuevo)}{frAmortObjetivo?(" / "+fmt(frAmortObjetivo)):""}</b></div>}
+                <button className="btn btn-amber" style={{width:"100%",marginTop:14}} disabled={busy} onClick={frCerrar}>{busy?"Cerrando…":"✅ Cerrar liquidación del mes"}</button>
+              </div>
+            </div>
+          </div>)}
+          <div className="toolbar" style={{marginTop:14}}>
+            <button className="btn btn-ghost btn-sm" onClick={()=>{setPaso('inicio');setSede("");}}>← Volver</button>
+          </div>
+        </div>
+      )}
+
+      {/* ===== FRANQUICIA: HISTORIAL MENSUAL ===== */}
+      {paso==='frhist' && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Mes</th><th>Sede</th><th className="num">Recaudo</th><th className="num">Ocupación</th><th className="num">Total Panzer</th><th className="num">Franquiciado</th><th></th></tr></thead>
+            <tbody>
+              {frHist===null && <tr><td colSpan="7"><div className="empty">Cargando…</div></td></tr>}
+              {frHist&&frHist.length===0 && <tr><td colSpan="7"><div className="empty">Sin liquidaciones de franquicia todavía.</div></td></tr>}
+              {(frHist||[]).map(h=>(
+                <tr key={h.id}>
+                  <td className="muted">{MESES[(h.mes||1)-1]} {h.anio}</td>
+                  <td className="row-name">{h.sede}</td>
+                  <td className="num">{fmt(h.recaudo_total)}</td>
+                  <td className="num">{Math.round(Number(h.ocupacion)||0)}%</td>
+                  <td className="num" style={{color:"var(--green)"}}>{fmt(h.total_panzer)}</td>
+                  <td className="num">{fmt(h.total_franquiciado)}</td>
+                  <td><button className="btn btn-ghost btn-sm" onClick={()=>abrirReporte(h.sede,h.anio,h.mes)}>📊 Reporte</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ===== FRANQUICIA: REPORTE VISUAL AL FRANQUICIADO ===== */}
+      {paso==='frreporte' && frReporte && (()=>{
+        const rep=frReporte;
+        const byM={}; (rep.hist||[]).filter(h=>h.anio===rep.anio).forEach(h=>byM[h.mes]=h);
+        const cur=byM[rep.mes]||{};
+        const upTo=Math.max(rep.mes, ...(rep.hist||[]).filter(h=>h.anio===rep.anio).map(h=>h.mes), 1);
+        const months=Array.from({length:upTo},(_,i)=>i+1);
+        const recSerie=months.map(m=>Number((byM[m]||{}).recaudo_total)||0);
+        const ocuSerie=months.map(m=>Number((byM[m]||{}).ocupacion)||0);
+        const kfmt=v=> v>=1000000 ? (v/1000000).toFixed(1).replace(/\.0$/,'')+'M' : (v>=1000 ? Math.round(v/1000)+'k' : ''+Math.round(v));
+        const maqs=(cur.maquinas||[]);
+        // dims gráficas
+        const W=660,H=190,pad=30,n=months.length||1;
+        const maxR=Math.max(...recSerie,1), bw=(W-pad*2)/n;
+        const maxO=Math.max(100,...ocuSerie);
+        const cx=i=> pad + bw*i + bw/2;
+        const ly=v=> (H-pad) - (v/maxO)*(H-pad-22);
+        const C={amber:'#f59e0b',amberD:'#b45309',dark:'#111827',muted:'#6b7280',green:'#16a34a',bd:'#e5e7eb',bg:'#ffffff',soft:'#fff7ed'};
+        const lbl=m=>MESES[m-1].slice(0,3);
+        return (
+        <div>
+          <div className="muted" style={{marginBottom:10}}>Reporte para el franquiciado · <b>{rep.sede}</b></div>
+          {/* TARJETA QUE SE CONVIERTE EN IMAGEN */}
+          <div id="fr-reporte-card" style={{width:680,maxWidth:"100%",background:C.bg,color:C.dark,borderRadius:16,overflow:"hidden",border:"1px solid "+C.bd,fontFamily:"inherit"}}>
+            {/* Banner */}
+            <div style={{background:"linear-gradient(135deg,#111827,#1f2937)",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <div style={{fontSize:22,fontWeight:900,letterSpacing:1,color:C.amber}}>ASÍ VA TU PANZER</div>
+                <div style={{fontSize:14,opacity:.85,marginTop:2}}>{rep.sede}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:18,fontWeight:800}}>{MESES[rep.mes-1]}</div>
+                <div style={{fontSize:13,opacity:.8}}>{rep.anio}</div>
+              </div>
+            </div>
+            {/* KPIs */}
+            <div style={{display:"flex",gap:10,padding:"16px 18px"}}>
+              {[['Recaudo del mes',fmt(cur.recaudo_total||0),C.dark],['Lo que recibes',fmt(cur.total_franquiciado||0),C.green],['Ocupación',Math.round(cur.ocupacion||0)+'%',C.amberD]].map(([l,v,col])=>(
+                <div key={l} style={{flex:1,background:C.soft,border:"1px solid "+C.bd,borderRadius:12,padding:"12px 14px"}}>
+                  <div style={{fontSize:12,color:C.muted,fontWeight:600}}>{l}</div>
+                  <div style={{fontSize:20,fontWeight:900,color:col,marginTop:4}}>{v}</div>
+                </div>
+              ))}
+            </div>
+            {/* Gráfica recaudo mensual */}
+            <div style={{padding:"4px 18px 8px"}}>
+              <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Recaudo mensual {rep.anio}</div>
+              <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}>
+                {recSerie.map((v,i)=>{ const bh=(v/maxR)*(H-pad-22); const x=pad+bw*i+bw*0.18, y=(H-pad)-bh, w=bw*0.64;
+                  return (<g key={i}>
+                    <rect x={x} y={y} width={w} height={Math.max(0,bh)} rx={3} fill={i===rep.mes-1?C.amber:"#fcd9a3"}/>
+                    {v>0 && <text x={x+w/2} y={y-4} textAnchor="middle" fontSize="10" fontWeight="700" fill={C.dark}>{kfmt(v)}</text>}
+                    <text x={x+w/2} y={H-pad+14} textAnchor="middle" fontSize="10" fill={C.muted}>{lbl(months[i])}</text>
+                  </g>); })}
+                <line x1={pad} y1={H-pad} x2={W-pad} y2={H-pad} stroke={C.bd}/>
+              </svg>
+            </div>
+            {/* Gráfica ocupación */}
+            <div style={{padding:"4px 18px 16px"}}>
+              <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Evolución de ocupación</div>
+              <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}>
+                <line x1={pad} y1={ly(100)} x2={W-pad} y2={ly(100)} stroke={C.bd} strokeDasharray="4 4"/>
+                <text x={W-pad} y={ly(100)-4} textAnchor="end" fontSize="9" fill={C.muted}>100%</text>
+                {n>1 && <polyline points={ocuSerie.map((v,i)=>cx(i)+','+ly(v)).join(' ')} fill="none" stroke={C.amber} strokeWidth="2.5"/>}
+                {ocuSerie.map((v,i)=>(<g key={i}>
+                  <circle cx={cx(i)} cy={ly(v)} r={i===rep.mes-1?5:3.5} fill={C.amberD}/>
+                  <text x={cx(i)} y={ly(v)-9} textAnchor="middle" fontSize="10" fontWeight="700" fill={C.amberD}>{Math.round(v)}%</text>
+                  <text x={cx(i)} y={H-pad+14} textAnchor="middle" fontSize="10" fill={C.muted}>{lbl(months[i])}</text>
+                </g>))}
+                <line x1={pad} y1={H-pad} x2={W-pad} y2={H-pad} stroke={C.bd}/>
+              </svg>
+            </div>
+            {/* Detalle por máquina */}
+            {maqs.length>0 && (
+              <div style={{padding:"0 18px 18px"}}>
+                <div style={{fontSize:14,fontWeight:800,marginBottom:6}}>Recaudo por máquina · {MESES[rep.mes-1]}</div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                  <thead><tr style={{color:C.muted,textAlign:"left"}}><th style={{padding:"4px 0",fontWeight:600}}>Máquina</th><th style={{padding:"4px 0",fontWeight:600,textAlign:"right"}}>Recaudo</th></tr></thead>
+                  <tbody>
+                    {maqs.map((m,i)=>(<tr key={i} style={{borderTop:"1px solid "+C.bd}}>
+                      <td style={{padding:"5px 0"}}>{m.nombre}{m.es_lavadora===false?" (otro)":""}</td>
+                      <td style={{padding:"5px 0",textAlign:"right",fontWeight:700}}>{fmt(m.dif||0)}</td>
+                    </tr>))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{background:C.dark,color:"#9ca3af",fontSize:11,padding:"8px 18px",textAlign:"center"}}>Panzer Carwash · Reporte generado {new Date().toLocaleDateString('es-CO')}</div>
+          </div>
+          {/* Acciones (no entran en la imagen) */}
+          <div className="toolbar" style={{marginTop:14}}>
+            <button className="btn btn-amber" disabled={frShare} onClick={compartirReporte}>{frShare?"Generando…":"📲 Compartir imagen"}</button>
+            <button className="btn btn-ghost" onClick={()=>{ setFrReporte(null); setPaso(esFranquicia?'fr':'frhist'); }}>← Volver</button>
+            <button className="btn btn-ghost" style={{marginLeft:"auto"}} onClick={()=>{ setFrReporte(null); setSede(""); setPaso('inicio'); }}>Terminar</button>
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* ===== FRANQUICIA: CONFIG (máquinas + reparto, solo admin) ===== */}
+      {paso==='frmaq' && (
+        <div>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",marginBottom:12}}>
+            <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Configura máquinas, el reparto % y la amortización de cada franquicia. El "contador" es el último valor leído (= valor anterior del próximo mes); aquí lo siembras la primera vez.</span>
+          </div>
+          <div className="toolbar">
+            <select className="select" style={{maxWidth:240,margin:0}} value={frCfgSede} onChange={e=>{setFrCfgSede(e.target.value);cargarFrCfg(e.target.value);}}>
+              {franquicias.length===0 && <option value="">— No hay franquicias —</option>}
+              {franquicias.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+          </div>
+          {frCfgSede && (<div>
+            {/* Reparto / config */}
+            <div className="card">
+              <div className="card-t">Reparto y amortización</div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <div style={{flex:"1 1 110px"}}><label className="label">% Franquiciado</label><input className="input" type="number" value={frCfg.fr_pct_franquiciado} onChange={e=>setFrCfg(c=>({...c,fr_pct_franquiciado:e.target.value}))}/></div>
+                <div style={{flex:"1 1 110px"}}><label className="label">% Panzer</label><input className="input" type="number" value={frCfg.fr_pct_panzer} onChange={e=>setFrCfg(c=>({...c,fr_pct_panzer:e.target.value}))}/></div>
+                <div style={{flex:"1 1 110px"}}><label className="label">% Amortización</label><input className="input" type="number" value={frCfg.fr_pct_amortizacion} onChange={e=>setFrCfg(c=>({...c,fr_pct_amortizacion:e.target.value}))}/></div>
+              </div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <div style={{flex:"1 1 140px"}}><label className="label">Capacidad/máquina ($)</label><input className="input" type="number" value={frCfg.fr_capacidad_maquina} onChange={e=>setFrCfg(c=>({...c,fr_capacidad_maquina:e.target.value}))}/></div>
+                <div style={{flex:"1 1 140px"}}><label className="label">Objetivo amortización</label><input className="input" type="number" value={frCfg.fr_amort_objetivo} onChange={e=>setFrCfg(c=>({...c,fr_amort_objetivo:e.target.value}))}/></div>
+                <div style={{flex:"1 1 140px"}}><label className="label">Amortización acumulada</label><input className="input" type="number" value={frCfg.fr_amort_acumulado} onChange={e=>setFrCfg(c=>({...c,fr_amort_acumulado:e.target.value}))}/></div>
+              </div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <div style={{flex:"1 1 220px"}}><label className="label"># Máquinas para % ocupación</label><input className="input" type="number" value={frCfg.fr_maquinas_ocupacion} onChange={e=>setFrCfg(c=>({...c,fr_maquinas_ocupacion:e.target.value}))}/><div className="muted" style={{fontSize:12,marginTop:-4}}>0 = usar las lavadoras registradas. Ponlo manual si el divisor de ocupación es distinto (ej. máquinas planeadas).</div></div>
+              </div>
+              {(Number(frCfg.fr_pct_franquiciado)||0)+(Number(frCfg.fr_pct_panzer)||0)+(Number(frCfg.fr_pct_amortizacion)||0)!==100 && <div className="muted" style={{color:"var(--amber)",marginTop:6}}>⚠ Los porcentajes suman {(Number(frCfg.fr_pct_franquiciado)||0)+(Number(frCfg.fr_pct_panzer)||0)+(Number(frCfg.fr_pct_amortizacion)||0)}% (deberían sumar 100).</div>}
+            </div>
+            {/* Máquinas */}
+            <div className="card" style={{marginTop:12}}>
+              <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>Máquinas</div><button className="btn btn-ghost btn-sm" onClick={frCfgAddMaq}>＋ Máquina</button></div>
+              {frCfgMaqs===null ? <div className="empty">Cargando…</div> : (
+                <div style={{overflowX:"auto"}}>
+                  <table className="tbl">
+                    <thead><tr><th>Nombre</th><th>Cuenta para ocupación</th><th className="num">Contador (valor anterior)</th><th></th></tr></thead>
+                    <tbody>
+                      {frCfgMaqs.length===0 && <tr><td colSpan="4"><div className="empty">Sin máquinas. Agrega Máquina 1, Aspiradora, etc.</div></td></tr>}
+                      {frCfgMaqs.map((m,i)=>(
+                        <tr key={i}>
+                          <td><input className="input" style={{margin:0,minWidth:120}} value={m.nombre} onChange={e=>frCfgSetMaq(i,{nombre:e.target.value})} placeholder="Máquina 1"/></td>
+                          <td><label className="check" style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={m.es_lavadora} onChange={e=>frCfgSetMaq(i,{es_lavadora:e.target.checked})}/><span className="muted">{m.es_lavadora?"Sí (lavado)":"No (aspiradora/canillita)"}</span></label></td>
+                          <td className="num"><input className="input" style={{margin:0,textAlign:"right",maxWidth:160}} type="number" value={m.contador} onChange={e=>frCfgSetMaq(i,{contador:e.target.value})}/></td>
+                          <td><button className="btn btn-danger btn-sm" onClick={()=>frCfgDelMaq(i)}>✕</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <div className="toolbar" style={{marginTop:12}}>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarFrConfig}>{busy?"Guardando…":"💾 Guardar configuración"}</button>
+            </div>
+          </div>)}
+        </div>
+      )}
 
       {/* HISTORIAL */}
       {/* ===== LIQUIDACIONES PENDIENTES (ver/borrar, solo admin) ===== */}

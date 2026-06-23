@@ -3548,14 +3548,20 @@ function Recaudo({showToast, quien, rol}){
             {/* Detalle por máquina */}
             {maqs.length>0 && (
               <div style={{padding:"0 18px 18px"}}>
-                <div style={{fontSize:14,fontWeight:800,marginBottom:6}}>Recaudo por máquina · {MESES[rep.mes-1]}</div>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                  <thead><tr style={{color:C.muted,textAlign:"left"}}><th style={{padding:"4px 0",fontWeight:600}}>Máquina</th><th style={{padding:"4px 0",fontWeight:600,textAlign:"right"}}>Recaudo</th></tr></thead>
+                <div style={{fontSize:14,fontWeight:800,marginBottom:6}}>Detalle por máquina · {MESES[rep.mes-1]}</div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12.5}}>
+                  <thead><tr style={{color:C.muted,textAlign:"left"}}><th style={{padding:"4px 0",fontWeight:600}}>Máquina</th><th style={{padding:"4px 0",fontWeight:600,textAlign:"right"}}>Contador anterior</th><th style={{padding:"4px 0",fontWeight:600,textAlign:"right"}}>Contador actual</th><th style={{padding:"4px 0",fontWeight:600,textAlign:"right"}}>Recaudo</th></tr></thead>
                   <tbody>
                     {maqs.map((m,i)=>(<tr key={i} style={{borderTop:"1px solid "+C.bd}}>
                       <td style={{padding:"5px 0"}}>{m.nombre}{m.es_lavadora===false?" (otro)":""}</td>
+                      <td style={{padding:"5px 0",textAlign:"right",color:C.muted}}>{fmt(m.anterior||0)}</td>
+                      <td style={{padding:"5px 0",textAlign:"right"}}>{fmt(m.actual||0)}</td>
                       <td style={{padding:"5px 0",textAlign:"right",fontWeight:700}}>{fmt(m.dif||0)}</td>
                     </tr>))}
+                    <tr style={{borderTop:"2px solid "+C.bd}}>
+                      <td style={{padding:"6px 0",fontWeight:800}} colSpan="3">RECAUDO TOTAL</td>
+                      <td style={{padding:"6px 0",textAlign:"right",fontWeight:800,color:C.amberD}}>{fmt(maqs.reduce((a,m)=>a+(Number(m.dif)||0),0))}</td>
+                    </tr>
                   </tbody>
                 </table>
               </div>

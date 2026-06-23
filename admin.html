@@ -843,11 +843,15 @@ const db = {
         ideal:Number(DEMO_IDEAL[sede+'|'+p.id])||0,
       })).sort((a,b)=>a.nombre.localeCompare(b.nombre));
     }
-    const {data:prods,error}=await sb.from('productos').select('id,nombre,categoria,controla_stock').eq('controla_stock',true).eq('activo',true);
+    const {data:prods,error}=await sb.from('productos').select('id,nombre,categoria,controla_stock,fabricable,vende_pos').eq('controla_stock',true).eq('activo',true);
     if(error) throw error;
+    const {data:sedeRow}=await sb.from('sedes').select('es_bodega').eq('nombre',sede).maybeSingle();
+    const esBodega=!!(sedeRow&&sedeRow.es_bodega);
     const {data:inv}=await sb.from('inventario').select('producto_id,cantidad,stock_minimo,stock_ideal').eq('sede',sede);
     const m={}; (inv||[]).forEach(i=>m[i.producto_id]=i);
-    return prods.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0,ideal:Number(m[p.id]?.stock_ideal)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+    // Productos de solo producción (fabricable + no se vende en POS) solo viven en la bodega.
+    const list = esBodega ? prods : prods.filter(p=>!(p.fabricable && p.vende_pos===false));
+    return list.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0,ideal:Number(m[p.id]?.stock_ideal)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
   },
   // Inventario VALORIZADO = Σ(costo × stock) de insumos, producto terminado y repuestos.
   async valorizado(sede){

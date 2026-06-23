@@ -849,6 +849,24 @@ const db = {
     const m={}; (inv||[]).forEach(i=>m[i.producto_id]=i);
     return prods.map(p=>({id:p.id,nombre:p.nombre,categoria:p.categoria,stock:Number(m[p.id]?.cantidad)||0,minimo:Number(m[p.id]?.stock_minimo)||0,ideal:Number(m[p.id]?.stock_ideal)||0})).sort((a,b)=>a.nombre.localeCompare(b.nombre));
   },
+  // Inventario VALORIZADO = Σ(costo × stock) de insumos, producto terminado y repuestos.
+  async valorizado(sede){
+    if(DEMO_MODE) return {insumos:[],productos:[],repuestos:[]};
+    const [insR,repR,prodR]=await Promise.all([
+      sb.from('insumos').select('nombre,unidad,costo,stock').eq('activo',true),
+      sb.from('repuestos').select('nombre,categoria,unidad,costo,stock').eq('activo',true),
+      sb.from('productos').select('id,nombre,categoria,costo').eq('controla_stock',true).eq('activo',true),
+    ]);
+    let invQ=sb.from('inventario').select('producto_id,sede,cantidad').limit(20000);
+    if(sede) invQ=invQ.eq('sede',sede);
+    const {data:inv}=await invQ;
+    const byProd={}; (inv||[]).forEach(i=>{ byProd[i.producto_id]=(byProd[i.producto_id]||0)+(Number(i.cantidad)||0); });
+    const mk=(nombre,extra,costo,stock)=>({nombre, ...extra, costo:Number(costo)||0, stock:Number(stock)||0, valor:(Number(costo)||0)*(Number(stock)||0)});
+    const insumos=(insR.data||[]).map(i=>mk(i.nombre,{unidad:i.unidad},i.costo,i.stock));
+    const repuestos=(repR.data||[]).map(r=>mk(r.nombre,{categoria:r.categoria,unidad:r.unidad},r.costo,r.stock));
+    const productos=(prodR.data||[]).map(p=>mk(p.nombre,{categoria:p.categoria},p.costo,byProd[p.id]||0));
+    return {insumos,productos,repuestos};
+  },
   async setMinimo(producto_id, sede, minimo){
     if(DEMO_MODE){ DEMO_MIN[sede+'|'+producto_id]=minimo; return; }
     const {error}=await sb.from('inventario').upsert({producto_id,sede,stock_minimo:minimo},{onConflict:'producto_id,sede'}); if(error) throw error;
@@ -1631,8 +1649,14 @@ function Inventario({showToast, admin}){
   const [verTransitos,setVerTransitos]=useState(false);
   const [transitos,setTransitos]=useState([]);
   const [traza,setTraza]=useState(null);   // producto cuyo historial se ve
+  const [verValor,setVerValor]=useState(false);   // vista de inventario valorizado
+  const [valorData,setValorData]=useState(null);
+  const [valorSede,setValorSede]=useState("");     // "" = todas las sedes (producto terminado)
+  const [valorOpen,setValorOpen]=useState({insumos:false,productos:false,repuestos:false});
 
   useEffect(()=>{ db.listSedes().then(s=>{ setSedes(s); const def=s.find(x=>!x.es_bodega)||s[0]; if(def) setSede(def.nombre); }).catch(()=>{}); db.listCategorias().then(setCats).catch(()=>{}); },[]);
+  const cargarValor=async(s)=>{ setValorData(null); try{ setValorData(await db.valorizado(s||undefined)); }catch(e){ showToast(""+(e.message||e),"err"); setValorData({insumos:[],productos:[],repuestos:[]}); } };
+  const abrirValor=()=>{ setVerValor(true); cargarValor(valorSede); };
   const cargarTransitos=()=>{ db.listTransferencias({estado:'en_transito'}).then(setTransitos).catch(()=>setTransitos([])); };
   useEffect(()=>{ cargarTransitos(); },[]);
   const cargar=async()=>{ if(!sede) return; setInv(null); try{ setInv(await db.getInventario(sede)); }catch(e){ showToast(""+(e.message||e),"err"); setInv([]); } };
@@ -1692,6 +1716,79 @@ function Inventario({showToast, admin}){
     }catch(e){ showToast(""+(e.message||e),"err"); }
   };
 
+  if(verValor){
+    const d=valorData;
+    const tot=arr=>(arr||[]).reduce((a,x)=>a+(Number(x.valor)||0),0);
+    const totIns=tot(d&&d.insumos), totProd=tot(d&&d.productos), totRep=tot(d&&d.repuestos);
+    const gran=totIns+totProd+totRep;
+    const sinCosto=arr=>(arr||[]).filter(x=>!x.costo).length;
+    const Seccion=(key,titulo,emoji,arr,total,extra)=>{
+      const list=[...(arr||[])].sort((a,b)=>(Number(b.valor)||0)-(Number(a.valor)||0));
+      const sc=sinCosto(arr); const open=valorOpen[key];
+      return (
+        <div className="card" style={{marginBottom:12}}>
+          <div className="toolbar" style={{cursor:"pointer"}} onClick={()=>setValorOpen(o=>({...o,[key]:!o[key]}))}>
+            <div className="sec-title" style={{marginRight:"auto"}}>{emoji} {titulo} <span className="muted">({list.length})</span></div>
+            {sc>0 && <span className="pill pill-off" title="sin costo cargado" style={{marginRight:8}}>{sc} sin costo</span>}
+            <b style={{fontSize:16,marginRight:8}}>{fmt(total)}</b>
+            <span className="muted">{open?"▲":"▼"}</span>
+          </div>
+          {open && (
+            <div style={{overflowX:"auto",marginTop:8}}>
+              <table className="tbl">
+                <thead><tr><th>Ítem</th>{extra&&<th>{extra}</th>}<th className="num">Costo unit.</th><th className="num">Stock</th><th className="num">Valor</th></tr></thead>
+                <tbody>
+                  {list.length===0 && <tr><td colSpan={extra?5:4}><div className="empty">Sin ítems.</div></td></tr>}
+                  {list.map((x,i)=>(
+                    <tr key={i}>
+                      <td className="row-name">{x.nombre}</td>
+                      {extra && <td className="muted">{x[extra==='Categoría'?'categoria':'unidad']||"—"}</td>}
+                      <td className="num" style={{color:x.costo?"var(--tb)":"var(--red)"}}>{x.costo?fmt(x.costo):"sin costo"}</td>
+                      <td className="num" style={{color:Number(x.stock)<0?"var(--red)":"var(--tb)"}}>{Number(x.stock)}</td>
+                      <td className="num"><b>{fmt(x.valor)}</b></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
+    };
+    return (
+      <div>
+        <div className="filterbar">
+          <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={()=>setVerValor(false)}>← Volver al stock</button>
+          <div className="fld">
+            <label className="label">Sede (producto terminado)</label>
+            <select className="select" value={valorSede} onChange={e=>{setValorSede(e.target.value);cargarValor(e.target.value);}}>
+              <option value="">🏬 Todas las sedes</option>
+              {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+            </select>
+          </div>
+          <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={()=>cargarValor(valorSede)}>🔄 Actualizar</button>
+        </div>
+        <div className="muted" style={{marginBottom:12}}>Valor = costo × stock real. Insumos y repuestos son centrales (un solo stock); el producto terminado se suma {valorSede?("solo de "+valorSede):"de todas las sedes"}.</div>
+        {d===null ? <div className="empty">Calculando…</div> : (
+          <div>
+            <div className="card" style={{marginBottom:12,background:"var(--amber-d)",border:"1px solid rgba(245,158,11,.3)",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+              <div style={{fontWeight:800,fontSize:16}}>💰 Total inventario valorizado</div>
+              <div style={{fontSize:26,fontWeight:900,color:"var(--amber)"}}>{fmt(gran)}</div>
+            </div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
+              {[["🧪 Insumos",totIns],["📦 Producto terminado",totProd],["🔩 Repuestos",totRep]].map(([l,v])=>(
+                <div key={l} className="card" style={{flex:"1 1 180px"}}><div className="muted">{l}</div><div style={{fontSize:22,fontWeight:800}}>{fmt(v)}</div></div>
+              ))}
+            </div>
+            {Seccion('insumos','Insumos','🧪',d.insumos,totIns,'Unidad')}
+            {Seccion('productos','Producto terminado','📦',d.productos,totProd,'Categoría')}
+            {Seccion('repuestos','Repuestos','🔩',d.repuestos,totRep,'Categoría')}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if(inv===null && sede) return (
     <div>
       <div className="filterbar"><div className="fld"><label className="label">Sede</label><select className="select" value={sede} onChange={e=>setSede(e.target.value)}>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}</select></div></div>
@@ -1722,6 +1819,7 @@ function Inventario({showToast, admin}){
         <label className="check" style={{alignSelf:"center"}}><input type="checkbox" checked={soloBajo} onChange={e=>setSoloBajo(e.target.checked)}/> Solo stock bajo {nBajo>0&&<span className="pill pill-off" style={{marginLeft:4}}>{nBajo}</span>}</label>
         <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={reportePreparacion}>🖨 Reporte de preparación</button>
         <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={()=>{cargarTransitos();setVerTransitos(true);}}>🚚 En tránsito {transitos.length>0&&<span className="pill pill-token" style={{marginLeft:4}}>{transitos.length}</span>}</button>
+        <button className="btn btn-ghost" style={{alignSelf:"flex-end"}} onClick={abrirValor}>💰 Valorizado</button>
         {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Enviar desde {bodega.nombre}</button>}
       </div>
 
@@ -3594,6 +3692,12 @@ function Recaudo({showToast, quien, rol}){
                     </tr>
                   </tbody>
                 </table>
+              </div>
+            )}
+            {maqs.length===0 && (
+              <div style={{padding:"0 18px 18px"}}>
+                <div style={{fontSize:14,fontWeight:800,marginBottom:6}}>Detalle por máquina · {MESES[rep.mes-1]}</div>
+                <div style={{fontSize:12.5,color:C.muted,background:C.soft,border:"1px solid "+C.bd,borderRadius:10,padding:"10px 12px"}}>Detalle de contadores por máquina no disponible para este mes (dato histórico). Los meses liquidados en el sistema incluyen contador anterior y actual de cada máquina.</div>
               </div>
             )}
             <div style={{background:C.dark,color:"#9ca3af",fontSize:11,padding:"8px 18px",textAlign:"center"}}>Panzer Carwash · Reporte generado {new Date().toLocaleDateString('es-CO')}</div>

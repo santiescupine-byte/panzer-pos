@@ -172,7 +172,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const DEMO_MODE = !(SUPABASE_URL && SUPABASE_ANON_KEY);
 const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const fmt = n => "$"+(Number(n)||0).toLocaleString("es-CO");
+const fmt = n => "$"+Math.round(Number(n)||0).toLocaleString("es-CO");
 // Fecha/hora en zona LOCAL (Colombia) a partir de un timestamp UTC de Supabase
 const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
@@ -830,7 +830,7 @@ const db = {
       if(f.tipoPago==='tarjeta') return v.pago_tarjeta>0;
       return true;
     }).map(v=>{
-      const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:(i.productos&&i.productos.categoria)||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:Number((i.productos&&i.productos.costo)||0),iva:false,subtotal:Number(i.subtotal)}));
+      const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:(i.productos&&i.productos.categoria)||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:Number((i.productos&&i.productos.costo)||0),iva:false,subtotal:Number(i.subtotal),descuento_linea:Number(i.descuento)||0}));
       const bruto=items.reduce((s,i)=>s+i.subtotal,0);
       return {id:v.id,recibo:v.numero_recibo||('#'+v.id.slice(0,6)),fecha:v.created_at,sede:v.sede,operador:v.operador,items,bruto,descuento:Math.max(0,bruto-Number(v.total)),total:Number(v.total),pago_efectivo:Number(v.pago_efectivo),pago_qr:Number(v.pago_qr),pago_tarjeta:Number(v.pago_tarjeta)};
     });
@@ -2092,8 +2092,13 @@ function ReporteVista({sub,ventas,showToast,recargar}){
   const [detalle,setDetalle]=useState(null);   // recibo abierto en el panel de detalle
   const [borrando,setBorrando]=useState(false);
   if(!ventas.length) return <div className="empty">No hay ventas en el periodo/filtros seleccionados.</div>;
-  // neto por línea = subtotal ajustado por el descuento del ticket (repartido proporcional al subtotal).
-  const allItems=ventas.flatMap(v=>{ const f=v.bruto>0?(Number(v.total)/v.bruto):1; return v.items.map(i=>({...i,sede:v.sede,operador:v.operador,neto:i.subtotal*f})); });
+  // neto por línea = subtotal − descuento de ESA línea (queda en su categoría),
+  // y luego se reparte SOLO el descuento del ticket completo (proporcional al neto de línea).
+  const allItems=ventas.flatMap(v=>{
+    const subNet=v.items.reduce((s,i)=>s+(i.subtotal-(i.descuento_linea||0)),0);
+    const f=subNet>0?(Number(v.total)/subNet):1;
+    return v.items.map(i=>({...i,sede:v.sede,operador:v.operador,neto:(i.subtotal-(i.descuento_linea||0))*f}));
+  });
   const bruto=ventas.reduce((s,v)=>s+v.bruto,0);
   const descuentos=ventas.reduce((s,v)=>s+v.descuento,0);
   const netas=bruto-descuentos;

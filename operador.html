@@ -502,7 +502,7 @@ const db = {
   async transferenciasEnTransito(sede){
     if(DEMO_MODE) return [];
     const { data, error } = await sb.from('transferencias')
-      .select('id,producto_nombre,cantidad_enviada,enviado_at,origen')
+      .select('id,producto_id,producto_nombre,cantidad_enviada,enviado_at,origen')
       .eq('destino',sede).eq('estado','en_transito').order('enviado_at');
     if(error) return [];
     return data||[];
@@ -1567,10 +1567,12 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
   },[]);
 
   // ---- proveedor (a ciegas) ----
+  // productos que vienen EN TRÁNSITO desde la bodega: no se reciben por proveedor (evita doble descuento)
+  const transitoIds=new Set((transitos||[]).map(t=>t.producto_id).filter(Boolean));
   const lista=(productos||[]).filter(p=>p.controla_stock);
   const visibles=lista.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
   const setC=(id,v)=>setCant(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
-  const items=Object.entries(cant).map(([producto_id,v])=>({producto_id,cantidad:Number(v)||0})).filter(it=>it.cantidad>0);
+  const items=Object.entries(cant).map(([producto_id,v])=>({producto_id,cantidad:Number(v)||0})).filter(it=>it.cantidad>0 && !transitoIds.has(it.producto_id));
   const totalUds=items.reduce((s,it)=>s+it.cantidad,0);
 
   const guardarProveedor=async()=>{
@@ -1653,19 +1655,22 @@ function RecepcionSheet({sede,operador,productos,showToast,onClose,onSaved}){
         {modo==='proveedor' && (
           <div>
             <div className="header-sub" style={{marginBottom:10}}>Lo que llega directo del proveedor (snacks, bebidas…). Escribe cuánto llegó de cada producto.</div>
+            {transitoIds.size>0 && <div style={{background:"rgba(245,158,11,0.12)",border:"1px solid var(--amber)",borderRadius:10,padding:"9px 12px",marginBottom:10,fontSize:12.5,color:"var(--amber)",fontWeight:600}}>⚠ Hay {transitoIds.size} producto(s) que vienen <b>en camino desde la bodega</b>. Esos NO se reciben aquí — recíbelos en la pestaña <b>🚚 Kemilabo</b>. Aquí solo va lo que llega directo de un proveedor.</div>}
             <div className="search" style={{marginBottom:10}}>
               <span className="ico">🔍</span>
               <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
             </div>
             <div style={{maxHeight:"42vh",overflowY:"auto",marginBottom:10}}>
               {visibles.length===0 && <div className="empty">No hay productos con inventario en esta sede.</div>}
-              {visibles.map(p=>{ const v=cant[p.id]||""; return (
-                <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
+              {visibles.map(p=>{ const v=cant[p.id]||""; const enTransito=transitoIds.has(p.id); return (
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)",opacity:enTransito?0.6:1}}>
                   <div style={{flex:1}}>
                     <div style={{fontWeight:600}}>{p.nombre}</div>
-                    {p.categoria && <div className="header-sub">{p.categoria}</div>}
+                    {enTransito ? <div className="header-sub" style={{color:"var(--amber)"}}>🚚 En tránsito desde la bodega — recíbelo en la pestaña Kemilabo</div> : (p.categoria && <div className="header-sub">{p.categoria}</div>)}
                   </div>
-                  <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Llegó…" value={v} onChange={e=>setC(p.id,e.target.value)}/>
+                  {enTransito
+                    ? <span style={{width:90,textAlign:"center",fontSize:18}} title="Recíbelo en la pestaña Kemilabo">🚚</span>
+                    : <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Llegó…" value={v} onChange={e=>setC(p.id,e.target.value)}/>}
                 </div>
               );})}
             </div>

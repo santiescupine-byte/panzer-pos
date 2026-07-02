@@ -2733,8 +2733,9 @@ function Mantenimiento({showToast}){
       .filter(i=>i.nombre);
     setBusy(true);
     try{
+      const directo=rep.directo;
       await db.repararEquipo(rep.equipo.id, supervisor.trim(), notaRep.trim(), Number(manoObra)||0, items);
-      setRep(null); setSupervisor(""); setNotaRep(""); showToast("Equipo reparado y encendido","ok"); load(); loadPanorama(); db.listRepuestos().then(setRepuestos).catch(()=>{});
+      setRep(null); setSupervisor(""); setNotaRep(""); showToast(directo?"Mantenimiento registrado ✓":"Equipo reparado y encendido","ok"); load(); loadPanorama(); db.listRepuestos().then(setRepuestos).catch(()=>{});
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
 
@@ -2831,7 +2832,7 @@ function Mantenimiento({showToast}){
                   <td style={{whiteSpace:"nowrap"}}>
                     {parada
                       ? <button className="btn btn-amber btn-sm" onClick={()=>{setRep({equipo:eq,reporte:r});}}>🔧 Reparar / Encender</button>
-                      : <button className="btn btn-ghost btn-sm" onClick={()=>borrar(eq)}>Borrar</button>}
+                      : <span style={{display:"inline-flex",gap:6}}><button className="btn btn-amber btn-sm" onClick={()=>setRep({equipo:eq,reporte:null,directo:true})}>🔧 Mantenimiento</button><button className="btn btn-ghost btn-sm" onClick={()=>borrar(eq)}>Borrar</button></span>}
                   </td>
                 </tr>
               );})}
@@ -2866,11 +2867,12 @@ function Mantenimiento({showToast}){
       {rep && (
         <div className="modal-bg" onClick={()=>!busy&&setRep(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
-            <div className="modal-t">🔧 Reparar y encender — {rep.equipo.nombre}</div>
+            <div className="modal-t">{rep.directo?"🔧 Mantenimiento — ":"🔧 Reparar y encender — "}{rep.equipo.nombre}</div>
+            {rep.directo && <div className="card" style={{marginBottom:10,background:"var(--blue-d)",border:"1px solid var(--blue-d)"}}><span className="muted">La máquina está <b style={{color:"var(--green)"}}>operativa</b>. Registra los repuestos y el costo del mantenimiento sin apagarla; su estado no cambia.</span></div>}
             {rep.reporte && <div className="card" style={{marginBottom:10}}><div className="muted">Falla reportada</div><b>{rep.reporte.descripcion||"(sin descripción)"}</b><div className="muted" style={{marginTop:4}}>{rep.reporte.operador?("Por "+rep.reporte.operador+" · "):""}{fLocalDia(rep.reporte.reportado_at)} {fLocalHora(rep.reporte.reportado_at)} · lleva {fmtDur(rep.reporte.reportado_at,new Date().toISOString())} parada</div></div>}
-            <label className="label">Supervisor que repara</label>
+            <label className="label">{rep.directo?"Supervisor / técnico":"Supervisor que repara"}</label>
             <input className="input" value={supervisor} onChange={e=>setSupervisor(e.target.value)} placeholder="Tu nombre"/>
-            <label className="label">Nota de reparación (opcional)</label>
+            <label className="label">{rep.directo?"Qué mantenimiento se hizo":"Nota de reparación (opcional)"}</label>
             <input className="input" value={notaRep} onChange={e=>setNotaRep(e.target.value)} placeholder="Qué se hizo…"/>
 
             <label className="label">Repuestos usados</label>
@@ -2908,7 +2910,7 @@ function Mantenimiento({showToast}){
 
             <div className="modal-actions">
               <button className="btn btn-ghost" disabled={busy} onClick={()=>setRep(null)}>Cancelar</button>
-              <button className="btn btn-amber" disabled={busy} onClick={reparar}>{busy?"Encendiendo…":"✅ Encender máquina"}</button>
+              <button className="btn btn-amber" disabled={busy} onClick={reparar}>{busy?(rep.directo?"Registrando…":"Encendiendo…"):(rep.directo?"✅ Registrar mantenimiento":"✅ Encender máquina")}</button>
             </div>
           </div>
         </div>

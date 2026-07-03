@@ -721,6 +721,14 @@ const db = {
     if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
   },
+  // Devoluciones por falla reportadas por el franquiciado (para el recaudo del mes)
+  async devolucionesFalla(sede, anio, mes){
+    if(DEMO_MODE) return [];
+    const ini=anio+'-'+String(mes).padStart(2,'0')+'-01';
+    const finMes=mes>=12?(anio+1)+'-01-01':anio+'-'+String(mes+1).padStart(2,'0')+'-01';
+    const {data,error}=await sb.from('devoluciones_falla').select('*').eq('sede',sede).gte('fecha',ini).lt('fecha',finMes).order('fecha');
+    if(error) return []; return data||[];
+  },
   async frCerrarMes(p){
     if(DEMO_MODE) return;
     // upsert la liquidación del mes (sede+anio+mes únicos → si re-cierran, se reemplaza)
@@ -3154,6 +3162,8 @@ function Recaudo({showToast, quien, rol}){
   const [frProds,setFrProds]=useState([]);          // [{concepto,cantidad,valor_unitario}]
   const [frNotas,setFrNotas]=useState("");
   const [frHist,setFrHist]=useState(null);
+  const [frDevolFalla,setFrDevolFalla]=useState([]);   // devoluciones por falla reportadas por el franquiciado
+  const cargarDevolFalla=async(s,anio,mes)=>{ try{ setFrDevolFalla(await db.devolucionesFalla(s,anio,mes)); }catch(e){ setFrDevolFalla([]); } };
 
   const frPctFranq=Number(sedeObj.fr_pct_franquiciado)||0;
   const frPctPanzer=Number(sedeObj.fr_pct_panzer)||0;
@@ -3170,6 +3180,7 @@ function Recaudo({showToast, quien, rol}){
       setFrMaqs((m||[]).map(x=>({id:x.id, nombre:x.nombre, es_lavadora:x.es_lavadora!==false, anterior:Number(x.contador)||0, actual:"", orden:Number(x.orden)||0})));
       setFrDevol(""); setFrProds([]); setFrNotas("");
       setFrMes(hoy.getMonth()+1); setFrAnio(hoy.getFullYear());
+      cargarDevolFalla(sede, hoy.getFullYear(), hoy.getMonth()+1);
       setPaso('fr');
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
@@ -3516,10 +3527,10 @@ function Recaudo({showToast, quien, rol}){
         <div>
           <div className="toolbar">
             <div className="muted" style={{marginRight:"auto"}}>🏭 <b>{sede}</b> · Liquidación mensual</div>
-            <select className="select" style={{maxWidth:150,margin:0}} value={frMes} onChange={e=>setFrMes(Number(e.target.value))}>
+            <select className="select" style={{maxWidth:150,margin:0}} value={frMes} onChange={e=>{const m=Number(e.target.value);setFrMes(m);cargarDevolFalla(sede,frAnio,m);}}>
               {MESES.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
             </select>
-            <input className="input" style={{maxWidth:90,margin:0}} type="number" value={frAnio} onChange={e=>setFrAnio(Number(e.target.value))}/>
+            <input className="input" style={{maxWidth:90,margin:0}} type="number" value={frAnio} onChange={e=>{const a=Number(e.target.value);setFrAnio(a);cargarDevolFalla(sede,a,frMes);}}/>
           </div>
 
           {(!frMaqs||!frMaqs.length) ? (
@@ -3550,6 +3561,29 @@ function Recaudo({showToast, quien, rol}){
                 <div className="card-t">Ajustes</div>
                 <label className="label">Devoluciones (se restan a Panzer)</label>
                 <input className="input" type="number" value={frDevol} onChange={e=>setFrDevol(e.target.value)} placeholder="0"/>
+                {(()=>{ const VALOR_TOKEN=6000;
+                  const dfDinero=frDevolFalla.filter(d=>d.tipo==='dinero').reduce((a,d)=>a+(Number(d.cantidad)||0),0);
+                  const dfTokens=frDevolFalla.filter(d=>d.tipo==='token').reduce((a,d)=>a+(Number(d.cantidad)||0),0);
+                  const dfTokDinero=dfTokens*VALOR_TOKEN;
+                  const dfTotal=dfDinero+dfTokDinero;
+                  if(!frDevolFalla.length) return <div className="muted" style={{fontSize:12,marginTop:-6,marginBottom:6}}>Sin devoluciones por falla reportadas este mes.</div>;
+                  return (
+                    <div className="card" style={{background:"var(--blue-d)",border:"1px solid var(--bd)",marginTop:6,marginBottom:6,padding:10}}>
+                      <div style={{fontWeight:700,fontSize:12,marginBottom:6}}>↩️ Devoluciones por falla reportadas ({frDevolFalla.length})</div>
+                      <div className="muted" style={{fontSize:12}}>Dinero: <b style={{color:"var(--red)"}}>{fmt(dfDinero)}</b>{dfTokens>0?<span> · Tokens: <b>{dfTokens}</b> (× $6.000 = <b style={{color:"var(--red)"}}>{fmt(dfTokDinero)}</b>)</span>:null}</div>
+                      <div style={{fontSize:13,fontWeight:800,margin:"4px 0 6px"}}>Total a devolver: <span style={{color:"var(--red)"}}>{fmt(dfTotal)}</span></div>
+                      <div style={{maxHeight:120,overflowY:"auto"}}>
+                        {frDevolFalla.map(d=>(
+                          <div key={d.id} style={{borderTop:"1px solid var(--bd)",padding:"4px 0",fontSize:12}}>
+                            <b>{d.tipo==='dinero'?fmt(d.cantidad):(d.cantidad+" token(s) = "+fmt(d.cantidad*VALOR_TOKEN))}</b> <span className="muted">· {d.fecha} · {d.reportado_por||"—"}</span>
+                            {d.descripcion && <div className="muted">{d.descripcion}</div>}
+                          </div>
+                        ))}
+                      </div>
+                      {dfTotal>0 && <button className="btn btn-ghost btn-sm" style={{marginTop:6}} onClick={()=>setFrDevol(String(dfTotal))}>Usar {fmt(dfTotal)} en devoluciones</button>}
+                    </div>
+                  );
+                })()}
                 <div style={{display:"flex",alignItems:"center",marginTop:10,marginBottom:6}}>
                   <span className="label" style={{margin:0,marginRight:"auto"}}>Productos / membresías (se suman a Panzer)</span>
                   <button className="btn btn-ghost btn-sm" onClick={frAddProd}>＋ Agregar</button>

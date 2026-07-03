@@ -437,6 +437,19 @@ const db = {
     if(error) throw error;
     return data;
   },
+  // ---- PEDIDO DE PRODUCTOS (franquiciado → administración) ----
+  async productosPedido(){   // catálogo completo de detailing + complementarios (para pedir, sin filtro de sede)
+    if(DEMO_MODE) return [];
+    const { data, error } = await sb.from('productos').select('id,nombre,categoria')
+      .eq('activo',true).in('categoria',['PRODUCTOS PANZER CARWASH','PRODUCTOS COMPLEMENTARIOS DE LAVADO']).order('nombre');
+    if(error) return []; return data||[];
+  },
+  async crearPedido(sede, solicitante, nota, items){
+    if(DEMO_MODE) return "demo-pedido";
+    const { data, error } = await sb.rpc('crear_pedido_productos',{p_sede:sede, p_solicitado_por:solicitante||null, p_nota:nota||null, p_items:items||[]});
+    if(error) throw error;
+    return data;
+  },
   // ---- MIS TAREAS (asignadas a este operador en esta sede) ----
   async misTareas(sede, operador){
     if(DEMO_MODE) return [
@@ -611,6 +624,8 @@ function App(){
   const aplicarTareas=ts=>{ const h=new Date(); const hoyS=h.getFullYear()+'-'+String(h.getMonth()+1).padStart(2,'0')+'-'+String(h.getDate()).padStart(2,'0'); const p=ts.filter(t=>t.estado!=='hecha'); setTareasPend(p.length); setTareasVenc(p.filter(t=>t.fecha_limite&&t.fecha_limite<hoyS).length); };
   const refrescarTareas=()=>{ if(sede&&operador) db.misTareas(sede,operador).then(aplicarTareas).catch(()=>{}); };
   const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
+  const [rol,setRol]=useState('');                         // rol del usuario logueado
+  const [showPedido,setShowPedido]=useState(false);        // sheet de pedido de productos (franquiciado)
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
@@ -630,9 +645,16 @@ function App(){
   // al abrir la app: muestra el contador y reintenta enviar lo que quedó en cola
   useEffect(()=>{ refrescarLiqPend(); db.reintentarLiqPendientes().then(refrescarLiqPend).catch(()=>{}); },[]);
 
-  const abrir=async(sedeSel, nombre, rol)=>{
+  const abrir=async(sedeSel, nombre, rolArg)=>{
     setBusy(true);
     try{
+      setRol(rolArg||'');
+      // FRANQUICIADO: POS limitado (membresías, reportar máquina, pedidos). Sin turno ni chequeo.
+      if(rolArg==='franquiciado'){
+        setSede(sedeSel); setOperador(nombre);
+        const prods=await db.getProductos(sedeSel); setProductos(prods);
+        setBusy(false); return;
+      }
       const t=await db.abrirTurno(sedeSel,nombre);
       setSede(sedeSel); setOperador(nombre); setTurno(t);
       const prods=await db.getProductos(sedeSel);
@@ -641,7 +663,7 @@ function App(){
       db.transferenciasEnTransito(sedeSel).then(a=>setPendTransito(a.length)).catch(()=>{});
       db.misTareas(sedeSel,nombre).then(aplicarTareas).catch(()=>{});
       // El chequeo de inventario es OBLIGATORIO solo para CAJEROS. Supervisor/admin/otros entran directo.
-      if(rol && rol!=='cajero'){ setChequeoHecho(true); }
+      if(rolArg && rolArg!=='cajero'){ setChequeoHecho(true); }
       else {
         // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
         const vigente = await db.chequeoVigente(sedeSel, nombre);
@@ -668,6 +690,7 @@ function App(){
     setCart([]); setShowCart(false); setShowCierre(false);
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
     setChequeoHecho(false); setDescTicket(null);
+    setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false);
   };
   // aplicar/quitar descuento a una línea del carrito (d = {nombre,porcentaje} o null)
   const setLineDesc=(key,d)=>setCart(prev=>prev.map(c=>(c.key||c.producto_id)===key?{...c,descId:d?d.id:'',descPct:d?d.porcentaje:0,descNombre:d?d.nombre:null}:c));
@@ -751,6 +774,45 @@ function App(){
   };
 
   // -------- LOGIN (PIN) --------
+  // -------- HOME DEL FRANQUICIADO (POS limitado) --------
+  if(rol==='franquiciado' && sede){
+    return (
+      <div className="app">
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <div className="header">
+          <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" alt="P"/>
+          <div>
+            <h1>{sede}</h1>
+            <div className="header-sub">{operador} · Franquiciado</div>
+          </div>
+          <button className="header-x" style={{marginLeft:"auto"}} onClick={cerrarCaja}>Salir</button>
+        </div>
+        <div className="page">
+          <div style={{display:"grid",gap:14,maxWidth:520,margin:"6px auto"}}>
+            <div className="card" onClick={()=>setShowVip(true)} style={{cursor:"pointer",textAlign:"center",padding:"24px 16px"}}>
+              <div style={{fontSize:40}}>💳</div>
+              <div style={{fontWeight:800,fontSize:18,marginTop:6}}>Membresías</div>
+              <div className="header-sub" style={{marginTop:2}}>Crear, recargar y canjear tokens</div>
+            </div>
+            <div className="card" onClick={()=>setShowMaq(true)} style={{cursor:"pointer",textAlign:"center",padding:"24px 16px"}}>
+              <div style={{fontSize:40}}>🔧</div>
+              <div style={{fontWeight:800,fontSize:18,marginTop:6}}>Reportar máquina</div>
+              <div className="header-sub" style={{marginTop:2}}>Apagar o reportar la falla de un equipo</div>
+            </div>
+            <div className="card" onClick={()=>setShowPedido(true)} style={{cursor:"pointer",textAlign:"center",padding:"24px 16px"}}>
+              <div style={{fontSize:40}}>📦</div>
+              <div style={{fontWeight:800,fontSize:18,marginTop:6}}>Hacer pedido</div>
+              <div className="header-sub" style={{marginTop:2}}>Pedir productos a administración</div>
+            </div>
+          </div>
+        </div>
+        {showVip && <VipSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowVip(false)}/>}
+        {showMaq && <MaquinasSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowMaq(false)}/>}
+        {showPedido && <PedidoSheet sede={sede} operador={operador} productos={productos} showToast={showToast} onClose={()=>setShowPedido(false)}/>}
+      </div>
+    );
+  }
+
   if(!turno){
     const tecla=d=>{ setPin(prev=>(prev+d).slice(0,4)); };
     const borrar=()=>setPin(prev=>prev.slice(0,-1));
@@ -1546,6 +1608,62 @@ function RecibosSheet({sede,operador,onClose}){
 
 // ============================================================
 // SHEET: RECEPCIÓN DE MERCANCÍA (operador)
+// ============================================================
+// SHEET: PEDIDO DE PRODUCTOS (franquiciado → administración)
+// Pide cantidades de detailing/complementarios. Solo solicitud (sin precio).
+// ============================================================
+function PedidoSheet({sede,operador,productos,showToast,onClose}){
+  const [lista,setLista]=useState(null);
+  useEffect(()=>{ db.productosPedido().then(setLista).catch(()=>setLista([])); },[]);
+  const [q,setQ]=useState("");
+  const [cant,setCant]=useState({});
+  const [nota,setNota]=useState("");
+  const [busy,setBusy]=useState(false);
+  const visibles=(lista||[]).filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
+  const setC=(id,v)=>setCant(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const items=(lista||[]).filter(p=>Number(cant[p.id])>0).map(p=>({producto_id:p.id,nombre:p.nombre,cantidad:Number(cant[p.id])}));
+  const totalUds=items.reduce((s,it)=>s+it.cantidad,0);
+  const enviar=async()=>{
+    if(!items.length){ showToast("Agrega al menos un producto","err"); return; }
+    setBusy(true);
+    try{
+      await db.crearPedido(sede, operador, nota.trim(), items);
+      showToast("Pedido enviado a administración ("+items.length+" producto(s)) ✓","ok");
+      onClose();
+    }catch(e){ showToast("No se pudo enviar: "+(e.message||e),"err"); setBusy(false); }
+  };
+  return (
+    <div className="sheet-bg" onClick={()=>!busy&&onClose()}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">📦 Hacer pedido de productos</div>
+        <div className="header-sub" style={{marginBottom:10}}>Pide las cantidades que necesitas de <b>detailing y complementarios</b>. Administración recibe el pedido y lo despacha.</div>
+        <div className="search" style={{marginBottom:10}}>
+          <span className="ico">🔍</span>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
+        </div>
+        <div style={{maxHeight:"42vh",overflowY:"auto",marginBottom:10}}>
+          {lista===null && <div className="empty">Cargando catálogo…</div>}
+          {lista!==null && visibles.length===0 && <div className="empty">No hay productos de detailing/complementarios{q?" con ese nombre":""}.</div>}
+          {visibles.map(p=>{ const v=cant[p.id]||""; return (
+            <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--bd)"}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:600}}>{p.nombre}</div>
+                {p.categoria && <div className="header-sub">{p.categoria}</div>}
+              </div>
+              <input className="input" type="number" inputMode="numeric" style={{width:90,textAlign:"center"}} placeholder="Cant…" value={v} onChange={e=>setC(p.id,e.target.value)}/>
+            </div>
+          );})}
+        </div>
+        <input className="input" style={{marginBottom:10}} value={nota} onChange={e=>setNota(e.target.value)} placeholder="Nota para administración (opcional)"/>
+        {items.length>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a pedir <b>{totalUds}</b> unidad(es) en <b>{items.length}</b> producto(s).</div>}
+        <button className="btn-primary" disabled={busy||!items.length} onClick={enviar}>{busy?"Enviando…":"✅ Enviar pedido"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Registra lo que llega directo del proveedor (snacks, bebidas…)
 // y lo SUMA al inventario central de la sede (ajustar_inventario).
 // ============================================================

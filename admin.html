@@ -594,6 +594,18 @@ const db = {
     if(DEMO_MODE){ const s=(DEMO.solicitudes||[]).find(x=>x.id===id); if(s){s.estado=estado;s.resuelto_por=quien;s.resuelto_at=new Date().toISOString();} return; }
     const {error}=await sb.from('solicitudes_repuestos').update({estado,resuelto_por:quien||null,resuelto_at:new Date().toISOString()}).eq('id',id); if(error) throw error;
   },
+  // ---- PEDIDOS DE PRODUCTOS (franquiciados) ----
+  async listPedidos(f={}){
+    if(DEMO_MODE) return [];
+    let q=sb.from('pedidos_productos').select('*, pedido_items(*)').order('created_at',{ascending:false}).limit(300);
+    if(f.estado) q=q.eq('estado',f.estado);
+    if(f.sede) q=q.eq('sede',f.sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async resolverPedido(id, estado, quien){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('pedidos_productos').update({estado,resuelto_por:quien||null,resuelto_at:new Date().toISOString()}).eq('id',id); if(error) throw error;
+  },
   // ---- TAREAS ----
   async listTareas(f={}){
     if(DEMO_MODE){ let a=(DEMO.tareas||[]).slice(); if(f.sede)a=a.filter(t=>t.sede===f.sede); if(f.asignado)a=a.filter(t=>t.asignado_a===f.asignado); if(f.estado)a=a.filter(t=>t.estado===f.estado); return a; }
@@ -1079,7 +1091,7 @@ function App(){
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
           ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1107,6 +1119,7 @@ function App(){
               <div className="page">
                 {tab==="informes"   && <Informes showToast={showToast}/>}
                 {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
+                {tab==="pedidos"    && <Pedidos showToast={showToast} quien={auth.nombre}/>}
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
@@ -1517,12 +1530,13 @@ function Empleados({showToast}){
             <label className="label">Rol</label>
             <select className="select" value={editing.rol} onChange={e=>setEditing({...editing,rol:e.target.value})}>
               <option value="cajero">Cajero (operador)</option>
+              <option value="franquiciado">Franquiciado</option>
               <option value="tesorero">Tesorero</option>
               <option value="gerente">Gerente</option>
               <option value="supervisor">Supervisor de mantenimiento</option>
               <option value="admin">Administrador</option>
             </select>
-            <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Back office: <b>Administrador</b> = todo · <b>Supervisor de mantenimiento</b> = solo pestaña Mantenimiento · los demás roles no entran al back office.</div>
+            <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Back office: <b>Administrador</b> = todo · <b>Supervisor de mantenimiento</b> = solo pestaña Mantenimiento · los demás roles no entran al back office. <b>Franquiciado</b> = POS limitado (membresías, reportar máquina, pedidos) en su sede.</div>
             <label className="label">PIN de acceso (4 dígitos)</label>
             <input className="input" type="text" inputMode="numeric" maxLength={4} placeholder="ej: 1234"
               value={editing.pin||""}
@@ -4028,6 +4042,64 @@ function Recaudo({showToast, quien, rol}){
         </div>
         );
       })()}
+    </div>
+  );
+}
+
+// ============================================================
+// SECCIÓN: PEDIDOS DE PRODUCTOS — de franquiciados a administración
+// ============================================================
+function Pedidos({showToast, quien}){
+  const [estado,setEstado]=useState('pendiente');
+  const [list,setList]=useState(null);
+  const load=async()=>{ setList(null); setList(await db.listPedidos(estado==='todos'?{}:{estado})); };
+  useEffect(()=>{ load(); },[estado]);
+  const resolver=async(p,nuevo)=>{
+    if(!confirm("¿Marcar el pedido de "+p.sede+" como "+nuevo+"?")) return;
+    try{ await db.resolverPedido(p.id, nuevo, quien); load(); showToast("Pedido "+nuevo,"ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const pendientes=(list||[]).filter(p=>p.estado==='pendiente').length;
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>Pedidos de franquicias {pendientes>0 && <span className="pill pill-off" style={{marginLeft:6}}>{pendientes} pendiente(s)</span>}</div>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4,flexWrap:"wrap"}}>
+          {[['pendiente','Pendientes'],['despachado','Despachados'],['rechazado','Rechazados'],['todos','Todos']].map(([k,l])=>(
+            <button key={k} className={"btn btn-sm "+(estado===k?'btn-amber':'btn-ghost')} onClick={()=>setEstado(k)}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {list===null ? <div className="empty">Cargando…</div> :
+       list.length===0 ? <div className="empty">No hay pedidos {estado==='todos'?'':(estado+'s')}.</div> : (
+        <div style={{display:"grid",gap:12}}>
+          {list.map(p=>{
+            const items=p.pedido_items||[];
+            const totalUds=items.reduce((a,i)=>a+(Number(i.cantidad)||0),0);
+            return (
+              <div key={p.id} className="card">
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:16}}>🏭 {p.sede}</div>
+                    <div className="muted">{p.solicitado_por||"—"} · {fLocalDia(p.created_at)} {fLocalHora(p.created_at)} · {items.length} producto(s) · {totalUds} uds</div>
+                  </div>
+                  <span className={"pill "+(p.estado==='pendiente'?'pill-token':p.estado==='despachado'?'pill-prod':'pill-off')}>{p.estado}</span>
+                </div>
+                {p.nota && <div className="muted" style={{marginTop:6}}>📝 {p.nota}</div>}
+                <div style={{overflowX:"auto"}}>
+                  <table className="tbl" style={{marginTop:8}}>
+                    <thead><tr><th>Producto</th><th className="num">Cantidad</th></tr></thead>
+                    <tbody>{items.map(i=>(<tr key={i.id}><td className="row-name">{i.nombre}</td><td className="num">{Number(i.cantidad)}</td></tr>))}</tbody>
+                  </table>
+                </div>
+                {p.estado==='pendiente'
+                  ? <div className="toolbar" style={{marginTop:10}}><button className="btn btn-amber btn-sm" onClick={()=>resolver(p,'despachado')}>✅ Marcar despachado</button><button className="btn btn-ghost btn-sm" onClick={()=>resolver(p,'rechazado')}>Rechazar</button></div>
+                  : (p.resuelto_por && <div className="muted" style={{marginTop:8}}>{p.estado==='despachado'?'Despachado':'Rechazado'} por {p.resuelto_por}{p.resuelto_at?(" · "+fLocalDia(p.resuelto_at)):""}</div>)}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

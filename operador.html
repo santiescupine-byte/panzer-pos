@@ -450,6 +450,13 @@ const db = {
     if(error) throw error;
     return data;
   },
+  // ---- DEVOLUCIÓN POR FALLA (franquiciado) ----
+  async crearDevolucionFalla(sede, reportadoPor, tipo, cantidad, descripcion){
+    if(DEMO_MODE) return "demo-dev";
+    const h=new Date(); const fecha=h.getFullYear()+'-'+String(h.getMonth()+1).padStart(2,'0')+'-'+String(h.getDate()).padStart(2,'0');
+    const { error } = await sb.from('devoluciones_falla').insert({sede, reportado_por:reportadoPor||null, tipo, cantidad:Number(cantidad)||0, descripcion:descripcion||null, fecha});
+    if(error) throw error;
+  },
   // ---- MIS TAREAS (asignadas a este operador en esta sede) ----
   async misTareas(sede, operador){
     if(DEMO_MODE) return [
@@ -626,6 +633,7 @@ function App(){
   const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
   const [rol,setRol]=useState('');                         // rol del usuario logueado
   const [showPedido,setShowPedido]=useState(false);        // sheet de pedido de productos (franquiciado)
+  const [showDevol,setShowDevol]=useState(false);          // sheet de devolución por falla (franquiciado)
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
@@ -690,7 +698,7 @@ function App(){
     setCart([]); setShowCart(false); setShowCierre(false);
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
     setChequeoHecho(false); setDescTicket(null);
-    setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false);
+    setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false); setShowDevol(false);
   };
   // aplicar/quitar descuento a una línea del carrito (d = {nombre,porcentaje} o null)
   const setLineDesc=(key,d)=>setCart(prev=>prev.map(c=>(c.key||c.producto_id)===key?{...c,descId:d?d.id:'',descPct:d?d.porcentaje:0,descNombre:d?d.nombre:null}:c));
@@ -804,11 +812,17 @@ function App(){
               <div style={{fontWeight:800,fontSize:18,marginTop:6}}>Hacer pedido</div>
               <div className="header-sub" style={{marginTop:2}}>Pedir productos a administración</div>
             </div>
+            <div className="card" onClick={()=>setShowDevol(true)} style={{cursor:"pointer",textAlign:"center",padding:"24px 16px"}}>
+              <div style={{fontSize:40}}>↩️</div>
+              <div style={{fontWeight:800,fontSize:18,marginTop:6}}>Devolución por falla</div>
+              <div className="header-sub" style={{marginTop:2}}>Tokens o dinero devuelto al cliente</div>
+            </div>
           </div>
         </div>
         {showVip && <VipSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowVip(false)}/>}
         {showMaq && <MaquinasSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowMaq(false)}/>}
         {showPedido && <PedidoSheet sede={sede} operador={operador} productos={productos} showToast={showToast} onClose={()=>setShowPedido(false)}/>}
+        {showDevol && <DevolucionSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>setShowDevol(false)}/>}
       </div>
     );
   }
@@ -1658,6 +1672,46 @@ function PedidoSheet({sede,operador,productos,showToast,onClose}){
         <input className="input" style={{marginBottom:10}} value={nota} onChange={e=>setNota(e.target.value)} placeholder="Nota para administración (opcional)"/>
         {items.length>0 && <div className="header-sub" style={{marginBottom:8}}>Vas a pedir <b>{totalUds}</b> unidad(es) en <b>{items.length}</b> producto(s).</div>}
         <button className="btn-primary" disabled={busy||!items.length} onClick={enviar}>{busy?"Enviando…":"✅ Enviar pedido"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: DEVOLUCIÓN POR FALLA (franquiciado)
+// Tokens o dinero devuelto al cliente por una falla + descripción.
+// ============================================================
+function DevolucionSheet({sede,operador,showToast,onClose}){
+  const [tipo,setTipo]=useState('dinero');   // 'dinero' | 'token'
+  const [cantidad,setCantidad]=useState("");
+  const [desc,setDesc]=useState("");
+  const [busy,setBusy]=useState(false);
+  const enviar=async()=>{
+    const c=Number(cantidad)||0;
+    if(c<=0){ showToast("Escribe la cantidad devuelta","err"); return; }
+    if(!desc.trim()){ showToast("Escribe una descripción","err"); return; }
+    setBusy(true);
+    try{
+      await db.crearDevolucionFalla(sede, operador, tipo, c, desc.trim());
+      showToast("Devolución registrada ✓","ok"); onClose();
+    }catch(e){ showToast("No se pudo registrar: "+(e.message||e),"err"); setBusy(false); }
+  };
+  return (
+    <div className="sheet-bg" onClick={()=>!busy&&onClose()}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">↩️ Devolución por falla</div>
+        <div className="header-sub" style={{marginBottom:12}}>Registra lo que le devolviste al cliente por una falla. Aparecerá en el recaudo de tu sede.</div>
+        <label className="label">¿Qué devolviste?</label>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          <button className="btn-secondary" style={{flex:1,...(tipo==='dinero'?{borderColor:'var(--amber)',color:'var(--amber)'}:{})}} onClick={()=>setTipo('dinero')}>💵 Dinero</button>
+          <button className="btn-secondary" style={{flex:1,...(tipo==='token'?{borderColor:'var(--amber)',color:'var(--amber)'}:{})}} onClick={()=>setTipo('token')}>🪙 Tokens</button>
+        </div>
+        <label className="label">{tipo==='dinero'?'Dinero devuelto ($)':'Tokens devueltos (cantidad)'}</label>
+        <input className="input" type="number" inputMode="numeric" value={cantidad} onChange={e=>setCantidad(e.target.value)} placeholder={tipo==='dinero'?'ej: 5000':'ej: 2'}/>
+        <label className="label">Descripción</label>
+        <textarea className="input" style={{minHeight:80,resize:'vertical'}} value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Qué pasó, qué máquina, a qué cliente…"/>
+        <button className="btn-primary" style={{marginTop:6}} disabled={busy} onClick={enviar}>{busy?"Registrando…":"✅ Registrar devolución"}</button>
       </div>
     </div>
   );

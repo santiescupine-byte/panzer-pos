@@ -638,6 +638,11 @@ const db = {
     if(DEMO_MODE) return;
     const {error}=await sb.from('recaudo_liquidaciones').delete().eq('id',id); if(error) throw error;
   },
+  async borrarPendientesIds(ids){
+    if(DEMO_MODE) return;
+    if(!ids||!ids.length) return;
+    const {error}=await sb.from('recaudo_liquidaciones').delete().eq('estado','pendiente').in('id',ids); if(error) throw error;
+  },
   async borrarPendientesSede(sede){
     if(DEMO_MODE) return;
     let q=sb.from('recaudo_liquidaciones').delete().eq('estado','pendiente'); if(sede) q=q.eq('sede',sede);
@@ -3095,10 +3100,25 @@ function Recaudo({showToast, quien, rol}){
   // ---- Liquidaciones pendientes (ver/borrar, SOLO admin) ----
   const [pendList,setPendList]=useState(null);
   const [pendSede,setPendSede]=useState("");
+  const [pendDesde,setPendDesde]=useState("");
+  const [pendHasta,setPendHasta]=useState("");
+  const fchPend=l=>l.fecha||fLocalDia(l.created_at);   // 'YYYY-MM-DD'
+  const pendVista=(pendList||[]).filter(l=>{ const f=fchPend(l); return (!pendDesde||f>=pendDesde) && (!pendHasta||f<=pendHasta); });
   const cargarPendientes=async(s)=>{ setPendList(null); setPendList(await db.recLiqPendientes(s||undefined)); };
-  const abrirPendientes=()=>{ setPendSede(""); setPaso('pendientes'); cargarPendientes(""); };
+  const abrirPendientes=()=>{ setPendSede(""); setPendDesde(""); setPendHasta(""); setPaso('pendientes'); cargarPendientes(""); };
   const borrarPend=async(l)=>{ if(!confirm("¿Borrar la liquidación pendiente de "+l.operador+" ("+(l.num_recibo||"s/recibo")+", "+fmt(l.valor)+")?")) return; try{ await db.deleteLiquidacion(l.id); cargarPendientes(pendSede); showToast("Liquidación borrada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
-  const borrarTodasPend=async()=>{ if(!pendSede){ showToast("Elige una sede para borrar en bloque","err"); return; } const n=(pendList||[]).length; if(!confirm("⚠ Vas a BORRAR las "+n+" liquidaciones pendientes de "+pendSede+". Esto no se puede deshacer. ¿Continuar?")) return; try{ await db.borrarPendientesSede(pendSede); cargarPendientes(pendSede); showToast("Pendientes de "+pendSede+" borradas","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const borrarTodasPend=async()=>{
+    const rango=(pendDesde||pendHasta);
+    const objetivo=rango?pendVista:(pendList||[]).filter(l=>!pendSede||l.sede===pendSede);
+    if(!objetivo.length){ showToast("No hay pendientes que borrar","err"); return; }
+    const rotulo=(pendSede?("de "+pendSede):"de todas las sedes")+(rango?(" en el rango de fechas"):"");
+    if(!confirm("⚠ Vas a BORRAR las "+objetivo.length+" liquidaciones pendientes "+rotulo+" ("+fmt(objetivo.reduce((a,l)=>a+(Number(l.valor)||0),0))+"). Esto no se puede deshacer. ¿Continuar?")) return;
+    try{
+      if(rango) await db.borrarPendientesIds(objetivo.map(l=>l.id));
+      else await db.borrarPendientesSede(pendSede);
+      cargarPendientes(pendSede); showToast("Pendientes borradas","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
   const setCont=(i,patch)=>setContMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
   const guardarContadores=async()=>{
     setBusy(true);
@@ -3793,20 +3813,47 @@ function Recaudo({showToast, quien, rol}){
           <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
             <b style={{color:"var(--amber)"}}>📥 Liquidaciones pendientes por importar.</b> <span className="muted">Aquí puedes borrar las que ya no vas a usar (ej. quedaron de días que no se cerró completo) para que no se acumulen.</span>
           </div>
-          <div className="toolbar">
-            <select className="select" style={{maxWidth:240,margin:0}} value={pendSede} onChange={e=>{setPendSede(e.target.value);cargarPendientes(e.target.value);}}>
-              <option value="">🏬 Todas las sedes</option>
-              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
-            </select>
-            {pendSede && (pendList||[]).length>0 && <button className="btn btn-danger btn-sm" style={{marginLeft:"auto"}} onClick={borrarTodasPend}>🗑 Borrar todas las de {pendSede} ({(pendList||[]).length})</button>}
+          <div className="toolbar" style={{alignItems:"flex-end"}}>
+            <div className="fld"><label className="label">Sede</label>
+              <select className="select" style={{maxWidth:220,margin:0}} value={pendSede} onChange={e=>{setPendSede(e.target.value);cargarPendientes(e.target.value);}}>
+                <option value="">🏬 Todas las sedes</option>
+                {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+              </select>
+            </div>
+            <div className="fld"><label className="label">Desde</label><input className="input" style={{margin:0}} type="date" value={pendDesde} onChange={e=>setPendDesde(e.target.value)}/></div>
+            <div className="fld"><label className="label">Hasta</label><input className="input" style={{margin:0}} type="date" value={pendHasta} onChange={e=>setPendHasta(e.target.value)}/></div>
+            {(pendDesde||pendHasta) && <button className="btn btn-ghost btn-sm" onClick={()=>{setPendDesde("");setPendHasta("");}}>Limpiar fechas</button>}
+            {pendVista.length>0 && (pendSede||pendDesde||pendHasta) && <button className="btn btn-danger btn-sm" style={{marginLeft:"auto"}} onClick={borrarTodasPend}>🗑 Borrar las {pendVista.length} mostradas</button>}
           </div>
+          {pendList && pendVista.length>0 && (()=>{
+            const total=pendVista.reduce((a,l)=>a+(Number(l.valor)||0),0);
+            const bySede={}; pendVista.forEach(l=>{ bySede[l.sede]=(bySede[l.sede]||0)+(Number(l.valor)||0); });
+            const sedesRows=Object.entries(bySede).sort((a,b)=>b[1]-a[1]);
+            const rango=(pendDesde||pendHasta)?(" · "+(pendDesde||"…")+" a "+(pendHasta||"…")):"";
+            return (
+              <div>
+                <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
+                  <div className="card" style={{flex:"1 1 180px"}}><div className="muted">Liquidaciones pendientes</div><div style={{fontSize:24,fontWeight:800}}>{pendVista.length}</div></div>
+                  <div className="card" style={{flex:"1 1 220px"}}><div className="muted">Suma total pendiente{pendSede?(" · "+pendSede):""}{rango}</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(total)}</div></div>
+                </div>
+                {!pendSede && sedesRows.length>1 && (
+                  <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+                    <table className="tbl">
+                      <thead><tr><th>Sede</th><th className="num">Pendientes</th><th className="num">Suma</th></tr></thead>
+                      <tbody>{sedesRows.map(([s,v])=>(<tr key={s}><td className="row-name">{s}</td><td className="num">{pendVista.filter(l=>l.sede===s).length}</td><td className="num">{fmt(v)}</td></tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {pendList===null ? <div className="empty">Cargando…</div> : (
             <div className="card" style={{padding:0,overflowX:"auto"}}>
               <table className="tbl">
                 <thead><tr><th>Fecha</th><th>Sede</th><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th>Origen</th><th></th></tr></thead>
                 <tbody>
-                  {pendList.length===0 && <tr><td colSpan="7"><div className="empty">No hay liquidaciones pendientes{pendSede?(" en "+pendSede):""}.</div></td></tr>}
-                  {pendList.map(l=>(
+                  {pendVista.length===0 && <tr><td colSpan="7"><div className="empty">No hay liquidaciones pendientes{pendSede?(" en "+pendSede):""}{(pendDesde||pendHasta)?" en ese rango de fechas":""}.</div></td></tr>}
+                  {pendVista.map(l=>(
                     <tr key={l.id}>
                       <td className="muted" style={{whiteSpace:"nowrap"}}>{l.fecha||fLocalDia(l.created_at)}</td>
                       <td>{l.sede}</td>
@@ -3821,7 +3868,7 @@ function Recaudo({showToast, quien, rol}){
               </table>
             </div>
           )}
-          {pendList && pendList.length>0 && <div className="muted" style={{marginTop:8}}>{pendList.length} pendiente(s){pendSede?(" en "+pendSede):" en total"}.</div>}
+          {pendList && pendVista.length>0 && <div className="muted" style={{marginTop:8}}>{pendVista.length} pendiente(s){pendSede?(" en "+pendSede):" en total"}{(pendDesde||pendHasta)?" (rango filtrado)":""}{pendList.length!==pendVista.length?(" · de "+pendList.length+" totales"):""}.</div>}
         </div>
       )}
 

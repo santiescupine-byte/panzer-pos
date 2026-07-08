@@ -226,9 +226,18 @@ async function vipListCupones(){
 async function vipSaveCupon(c){
   if(DEMO_MODE) return {ok:true};
   const row={id_cupon:c.id_cupon,nombre:c.nombre,descripcion:c.descripcion,emoji:c.emoji||'🎁',membresia:c.membresia||'Todos',activo:!!c.activo,
-    producto_id:(c.producto_id||null)||null, cantidad:Number(c.cantidad)||1};
+    producto_id:(c.producto_id||null)||null, cantidad:Number(c.cantidad)||1,
+    sedes:(Array.isArray(c.sedes)&&c.sedes.length)?c.sedes:null};   // [] / null = todas las sedes
   const {error}=await sb.from('cupones_vip').upsert(row,{onConflict:'id_cupon'});
   return error?{ok:false,error:error.message}:{ok:true};
+}
+// Sedes de origen de las membresías (para el checklist de cupones)
+async function vipSedesOrigen(){
+  if(DEMO_MODE) return [];
+  const {data,error}=await sb.from('transacciones_vip').select('sede').eq('tipo','Recarga Inicial').limit(5000);
+  if(error) return [];
+  const set=new Set((data||[]).map(r=>(r.sede||'').trim()).filter(Boolean));
+  return [...set].sort((a,b)=>a.localeCompare(b));
 }
 async function vipDeleteCupon(id){
   if(DEMO_MODE) return {ok:true};
@@ -255,6 +264,24 @@ async function vipMovimientosRango(desdeISO, hastaISO){
     from+=page;
   }
   return all;
+}
+
+// Origen de cada membresía = la sede de su transacción "Recarga Inicial" (creación).
+async function vipOrigenMembresias(){
+  if(DEMO_MODE) return [];
+  const tx=[]; const page=1000; let from=0;
+  for(;;){
+    const {data,error}=await sb.from('transacciones_vip')
+      .select('id_vip,nombre,sede,created_at,monto').eq('tipo','Recarga Inicial')
+      .order('created_at',{ascending:false}).range(from, from+page-1);
+    if(error) break;
+    tx.push(...(data||[]));
+    if(!data || data.length<page) break;
+    from+=page;
+  }
+  const {data:cli}=await sb.from('clientes_vip').select('id,membresia,activo').limit(5000);
+  const info={}; (cli||[]).forEach(c=>info[c.id]={membresia:c.membresia,activo:c.activo});
+  return tx.map(t=>({...t, membresia:(info[t.id_vip]||{}).membresia||'—', activo:(info[t.id_vip]||{}).activo}));
 }
 
 // ============================================================
@@ -4555,6 +4582,11 @@ function Membresias({showToast, admin}){
   const [mes,setMes]=useState(()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
   const [movs,setMovs]=useState(null);           // transacciones del mes (movimientos por sede)
   const [detSede,setDetSede]=useState(null);     // sede expandida en el detalle
+  const [sedesOrigen,setSedesOrigen]=useState([]); // sedes posibles (para el checklist de cupones)
+  const [origen,setOrigen]=useState(null);       // membresías con su sede de origen
+  const [origenSede,setOrigenSede]=useState(""); // filtro por sede en la vista Origen
+  const [oq,setOq]=useState("");                 // búsqueda en la vista Origen
+  const cargarOrigen=()=>{ setOrigen(null); vipOrigenMembresias().then(setOrigen).catch(()=>setOrigen([])); };
   const [prodList,setProdList]=useState([]);     // productos (para ligar cupón → producto)
   useEffect(()=>{ if(!DEMO_MODE && sb){ sb.from('productos').select('id,nombre,categoria').eq('activo',true).order('nombre').then(({data})=>setProdList(data||[])); } },[]);
 
@@ -4567,7 +4599,7 @@ function Membresias({showToast, admin}){
   const cargarCupones=()=>vipListCupones().then(setCupones).catch(()=>setCupones([]));
   const cargarBitacora=()=>{ setBitacora(null); vipUltimasTx(50).then(setBitacora).catch(()=>setBitacora([])); };
   const cargarMovs=()=>{ setMovs(null); const [y,m]=mes.split('-').map(Number); const desde=new Date(y,m-1,1).toISOString(); const hasta=new Date(y,m,1).toISOString(); vipMovimientosRango(desde,hasta).then(setMovs).catch(()=>setMovs([])); };
-  useEffect(()=>{ if(vista==='cupones' && cupones===null) cargarCupones(); if(vista==='bitacora') cargarBitacora(); if(vista==='movimientos') cargarMovs(); },[vista]);
+  useEffect(()=>{ if(vista==='cupones'){ if(cupones===null) cargarCupones(); if(!sedesOrigen.length) vipSedesOrigen().then(setSedesOrigen).catch(()=>{}); } if(vista==='bitacora') cargarBitacora(); if(vista==='movimientos') cargarMovs(); if(vista==='origen' && origen===null) cargarOrigen(); },[vista]);
   useEffect(()=>{ if(vista==='movimientos') cargarMovs(); },[mes]);
 
   // editar ficha del cliente
@@ -4649,6 +4681,7 @@ function Membresias({showToast, admin}){
           <button className={"btn btn-sm "+(vista==='cupones'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cupones')}>🎁 Cupones</button>
           <button className={"btn btn-sm "+(vista==='bitacora'?'btn-amber':'btn-ghost')} onClick={()=>setVista('bitacora')}>📋 Bitácora</button>
           <button className={"btn btn-sm "+(vista==='movimientos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('movimientos')}>📍 Por sede</button>
+          <button className={"btn btn-sm "+(vista==='origen'?'btn-amber':'btn-ghost')} onClick={()=>setVista('origen')}>🗺️ Origen</button>
         </div>
       </div>
 
@@ -4819,6 +4852,51 @@ function Membresias({showToast, admin}){
         );
       })()}
 
+      {/* ===== ORIGEN DE MEMBRESÍAS (dónde se generó cada una) ===== */}
+      {vista==='origen' && (
+        <div>
+          <div className="toolbar">
+            <div className="muted" style={{marginRight:"auto"}}>Cada membresía y la sede donde se generó (según su registro inicial). Histórico completo.</div>
+            <input className="input" style={{maxWidth:220,margin:0}} value={oq} onChange={e=>setOq(e.target.value)} placeholder="Buscar nombre o ID VIP…"/>
+            <button className="btn btn-ghost btn-sm" onClick={cargarOrigen}>🔄</button>
+          </div>
+          {origen===null ? <div className="empty">Cargando membresías…</div> : (()=>{
+            const norm=s=>(s&&s.trim())?s.trim():'(sin sede)';
+            const bySede={}; origen.forEach(t=>{ const s=norm(t.sede); bySede[s]=(bySede[s]||0)+1; });
+            const sedesRows=Object.entries(bySede).sort((a,b)=>b[1]-a[1]);
+            const filtro=oq.trim().toLowerCase();
+            const lista=origen.filter(t=> (!origenSede || norm(t.sede)===origenSede) && (!filtro || (t.nombre||'').toLowerCase().includes(filtro) || (t.id_vip||'').toLowerCase().includes(filtro)));
+            const chip=(label,val,activo)=>(<div key={label} onClick={()=>setOrigenSede(activo?"":val)} style={{cursor:"pointer",padding:"6px 12px",borderRadius:20,fontSize:12,fontWeight:700,border:"1px solid "+(activo?"var(--amber)":"var(--bd)"),background:activo?"var(--amber-d)":"var(--sf2)",color:activo?"var(--amber)":"var(--t)"}}>{label}</div>);
+            return (
+              <div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+                  {chip("Todas ("+origen.length+")","",origenSede==="")}
+                  {sedesRows.map(([s,n])=>chip(s+" ("+n+")",s,origenSede===s))}
+                </div>
+                <div className="card" style={{padding:0,overflowX:"auto"}}>
+                  <table className="tbl">
+                    <thead><tr><th>Fecha</th><th>Cliente</th><th>Membresía</th><th>Sede de origen</th></tr></thead>
+                    <tbody>
+                      {lista.length===0 && <tr><td colSpan="4"><div className="empty">Sin resultados.</div></td></tr>}
+                      {lista.slice(0,500).map((t,i)=>(
+                        <tr key={i}>
+                          <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(t.created_at)}</td>
+                          <td className="row-name">{t.nombre||"—"}<div className="muted" style={{fontSize:11}}>{t.id_vip}{t.activo===false?" · inactivo":""}</div></td>
+                          <td>{t.membresia}</td>
+                          <td>{norm(t.sede)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {lista.length>500 && <div className="muted" style={{marginTop:8}}>Mostrando 500 de {lista.length}. Filtra por sede o busca para acotar.</div>}
+                {lista.length<=500 && <div className="muted" style={{marginTop:8}}>{lista.length} membresía(s){origenSede?(" en "+origenSede):""}{filtro?" que coinciden":""}.</div>}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* Editor de cupón */}
       {edCup && (
         <div className="modal-bg" onClick={()=>!busyC&&setEdCup(null)}>
@@ -4834,6 +4912,16 @@ function Membresias({showToast, admin}){
             <select className="select" value={edCup.membresia} onChange={e=>setEdCup({...edCup,membresia:e.target.value})}>
               {["Todos","Standard","Silver","Gold"].map(m=><option key={m} value={m}>{m}</option>)}
             </select>
+
+            <label className="label" style={{marginTop:10}}>Sedes donde aplica</label>
+            <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Marca las sedes donde sirve este cupón (alianzas locales). Si <b>no marcas ninguna</b>, aplica para <b>todas</b>. El cliente solo ve los cupones de la sede donde se registró.</div>
+            <div className="multi">
+              {sedesOrigen.length===0 && <span className="muted" style={{fontSize:12}}>Cargando sedes…</span>}
+              {sedesOrigen.map(s=>{ const on=(edCup.sedes||[]).includes(s); return (
+                <div key={s} className={"multi-opt"+(on?" on":"")} onClick={()=>setEdCup(prev=>{ const cur=prev.sedes||[]; return {...prev, sedes: on?cur.filter(x=>x!==s):[...cur,s]}; })}>{s}</div>
+              );})}
+            </div>
+            <div className="muted" style={{fontSize:12,marginBottom:4,color:(edCup.sedes&&edCup.sedes.length)?"var(--amber)":"var(--td)"}}>{(edCup.sedes&&edCup.sedes.length)?("Aplica solo en "+edCup.sedes.length+" sede(s) marcada(s)."):"Aplica en TODAS las sedes."}</div>
 
             <div style={{borderTop:"1px solid var(--bd)",margin:"12px 0 8px",paddingTop:10}}>
               <label className="label">Producto que entrega (opcional — descuenta de inventario al canjear)</label>

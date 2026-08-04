@@ -284,6 +284,13 @@ async function vipOrigenMembresias(){
   return tx.map(t=>({...t, membresia:(info[t.id_vip]||{}).membresia||'—', activo:(info[t.id_vip]||{}).activo}));
 }
 
+// Cortesías de apertura (captación por link/Instagram)
+async function listCortesias(){
+  if(DEMO_MODE) return [];
+  const {data,error}=await sb.from('cortesias').select('*').order('created_at',{ascending:false}).limit(3000);
+  return error?[]:(data||[]);
+}
+
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
 // ============================================================
@@ -4587,6 +4594,13 @@ function Membresias({showToast, admin}){
   const [origenSede,setOrigenSede]=useState(""); // filtro por sede en la vista Origen
   const [oq,setOq]=useState("");                 // búsqueda en la vista Origen
   const cargarOrigen=()=>{ setOrigen(null); vipOrigenMembresias().then(setOrigen).catch(()=>setOrigen([])); };
+  const [cortesias,setCortesias]=useState(null);   // cortesías de apertura
+  const [cortSedeGen,setCortSedeGen]=useState(""); // sede para generar el link
+  const [cortCampana,setCortCampana]=useState(""); // nombre de campaña para el link
+  const [cortFiltro,setCortFiltro]=useState("");   // filtro por campaña/sede en la tabla
+  const cargarCortesias=()=>{ setCortesias(null); listCortesias().then(setCortesias).catch(()=>setCortesias([])); };
+  const [sedesList,setSedesList]=useState([]);     // sedes (para generar el link de cortesía)
+  useEffect(()=>{ db.listSedes().then(s=>setSedesList((s||[]).filter(x=>!x.es_bodega))).catch(()=>{}); },[]);
   const [prodList,setProdList]=useState([]);     // productos (para ligar cupón → producto)
   useEffect(()=>{ if(!DEMO_MODE && sb){ sb.from('productos').select('id,nombre,categoria').eq('activo',true).order('nombre').then(({data})=>setProdList(data||[])); } },[]);
 
@@ -4599,7 +4613,7 @@ function Membresias({showToast, admin}){
   const cargarCupones=()=>vipListCupones().then(setCupones).catch(()=>setCupones([]));
   const cargarBitacora=()=>{ setBitacora(null); vipUltimasTx(50).then(setBitacora).catch(()=>setBitacora([])); };
   const cargarMovs=()=>{ setMovs(null); const [y,m]=mes.split('-').map(Number); const desde=new Date(y,m-1,1).toISOString(); const hasta=new Date(y,m,1).toISOString(); vipMovimientosRango(desde,hasta).then(setMovs).catch(()=>setMovs([])); };
-  useEffect(()=>{ if(vista==='cupones'){ if(cupones===null) cargarCupones(); if(!sedesOrigen.length) vipSedesOrigen().then(setSedesOrigen).catch(()=>{}); } if(vista==='bitacora') cargarBitacora(); if(vista==='movimientos') cargarMovs(); if(vista==='origen' && origen===null) cargarOrigen(); },[vista]);
+  useEffect(()=>{ if(vista==='cupones'){ if(cupones===null) cargarCupones(); if(!sedesOrigen.length) vipSedesOrigen().then(setSedesOrigen).catch(()=>{}); } if(vista==='bitacora') cargarBitacora(); if(vista==='movimientos') cargarMovs(); if(vista==='origen' && origen===null) cargarOrigen(); if(vista==='cortesias' && cortesias===null) cargarCortesias(); },[vista]);
   useEffect(()=>{ if(vista==='movimientos') cargarMovs(); },[mes]);
 
   // editar ficha del cliente
@@ -4682,6 +4696,7 @@ function Membresias({showToast, admin}){
           <button className={"btn btn-sm "+(vista==='bitacora'?'btn-amber':'btn-ghost')} onClick={()=>setVista('bitacora')}>📋 Bitácora</button>
           <button className={"btn btn-sm "+(vista==='movimientos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('movimientos')}>📍 Por sede</button>
           <button className={"btn btn-sm "+(vista==='origen'?'btn-amber':'btn-ghost')} onClick={()=>setVista('origen')}>🗺️ Origen</button>
+          <button className={"btn btn-sm "+(vista==='cortesias'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cortesias')}>🎟️ Cortesías</button>
         </div>
       </div>
 
@@ -4891,6 +4906,89 @@ function Membresias({showToast, admin}){
                 </div>
                 {lista.length>500 && <div className="muted" style={{marginTop:8}}>Mostrando 500 de {lista.length}. Filtra por sede o busca para acotar.</div>}
                 {lista.length<=500 && <div className="muted" style={{marginTop:8}}>{lista.length} membresía(s){origenSede?(" en "+origenSede):""}{filtro?" que coinciden":""}.</div>}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ===== CORTESÍAS DE APERTURA ===== */}
+      {vista==='cortesias' && (
+        <div>
+          <div className="card" style={{marginBottom:14}}>
+            <div className="card-t">🔗 Genera el link para tu pauta</div>
+            <div className="muted" style={{marginBottom:10,fontSize:12}}>Elige la sede de la apertura y (opcional) un nombre de campaña. Ese link va en tu publicación de Instagram; quien se registre recibe 1 lavada de cortesía canjeable solo en esa sede.</div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div className="fld"><label className="label">Sede de apertura</label>
+                <select className="select" style={{margin:0,minWidth:180}} value={cortSedeGen} onChange={e=>setCortSedeGen(e.target.value)}>
+                  <option value="">— Elige sede —</option>
+                  {sedesList.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+                </select></div>
+              <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Campaña (opcional)</label>
+                <input className="input" style={{margin:0}} value={cortCampana} onChange={e=>setCortCampana(e.target.value)} placeholder="ej. apertura-bello-julio"/></div>
+            </div>
+            {cortSedeGen && (()=>{
+              const base=location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html';
+              const url=base+'?sede='+encodeURIComponent(cortSedeGen)+(cortCampana.trim()?('&campana='+encodeURIComponent(cortCampana.trim())):'');
+              return (
+                <div style={{marginTop:12}}>
+                  <div className="muted" style={{fontSize:12,marginBottom:4}}>Tu link:</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                    <input className="input" style={{margin:0,flex:1,minWidth:220}} readOnly value={url} onFocus={e=>e.target.select()}/>
+                    <button className="btn btn-amber btn-sm" onClick={()=>{ try{navigator.clipboard.writeText(url);}catch(e){}; showToast("Link copiado","ok"); }}>Copiar</button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
+            const byCamp={};
+            cortesias.forEach(c=>{ const k=(c.campana||'(sin campaña)')+' · '+(c.sede||'—'); const o=byCamp[k]||(byCamp[k]={label:k,total:0,canj:0}); o.total++; if(c.estado==='canjeada') o.canj++; });
+            const camps=Object.values(byCamp).sort((a,b)=>b.total-a.total);
+            const filtro=cortFiltro.trim().toLowerCase();
+            const lista=cortesias.filter(c=> !filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro));
+            const totReg=cortesias.length, totCanj=cortesias.filter(c=>c.estado==='canjeada').length;
+            return (
+              <div>
+                <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
+                  <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Registrados</div><div style={{fontSize:24,fontWeight:800}}>{totReg}</div></div>
+                  <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Canjeados</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{totCanj}</div></div>
+                  <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Conversión</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{totReg?Math.round(totCanj/totReg*100):0}%</div></div>
+                </div>
+                {camps.length>0 && (
+                  <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+                    <table className="tbl">
+                      <thead><tr><th>Campaña · Sede</th><th className="num">Registrados</th><th className="num">Canjeados</th><th className="num">Conversión</th></tr></thead>
+                      <tbody>{camps.map(c=>(<tr key={c.label}><td className="row-name">{c.label}</td><td className="num">{c.total}</td><td className="num" style={{color:"var(--green)"}}>{c.canj}</td><td className="num">{c.total?Math.round(c.canj/c.total*100):0}%</td></tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="toolbar">
+                  <div className="sec-title" style={{marginRight:"auto",fontSize:15}}>Leads ({lista.length})</div>
+                  <input className="input" style={{maxWidth:220,margin:0}} value={cortFiltro} onChange={e=>setCortFiltro(e.target.value)} placeholder="Buscar nombre, tel, campaña…"/>
+                  <button className="btn btn-ghost btn-sm" onClick={cargarCortesias}>🔄</button>
+                </div>
+                <div className="card" style={{padding:0,overflowX:"auto"}}>
+                  <table className="tbl">
+                    <thead><tr><th>Fecha</th><th>Nombre</th><th>WhatsApp</th><th>Sede</th><th>Campaña</th><th>Estado</th><th>Vence</th></tr></thead>
+                    <tbody>
+                      {lista.length===0 && <tr><td colSpan="7"><div className="empty">Sin cortesías todavía.</div></td></tr>}
+                      {lista.slice(0,500).map(c=>(
+                        <tr key={c.id}>
+                          <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(c.created_at)}</td>
+                          <td className="row-name">{c.nombre}</td>
+                          <td><a href={'https://wa.me/57'+(c.telefono||'').replace(/\D/g,'')} target="_blank" rel="noopener" style={{color:"var(--green)"}}>{c.telefono}</a></td>
+                          <td>{c.sede}</td>
+                          <td className="muted">{c.campana||"—"}</td>
+                          <td>{c.estado==='canjeada'?<span className="pill pill-prod">Canjeada</span>:<span className="pill pill-token">Pendiente</span>}</td>
+                          <td className="muted">{c.vence?fLocalDia(c.vence):"—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {lista.length>500 && <div className="muted" style={{marginTop:8}}>Mostrando 500 de {lista.length}. Filtra para acotar.</div>}
               </div>
             );
           })()}

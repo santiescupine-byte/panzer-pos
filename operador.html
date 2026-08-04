@@ -592,6 +592,9 @@ const vipApi = (params, t) => VIP_BACKEND==='supabase' ? vipApiSupabase(params) 
 // teléfono colombiano → formato wa.me
 const vipTelWA = t => { let n=String(t||'').replace(/\D/g,''); if(n.startsWith('3')&&n.length===10) n='57'+n; if(!n.startsWith('57')) n='57'+n; return n; };
 const vipCarnetLink = c => 'https://vip.panzercarwash.com/carnet.html?'+new URLSearchParams({id:c.id,nombre:c.nombre,mem:c.membresia,saldo:c.saldo}).toString();
+// Instructivo corto para acceder a la página del cliente (saldo, tokens y cupones)
+const VIP_CLIENTE_URL = 'https://vip.panzercarwash.com/cliente.html';
+const vipInstructivo = c => '🌐 *Entra a tu cuenta VIP* (saldo, tokens y cupones):\n1️⃣ Abre: '+VIP_CLIENTE_URL+'\n2️⃣ Ingresa con tu código VIP: *'+c.id+'*';
 
 // Nº de recibo secuencial para demo (en Supabase lo asigna el sistema y es el mismo que ve el back office)
 function nextReciboDemo(){
@@ -1995,7 +1998,7 @@ function VipSheet({sede,operador,showToast,onClose}){
   };
   const waVenta=()=>{
     const c=vRes, m=VIP_MEMBRESIAS[c.membresia];
-    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n🪙 *'+m.tokens+' Tokens* ('+m.gratis+' gratis)\n💰 Saldo: *'+fmt(m.saldo)+'*\n🎁 Ahorro: *'+fmt(m.saldo-m.precio)+'*\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n\n🔑 Tu código VIP: *'+c.id+'*\n\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
+    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n🪙 *'+m.tokens+' Tokens* ('+m.gratis+' gratis)\n💰 Saldo: *'+fmt(m.saldo)+'*\n🎁 Ahorro: *'+fmt(m.saldo-m.precio)+'*\n\n'+vipInstructivo(c)+'\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
     window.open('https://wa.me/'+vipTelWA(c.telefono)+'?text='+encodeURIComponent(msg),'_blank');
   };
 
@@ -2027,7 +2030,7 @@ function VipSheet({sede,operador,showToast,onClose}){
   };
   const waReenvio=()=>{
     const c=reCli;
-    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n💰 Saldo actual: *'+fmt(c.saldo||0)+'*\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n\n🔑 Tu código VIP: *'+c.id+'*\n\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
+    const msg='🚗 *PANZER CARWASH*\n━━━━━━━━━━━━━━━\n¡Hola '+c.nombre+'! 👋\n\nTu membresía *'+c.membresia+'* está activa ✅\n\n💰 Saldo actual: *'+fmt(c.saldo||0)+'*\n\n'+vipInstructivo(c)+'\n\n📲 Descarga tu carnet:\n'+vipCarnetLink(c)+'\n━━━━━━━━━━━━━━━\nPresenta tu QR en cualquier sede 🙌';
     window.open('https://wa.me/'+vipTelWA(c.telefono)+'?text='+encodeURIComponent(msg),'_blank');
   };
 

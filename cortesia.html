@@ -59,13 +59,17 @@
       <div class="ok-em">🎉</div>
       <div class="ok-t" id="okTitle">¡Listo!</div>
       <p class="ok-s" id="okSub">Tu cortesía está activa.</p>
+      <div style="text-align:center;">
+        <div style="background:#fff;border-radius:16px;padding:16px;display:inline-block;margin-bottom:14px;box-shadow:0 6px 20px rgba(0,0,0,.25);">
+          <img id="qrImg" width="220" height="220" style="display:block;border-radius:8px;" alt="Tu QR de cortesía">
+        </div>
+      </div>
       <div class="datos">
         <div class="drow"><span class="k">Código</span><span class="v" id="okCode">—</span></div>
         <div class="drow"><span class="k">Sede</span><span class="v" id="okSede">—</span></div>
         <div class="drow"><span class="k">Válida hasta</span><span class="v" id="okVence">—</span></div>
       </div>
-      <a class="btn btn-carnet" id="okCarnet" href="#" target="_blank" rel="noopener">🎟️ Ver mi QR / carnet</a>
-      <p class="fine">Presenta este QR en la máquina o en caja de la sede <b id="okSede2">—</b> para reclamar tu lavada. ¡Guárdalo con un pantallazo! 📲</p>
+      <p class="fine">📲 <b>Guarda este QR con un pantallazo.</b> Preséntalo en la máquina o en caja de la sede <b id="okSede2">—</b> para reclamar tu lavada gratis.</p>
     </div>
   </div>
 
@@ -79,7 +83,8 @@
   const $=id=>document.getElementById(id);
   if(SEDE){ $('sedeName').textContent=SEDE; } else { $('sedeName').textContent='Panzer'; }
 
-  const carnetLink=(id,nombre)=>'https://vip.panzercarwash.com/carnet.html?'+new URLSearchParams({id,nombre:nombre||'',mem:'Cortesía',saldo:'6000'}).toString();
+  // Mismo formato de QR que lee el sistema/las máquinas: JSON {id,nombre,membresia} vía api.qrserver.com
+  const qrImgSrc=(id,nombre)=>'https://api.qrserver.com/v1/create-qr-code/?size=240x240&data='+encodeURIComponent(JSON.stringify({id:id,nombre:nombre||'',membresia:'Cortesía'}));
 
   async function registrar(){
     const nombre=$('nombre').value.trim();
@@ -99,7 +104,7 @@
       $('okSede').textContent = data.sede||SEDE;
       $('okSede2').textContent = data.sede||SEDE;
       $('okVence').textContent = data.vence||'—';
-      $('okCarnet').href = carnetLink(data.id_vip, nombre);
+      $('qrImg').src = qrImgSrc(data.id_vip, nombre);
       $('form').classList.add('hidden');
       $('ok').classList.remove('hidden');
       window.scrollTo(0,0);

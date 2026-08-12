@@ -4050,15 +4050,16 @@ function Recaudo({showToast, quien, rol}){
         // ---- ALERTAS del ciclo (réplica del admin del recaudo) ----
         const totVend=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.tokens_vendidos)||0),0);
         const totDev=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
-        const tokEgr=totVend+totDev; const difEgr=sumTD-tokEgr; const difEgrAbs=Math.abs(difEgr);
+        const totMemb=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
+        const tokEgr=totVend+totDev+totMemb; const difEgr=sumTD-tokEgr; const difEgrAbs=Math.abs(difEgr);
         const difTokFis=sumTD-(Number(c.tokens_fisicos)||0);
         const difMon=sumMD-(Number(c.efectivo_total_monedas)||0);
         const descEf=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.descuadre)||0),0);
         const opsNeg=ct.filter(o=>o.saldoEsperado!=null && o.saldoEsperado<0);
         const ajuste=Number(rep.ajusteTokens)||0;
         const alertas=[];
-        if(difEgrAbs>30) alertas.push(['danger','🚨 Descuadre alto de tokens: egresaron '+tokEgr+' (vendidos+dev) vs '+sumTD+' que entraron a máquinas → diferencia '+(difEgr>0?'+':'')+difEgr]);
-        else if(difEgrAbs>10) alertas.push(['warning','⚠️ Revisar tokens: egresados '+tokEgr+' vs máquinas '+sumTD+' → diferencia '+(difEgr>0?'+':'')+difEgr]);
+        if(difEgrAbs>30) alertas.push(['danger','🚨 Descuadre alto de tokens: egresaron '+tokEgr+' (vendidos+dev+membresías) vs '+sumTD+' que entraron a máquinas → diferencia '+(difEgr>0?'+':'')+difEgr]);
+        else if(difEgrAbs>10) alertas.push(['warning','⚠️ Revisar tokens: egresados '+tokEgr+' (vend+dev+memb) vs máquinas '+sumTD+' → diferencia '+(difEgr>0?'+':'')+difEgr]);
         if(difTokFis!==0) alertas.push(['danger','🚨 '+Math.abs(difTokFis)+' tokens de diferencia: contadores '+sumTD+' vs físico contado '+(Number(c.tokens_fisicos)||0)+' ('+(difTokFis>0?'faltan físicos':'sobran físicos')+')']);
         if(difMon!==0) alertas.push(['warning','⚠️ '+fmt(Math.abs(difMon))+' de diferencia en monedas: contadores '+fmt(sumMD)+' vs físico '+fmt(c.efectivo_total_monedas)]);
         if(descEf!==0) alertas.push(['warning','⚠️ Descuadre de efectivo en liquidaciones: '+fmt(descEf)]);

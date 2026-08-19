@@ -858,6 +858,20 @@ const db = {
     if(DEMO_MODE){ DEMO.productos=DEMO.productos.filter(x=>x.id!==id); return; }
     const {error}=await sb.from('productos').delete().eq('id',id); if(error) throw error;
   },
+  // Operadores que aparecen en las ventas (para el filtro de Informes).
+  // Incluye a los que ya no están en Empleados: sus ventas NO se borran al eliminarlos.
+  async listOperadoresVentas(){
+    if(DEMO_MODE) return [];
+    const set=new Set(); const PAGE=1000; let from=0;
+    for(;;){
+      const {data,error}=await sb.from('ventas').select('operador').eq('anulada',false).range(from,from+PAGE-1);
+      if(error) break;
+      (data||[]).forEach(v=>{ if(v.operador) set.add(v.operador); });
+      if(!data || data.length<PAGE) break;
+      from+=PAGE;
+    }
+    return [...set].sort((a,b)=>a.localeCompare(b));
+  },
   // ---- VENTAS (para informes) ----
   // f = {desde, hasta (ISO date), sede, operador, tipoPago}
   async getVentas(f){
@@ -2095,7 +2109,9 @@ function Informes({showToast}){
   const [ventas,setVentas]=useState(null);
   const [sub,setSub]=useState('resumen');
 
-  useEffect(()=>{ (async()=>{ try{ const [s,e]=await Promise.all([db.listSedes(),db.listEmpleados()]); setSedes(s); setEmps(e); }catch(err){} })(); },[]);
+  const [opsHist,setOpsHist]=useState([]);   // operadores que aparecen en ventas (incluye a los que ya no están en Empleados)
+  useEffect(()=>{ (async()=>{ try{ const [s,e]=await Promise.all([db.listSedes(),db.listEmpleados()]); setSedes(s); setEmps(e); }catch(err){}
+    try{ setOpsHist(await db.listOperadoresVentas()); }catch(err){} })(); },[]);
 
   const cargar=async()=>{
     setVentas(null);
@@ -2134,7 +2150,16 @@ function Informes({showToast}){
           <label className="label">Colaborador</label>
           <select className="select" value={operador} onChange={e=>setOperador(e.target.value)}>
             <option value="">Todos los colaboradores</option>
-            {emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero'||e.rol==='supervisor').map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+            {(()=>{
+              // empleados actuales + los que aparecen en ventas históricas (aunque ya no estén en Empleados)
+              const actuales=emps.filter(e=>e.rol==='cajero'||e.rol==='tesorero'||e.rol==='supervisor').map(e=>e.nombre);
+              const set=new Set(actuales);
+              const antiguos=opsHist.filter(o=>!set.has(o));
+              return (<React.Fragment>
+                {actuales.map(n=><option key={'a-'+n} value={n}>{n}</option>)}
+                {antiguos.length>0 && <optgroup label="— Ya no están —">{antiguos.map(n=><option key={'h-'+n} value={n}>{n}</option>)}</optgroup>}
+              </React.Fragment>);
+            })()}
           </select>
         </div>
         <div className="fld">
@@ -3192,7 +3217,7 @@ function Recaudo({showToast, quien, rol}){
   const [saldoRows,setSaldoRows]=useState(null);
   const [saldoSede,setSaldoSede]=useState("");
   const cargarSaldos=async(s)=>{ setSaldoRows(null); const r=await db.recSaldos(s);
-    setSaldoRows((r||[]).map(x=>({id:x.id, operador:x.operador, saldo:String(Number(x.saldo)||0), fecha:x.ciclo_fecha, existente:true}))
+    setSaldoRows((r||[]).map(x=>({id:x.id, operador:x.operador, operOrig:x.operador, saldo:String(Number(x.saldo)||0), fecha:x.ciclo_fecha, existente:true}))
       .sort((a,b)=>a.operador.localeCompare(b.operador))); };
   const abrirSaldos=()=>{ const s=saldoSede || (sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre || ""; setSaldoSede(s); setPaso('saldos'); if(s) cargarSaldos(s); };
   const setSaldoRow=(i,patch)=>setSaldoRows(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
@@ -3203,9 +3228,16 @@ function Recaudo({showToast, quien, rol}){
     setSaldoRows(a=>a.filter((_,j)=>j!==i)); };
   const guardarSaldos=async()=>{
     const rows=(saldoRows||[]).filter(r=>(r.operador||"").trim());
-    if(rows.some(r=>rows.filter(x=>x.operador.trim()===r.operador.trim()).length>1)){ showToast("Hay operadores repetidos","err"); return; }
+    const rep=rows.find(r=>rows.filter(x=>x.operador.trim()===r.operador.trim()).length>1);
+    if(rep){ showToast('"'+rep.operador.trim()+'" está repetido — borra una de las filas antes de guardar',"err"); return; }
     setBusy(true);
-    try{ for(const r of rows){ await db.guardarSaldoOperador({sede:saldoSede, operador:r.operador.trim(), saldo:r.saldo}); }
+    try{
+      for(const r of rows){
+        const nom=r.operador.trim();
+        await db.guardarSaldoOperador({sede:saldoSede, operador:nom, saldo:r.saldo});
+        // si el nombre venía con espacios, RENOMBRAMOS: borramos la fila vieja en vez de dejar dos
+        if(r.id && r.operOrig && r.operOrig!==nom) await db.borrarSaldoOperador(r.id);
+      }
       showToast("Saldos guardados ✓","ok"); cargarSaldos(saldoSede); }
     catch(e){ showToast(""+(e.message||e),"err"); }
     finally{ setBusy(false); } };

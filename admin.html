@@ -709,6 +709,16 @@ const db = {
     if(DEMO_MODE) return [];
     const {data,error}=await sb.from('recaudo_saldos_operador').select('*').eq('sede',sede); if(error) return []; return data||[];
   },
+  // Abrir/editar el saldo de tokens de un operador (solo admin). Úsalo cuando entra un cajero nuevo.
+  async guardarSaldoOperador(s){
+    if(DEMO_MODE) return;
+    const row={sede:s.sede, operador:s.operador, saldo:Number(s.saldo)||0, updated_at:new Date().toISOString()};
+    const {error}=await sb.from('recaudo_saldos_operador').upsert(row,{onConflict:'sede,operador'}); if(error) throw error;
+  },
+  async borrarSaldoOperador(id){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('recaudo_saldos_operador').delete().eq('id',id); if(error) throw error;
+  },
   async cerrarCiclo(p){
     if(DEMO_MODE) return 'demo-ciclo';
     const {data,error}=await sb.rpc('cerrar_ciclo',{p_ciclo:p.ciclo, p_liquidaciones:p.liquidaciones||[], p_maquinas:p.maquinas||[], p_gastos:p.gastos||[], p_reparto:p.reparto||{}});
@@ -3073,7 +3083,10 @@ function Recaudo({showToast, quien, rol}){
   const totalDescuadre=liqs.reduce((a,l)=>a+descuadreDe(l),0);
 
   // control de tokens por operador. tokensMaq = tokens FÍSICOS contados (no el contador).
-  const normOp=s=>s?(s.charAt(0).toUpperCase()+s.slice(1).toLowerCase()):s;
+  // El nombre del operador puede venir con espacios/mayúsculas distintas ("David " vs "David"):
+  // normalizamos para que SIEMPRE encuentre su saldo anterior y no se creen filas duplicadas.
+  const keyOp=s=>String(s||'').trim().toLowerCase();
+  const saldosPrevNorm={}; Object.keys(saldosPrev||{}).forEach(k=>{ saldosPrevNorm[keyOp(k)]=saldosPrev[k]; });
   const baseSedeSaldo = saldosPrev['BASE_SEDE'];          // si el ciclo anterior fue "por sede"
   const prevSede = baseSedeSaldo!=null;
   const opsSet=[...new Set(liqs.map(l=>l.operador).filter(Boolean))];
@@ -3082,7 +3095,7 @@ function Recaudo({showToast, quien, rol}){
     const vendidos=sus.reduce((a,l)=>a+(Number(l.tokens_vendidos)||0),0);
     const devTokens=sus.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
     const membresia=sus.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
-    const saldoAnterior= prevSede ? 0 : (Number(saldosPrev[normOp(op)] ?? saldosPrev[op])||0);
+    const saldoAnterior= prevSede ? 0 : (Number(saldosPrevNorm[keyOp(op)])||0);
     const saldoEsperado= prevSede ? null : (saldoAnterior-vendidos-devTokens-membresia);
     return {nombre:op, historial:{saldo:saldoAnterior}, saldoAnterior, vendidos,
             vendidosEsteC:vendidos, devTokens, devTokensEsteC:devTokens, membresia, membresiaEsteC:membresia, saldoEsperado};
@@ -3109,12 +3122,12 @@ function Recaudo({showToast, quien, rol}){
       // controlTokens con el saldo NUEVO asignado por operador (lo que arranca el próximo ciclo)
       const ctSend = controlTokens.map(c=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0;
         const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?(Number(reparto.ops[c.nombre])||0):def;
-        return {...c, saldoNuevo:v}; });
+        return {...c, nombre:(c.nombre||'').trim(), saldoNuevo:v}; });   // nombre limpio: evita filas duplicadas
       const repObj={ modoReparto:reparto.modo, ajusteTokens:ajusteNum, ajusteMotivo:reparto.ajusteMotivo||"",
         baseRecogida:Number(reparto.baseRecogida)||0, baseNueva:Number(reparto.baseNueva)||0,
         baseConfigurada, baseEsperada, difBase, tokensTotalBase:tokensDisponibles, totalGastosDeSede:totalGastos,
         controlTokens:ctSend, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
-        totalDevTokensCiclo:totDevTokens, totalSaldoEsperado:totSaldoEsp, tokensPerdidos,
+        totalDevTokensCiclo:totDevTokens, totalMembresiaCiclo:totMembresia, totalSaldoEsperado:totSaldoEsp, tokensPerdidos,
         faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede };
       const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
         total_recaudo:totalRecaudo, a_consignar:aConsignar, total_descuadre:totalDescuadre,
@@ -3175,6 +3188,29 @@ function Recaudo({showToast, quien, rol}){
       cargarPendientes(pendSede); showToast("Pendientes borradas","ok");
     }catch(e){ showToast(""+(e.message||e),"err"); }
   };
+  // ---- Saldos de tokens por operador (abrir saldo a cajero nuevo / corregir, SOLO admin) ----
+  const [saldoRows,setSaldoRows]=useState(null);
+  const [saldoSede,setSaldoSede]=useState("");
+  const cargarSaldos=async(s)=>{ setSaldoRows(null); const r=await db.recSaldos(s);
+    setSaldoRows((r||[]).map(x=>({id:x.id, operador:x.operador, saldo:String(Number(x.saldo)||0), fecha:x.ciclo_fecha, existente:true}))
+      .sort((a,b)=>a.operador.localeCompare(b.operador))); };
+  const abrirSaldos=()=>{ const s=saldoSede || (sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre || ""; setSaldoSede(s); setPaso('saldos'); if(s) cargarSaldos(s); };
+  const setSaldoRow=(i,patch)=>setSaldoRows(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
+  const addSaldoRow=()=>setSaldoRows(a=>[...(a||[]),{id:null,operador:"",saldo:"0",existente:false}]);
+  const delSaldoRow=async(i)=>{ const r=(saldoRows||[])[i];
+    if(r&&r.id){ if(!confirm("¿Borrar el saldo de \""+r.operador+"\" en "+saldoSede+"?\nEl próximo ciclo arrancará sin saldo para esta persona.")) return;
+      try{ await db.borrarSaldoOperador(r.id); }catch(e){ showToast(""+(e.message||e),"err"); return; } }
+    setSaldoRows(a=>a.filter((_,j)=>j!==i)); };
+  const guardarSaldos=async()=>{
+    const rows=(saldoRows||[]).filter(r=>(r.operador||"").trim());
+    if(rows.some(r=>rows.filter(x=>x.operador.trim()===r.operador.trim()).length>1)){ showToast("Hay operadores repetidos","err"); return; }
+    setBusy(true);
+    try{ for(const r of rows){ await db.guardarSaldoOperador({sede:saldoSede, operador:r.operador.trim(), saldo:r.saldo}); }
+      showToast("Saldos guardados ✓","ok"); cargarSaldos(saldoSede); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+    finally{ setBusy(false); } };
+  const cajerosDe=s=>emps.filter(e=>e.activo!==false && (e.sedes||[]).includes(s) && (e.rol==='cajero'||e.rol==='supervisor'));
+
   const setCont=(i,patch)=>setContMaqs(a=>a.map((x,j)=>j===i?{...x,...patch}:x));
   const guardarContadores=async()=>{
     setBusy(true);
@@ -3325,10 +3361,11 @@ function Recaudo({showToast, quien, rol}){
 
   return (
     <div>
-      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='frhist'||paso==='frmaq'); return (
+      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='saldos'||paso==='frhist'||paso==='frmaq'); return (
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
+        {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirSaldos}>🪙 Saldos</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirFrConfig}>🏭 Franquicias</button>}
         {!sub && paso==='fr' && <button className="btn btn-ghost btn-sm" onClick={verFrHistorial}>📚 Historial</button>}
@@ -3954,6 +3991,53 @@ function Recaudo({showToast, quien, rol}){
         </div>
       )}
 
+      {/* ===== SALDOS DE TOKENS POR OPERADOR (solo admin) ===== */}
+      {paso==='saldos' && (
+        <div>
+          <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+            <b style={{color:"var(--amber)"}}>🪙 Saldo de tokens con el que arranca cada persona.</b> <span className="muted">Úsalo cuando <b>entra un cajero nuevo</b>: ábrele aquí los tokens que le entregaste, así su primer ciclo cuadra. Si no, el sistema lo toma con saldo 0 y el reparto queda descuadrado.</span>
+          </div>
+          <div className="toolbar">
+            <select className="select" style={{maxWidth:240,margin:0}} value={saldoSede} onChange={e=>{setSaldoSede(e.target.value);cargarSaldos(e.target.value);}}>
+              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+            <button className="btn btn-ghost btn-sm" onClick={addSaldoRow}>＋ Agregar persona</button>
+          </div>
+          {saldoRows===null ? <div className="empty">Cargando…</div> : (
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Operador</th><th className="num">Saldo de tokens</th><th>Últ. ciclo</th><th></th></tr></thead>
+                <tbody>
+                  {saldoRows.length===0 && <tr><td colSpan="4"><div className="empty">Esta sede no tiene saldos de tokens registrados.</div></td></tr>}
+                  {saldoRows.map((r,i)=>{
+                    const yaUsados=saldoRows.filter((_,j)=>j!==i).map(x=>x.operador);
+                    const libres=cajerosDe(saldoSede).filter(c=>!yaUsados.includes(c.nombre));
+                    return (
+                    <tr key={i}>
+                      <td className="row-name">
+                        {r.existente
+                          ? (r.operador==='BASE_SEDE' ? <span>BASE_SEDE <span className="pill pill-token" style={{marginLeft:4}}>bolsa compartida</span></span> : r.operador)
+                          : <select className="select" style={{margin:0,minWidth:170}} value={r.operador} onChange={e=>setSaldoRow(i,{operador:e.target.value})}>
+                              <option value="">— Elige persona —</option>
+                              {libres.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+                            </select>}
+                      </td>
+                      <td className="num"><input className="input" style={{margin:0,textAlign:"right",maxWidth:130}} type="number" value={r.saldo} onChange={e=>setSaldoRow(i,{saldo:e.target.value})}/></td>
+                      <td className="muted">{r.fecha||"—"}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={()=>delSaldoRow(i)}>✕</button></td>
+                    </tr>
+                  );})}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="toolbar" style={{marginTop:12}}>
+            <div className="muted" style={{marginRight:"auto",fontSize:12}}>Total en la sede: <b>{(saldoRows||[]).reduce((a,r)=>a+(Number(r.saldo)||0),0)}</b> tokens</div>
+            <button className="btn btn-amber" disabled={busy||saldoRows===null} onClick={guardarSaldos}>{busy?"Guardando…":"💾 Guardar saldos"}</button>
+          </div>
+        </div>
+      )}
+
       {/* ===== CONTADORES DE MÁQUINA (solo admin) ===== */}
       {paso==='contadores' && (
         <div>
@@ -4052,6 +4136,9 @@ function Recaudo({showToast, quien, rol}){
         const totDev=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.dev_tokens)||0),0);
         const totMemb=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
         const tokEgr=totVend+totDev+totMemb; const difEgr=sumTD-tokEgr; const difEgrAbs=Math.abs(difEgr);
+        // saldo esperado de tokens a nivel SEDE (sirve igual en modo "base sede" que "por operador")
+        const sAntSede=Number(rep.totalSaldoAnterior)||0;
+        const sEspSede=rep.totalSaldoEsperado!=null?Number(rep.totalSaldoEsperado):(sAntSede-tokEgr);
         const difTokFis=sumTD-(Number(c.tokens_fisicos)||0);
         const difMon=sumMD-(Number(c.efectivo_total_monedas)||0);
         const descEf=detalle.liquidaciones.reduce((a,l)=>a+(Number(l.descuadre)||0),0);
@@ -4081,7 +4168,7 @@ function Recaudo({showToast, quien, rol}){
             </div>
 
             <div className="cards" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
-              {[['Total recaudo',fmt(c.total_recaudo)],['A consignar',fmt(c.a_consignar)],['Gastos',fmt(c.total_gastos)],['Descuadre',fmt(c.total_descuadre)],['Tokens físicos',c.tokens_fisicos],['Base tokens',(rep.tokensTotalBase!=null?rep.tokensTotalBase:'—')]].map(([l,v])=>(
+              {[['Total recaudo',fmt(c.total_recaudo)],['A consignar',fmt(c.a_consignar)],['Gastos',fmt(c.total_gastos)],['Descuadre',fmt(c.total_descuadre)],['Tokens físicos',c.tokens_fisicos],['Saldo esperado tokens',sEspSede],['Base tokens',(rep.tokensTotalBase!=null?rep.tokensTotalBase:'—')]].map(([l,v])=>(
                 <div key={l} className="card" style={{flex:"1 1 110px",padding:10}}><div className="muted" style={{fontSize:11}}>{l}</div><div style={{fontSize:16,fontWeight:800}}>{v}</div></div>
               ))}
             </div>
@@ -4094,6 +4181,46 @@ function Recaudo({showToast, quien, rol}){
             <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Máquina</th><th className="num">Producido</th><th className="num">Tokens prod.</th><th className="num">Token día</th><th className="num">Mone día</th></tr></thead>
               <tbody>{detalle.maquinas.map((m,i)=>(<tr key={i}><td className="row-name">{m.nombre}</td><td className="num">{fmt(m.producido)}</td><td className="num">{m.producido_tokens}</td><td className="num">{m.token_dia}</td><td className="num">{fmt(m.mone_dia)}</td></tr>))}</tbody></table></div>
             <div className="muted" style={{fontSize:12,marginTop:4}}>Σ Token día <b>{sumTD}</b> vs físico <b>{c.tokens_fisicos}</b> · Σ Mone día <b>{fmt(sumMD)}</b> vs monedas <b>{fmt(c.efectivo_total_monedas)}</b></div>
+
+            {(rep.totalSaldoAnterior!=null || rep.tokensTotalBase!=null || ct.length>0) && (()=>{
+              const modoRep = rep.modoReparto || (ct.some(o=>o.saldoEsperado==null)?'sede':'operadores');
+              const sAnt = sAntSede, sEsp = sEspSede;
+              const tokFis = Number(c.tokens_fisicos)||0;
+              const aj = Number(rep.ajusteTokens)||0;
+              const baseNva = rep.tokensTotalBase!=null ? Number(rep.tokensTotalBase) : (tokFis+sEsp+aj);
+              const hasNuevo = ct.some(o=>o.saldoNuevo!=null);
+              const dejados = modoRep==='sede'
+                ? (rep.nuevoSaldoSede!=null ? Number(rep.nuevoSaldoSede) : baseNva)
+                : (hasNuevo ? ct.reduce((a,o)=>a+(Number(o.saldoNuevo)||0),0) : ct.reduce((a,o)=>a+Math.max(0,Number(o.saldoEsperado)||0),0));
+              const difDej = dejados-baseNva;
+              const fila=(l,v)=>(<div style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid var(--bd)"}}><span className="muted">{l}</span><b>{v}</b></div>);
+              return (
+                <div>
+                  <div className="card-t" style={{marginTop:14}}>🪙 Tokens de la sede {modoRep==='sede'
+                    ? <span className="pill pill-token" style={{marginLeft:6}}>base sede</span>
+                    : <span className="pill pill-prod" style={{marginLeft:6}}>por operador</span>}</div>
+                  <div className="card" style={{padding:12}}>
+                    {fila(modoRep==='sede'?'Base de tokens anterior (sede)':'Saldo anterior (Σ operadores)', sAnt)}
+                    {fila('− Vendidos', totVend)}
+                    {fila('− Devoluciones', totDev)}
+                    {fila('− Membresías', totMemb)}
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"2px solid var(--bd2)",fontWeight:800}}>
+                      <span>= Saldo esperado{modoRep==='sede'?' (base sede)':''}</span>
+                      <span style={{color:sEsp<0?"var(--red)":"var(--green)"}}>{sEsp}</span>
+                    </div>
+                    {fila('+ Tokens físicos contados', tokFis)}
+                    {aj!==0 && fila('+ Ajuste'+(rep.ajusteMotivo?(' — '+rep.ajusteMotivo):''), (aj>0?'+':'')+aj)}
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontWeight:800,fontSize:15}}>
+                      <span>= Base disponible</span><span style={{color:"var(--amber)"}}>{baseNva}</span>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderTop:"1px solid var(--bd)",fontWeight:800}}>
+                      <span>Dejados para el próximo ciclo</span><span>{dejados}</span>
+                    </div>
+                    {difDej!==0 && <div className="muted" style={{fontSize:12,color:"var(--amber)",marginTop:2}}>{difDej<0?("Se retiraron "+Math.abs(difDej)+" tokens de la sede"):("Se agregaron "+difDej+" tokens a la sede")}</div>}
+                  </div>
+                </div>
+              );
+            })()}
 
             {ct.length>0 && <div>
               <div className="card-t" style={{marginTop:14}}>Control de tokens por operador</div>

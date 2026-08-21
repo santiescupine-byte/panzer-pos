@@ -4756,6 +4756,7 @@ function Membresias({showToast, admin}){
   const cargarOrigen=()=>{ setOrigen(null); vipOrigenMembresias().then(setOrigen).catch(()=>setOrigen([])); };
   const [cortesias,setCortesias]=useState(null);   // cortesías de apertura
   const [cortSedeGen,setCortSedeGen]=useState(""); // sede para generar el link
+  const [cortSede2,setCortSede2]=useState("");     // 2ª sede opcional (la cortesía vale en ambas)
   const [cortCampana,setCortCampana]=useState(""); // nombre de campaña para el link
   const [cortFiltro,setCortFiltro]=useState("");   // filtro por campaña/sede en la tabla
   const cargarCortesias=()=>{ setCortesias(null); listCortesias().then(setCortesias).catch(()=>setCortesias([])); };
@@ -5084,12 +5085,18 @@ function Membresias({showToast, admin}){
                   <option value="">— Elige sede —</option>
                   {sedesList.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
                 </select></div>
+              <div className="fld"><label className="label">También vale en (opcional)</label>
+                <select className="select" style={{margin:0,minWidth:180}} value={cortSede2} onChange={e=>setCortSede2(e.target.value)}>
+                  <option value="">— Solo una sede —</option>
+                  {sedesList.filter(s=>s.nombre!==cortSedeGen).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+                </select></div>
               <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Campaña (opcional)</label>
                 <input className="input" style={{margin:0}} value={cortCampana} onChange={e=>setCortCampana(e.target.value)} placeholder="ej. apertura-bello-julio"/></div>
             </div>
             {cortSedeGen && (()=>{
               const base=location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html';
-              const url=base+'?sede='+encodeURIComponent(cortSedeGen)+(cortCampana.trim()?('&campana='+encodeURIComponent(cortCampana.trim())):'');
+              const sedeParam=cortSedeGen+(cortSede2?('|'+cortSede2):'');
+              const url=base+'?sede='+encodeURIComponent(sedeParam)+(cortCampana.trim()?('&campana='+encodeURIComponent(cortCampana.trim())):'');
               return (
                 <div style={{marginTop:12}}>
                   <div className="muted" style={{fontSize:12,marginBottom:4}}>Tu link:</div>
@@ -5103,8 +5110,9 @@ function Membresias({showToast, admin}){
           </div>
 
           {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
+            const sedeTxt=s=>String(s||'—').replace(/\|/g,' o ');   // "A|B" -> "A o B"
             const byCamp={};
-            cortesias.forEach(c=>{ const k=(c.campana||'(sin campaña)')+' · '+(c.sede||'—'); const o=byCamp[k]||(byCamp[k]={label:k,total:0,canj:0}); o.total++; if(c.estado==='canjeada') o.canj++; });
+            cortesias.forEach(c=>{ const k=(c.campana||'(sin campaña)')+' · '+sedeTxt(c.sede); const o=byCamp[k]||(byCamp[k]={label:k,total:0,canj:0}); o.total++; if(c.estado==='canjeada') o.canj++; });
             const camps=Object.values(byCamp).sort((a,b)=>b.total-a.total);
             const filtro=cortFiltro.trim().toLowerCase();
             const lista=cortesias.filter(c=> !filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro));
@@ -5139,7 +5147,7 @@ function Membresias({showToast, admin}){
                           <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(c.created_at)}</td>
                           <td className="row-name">{c.nombre}</td>
                           <td><a href={'https://wa.me/57'+(c.telefono||'').replace(/\D/g,'')} target="_blank" rel="noopener" style={{color:"var(--green)"}}>{c.telefono}</a></td>
-                          <td>{c.sede}</td>
+                          <td>{sedeTxt(c.sede)}</td>
                           <td className="muted">{c.campana||"—"}</td>
                           <td>{c.estado==='canjeada'?<span className="pill pill-prod">Canjeada</span>:<span className="pill pill-token">Pendiente</span>}</td>
                           <td className="muted">{c.vence?fLocalDia(c.vence):"—"}</td>

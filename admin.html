@@ -4760,6 +4760,10 @@ function Membresias({showToast, admin}){
   const [cortCampana,setCortCampana]=useState(""); // nombre de campaña para el link
   const [cortFiltro,setCortFiltro]=useState("");   // filtro por campaña/sede en la tabla
   const cargarCortesias=()=>{ setCortesias(null); listCortesias().then(setCortesias).catch(()=>setCortesias([])); };
+  // Arma el link de registro de una campaña (sirve para generarlo y para RECUPERARLO después)
+  const linkCortesia=(sede,campana)=>location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html'
+    +'?sede='+encodeURIComponent(sede||'')+((campana&&campana!=='(sin campaña)')?('&campana='+encodeURIComponent(campana)):'');
+  const copiarLink=(url)=>{ try{ navigator.clipboard.writeText(url); }catch(e){} showToast("Link copiado ✓","ok"); };
   const [sedesList,setSedesList]=useState([]);     // sedes (para generar el link de cortesía)
   useEffect(()=>{ db.listSedes().then(s=>setSedesList((s||[]).filter(x=>!x.es_bodega))).catch(()=>{}); },[]);
   const [prodList,setProdList]=useState([]);     // productos (para ligar cupón → producto)
@@ -5094,15 +5098,14 @@ function Membresias({showToast, admin}){
                 <input className="input" style={{margin:0}} value={cortCampana} onChange={e=>setCortCampana(e.target.value)} placeholder="ej. apertura-bello-julio"/></div>
             </div>
             {cortSedeGen && (()=>{
-              const base=location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html';
               const sedeParam=cortSedeGen+(cortSede2?('|'+cortSede2):'');
-              const url=base+'?sede='+encodeURIComponent(sedeParam)+(cortCampana.trim()?('&campana='+encodeURIComponent(cortCampana.trim())):'');
+              const url=linkCortesia(sedeParam, cortCampana.trim());
               return (
                 <div style={{marginTop:12}}>
                   <div className="muted" style={{fontSize:12,marginBottom:4}}>Tu link:</div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
                     <input className="input" style={{margin:0,flex:1,minWidth:220}} readOnly value={url} onFocus={e=>e.target.select()}/>
-                    <button className="btn btn-amber btn-sm" onClick={()=>{ try{navigator.clipboard.writeText(url);}catch(e){}; showToast("Link copiado","ok"); }}>Copiar</button>
+                    <button className="btn btn-amber btn-sm" onClick={()=>copiarLink(url)}>Copiar</button>
                   </div>
                 </div>
               );
@@ -5112,7 +5115,9 @@ function Membresias({showToast, admin}){
           {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
             const sedeTxt=s=>String(s||'—').replace(/\|/g,' o ');   // "A|B" -> "A o B"
             const byCamp={};
-            cortesias.forEach(c=>{ const k=(c.campana||'(sin campaña)')+' · '+sedeTxt(c.sede); const o=byCamp[k]||(byCamp[k]={label:k,total:0,canj:0}); o.total++; if(c.estado==='canjeada') o.canj++; });
+            cortesias.forEach(c=>{ const camp=c.campana||'(sin campaña)'; const k=camp+' · '+sedeTxt(c.sede);
+              const o=byCamp[k]||(byCamp[k]={label:k, campana:camp, sede:c.sede, total:0, canj:0});
+              o.total++; if(c.estado==='canjeada') o.canj++; });
             const camps=Object.values(byCamp).sort((a,b)=>b.total-a.total);
             const filtro=cortFiltro.trim().toLowerCase();
             const lista=cortesias.filter(c=> !filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro));
@@ -5127,8 +5132,17 @@ function Membresias({showToast, admin}){
                 {camps.length>0 && (
                   <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
                     <table className="tbl">
-                      <thead><tr><th>Campaña · Sede</th><th className="num">Registrados</th><th className="num">Canjeados</th><th className="num">Conversión</th></tr></thead>
-                      <tbody>{camps.map(c=>(<tr key={c.label}><td className="row-name">{c.label}</td><td className="num">{c.total}</td><td className="num" style={{color:"var(--green)"}}>{c.canj}</td><td className="num">{c.total?Math.round(c.canj/c.total*100):0}%</td></tr>))}</tbody>
+                      <thead><tr><th>Campaña · Sede</th><th className="num">Registrados</th><th className="num">Canjeados</th><th className="num">Conversión</th><th>Link</th></tr></thead>
+                      <tbody>{camps.map(c=>(<tr key={c.label}>
+                        <td className="row-name">{c.label}</td>
+                        <td className="num">{c.total}</td>
+                        <td className="num" style={{color:"var(--green)"}}>{c.canj}</td>
+                        <td className="num">{c.total?Math.round(c.canj/c.total*100):0}%</td>
+                        <td style={{whiteSpace:"nowrap"}}>
+                          <button className="btn btn-ghost btn-sm" title={linkCortesia(c.sede,c.campana)} onClick={()=>copiarLink(linkCortesia(c.sede,c.campana))}>📋 Copiar</button>
+                          <a className="btn btn-ghost btn-sm" style={{marginLeft:4,textDecoration:"none"}} href={linkCortesia(c.sede,c.campana)} target="_blank" rel="noopener">↗ Abrir</a>
+                        </td>
+                      </tr>))}</tbody>
                     </table>
                   </div>
                 )}

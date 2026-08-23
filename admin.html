@@ -519,6 +519,14 @@ const db = {
     const rows=(items||[]).filter(x=>x.insumo_id).map(x=>({producto_id:productoId,insumo_id:x.insumo_id,cantidad:Number(x.cantidad)||1}));
     if(rows.length){ const {error}=await sb.from('presentacion_empaques').insert(rows); if(error) throw error; }
   },
+  // Crea un producto GRANEL vacío (solo producción, se mide en kg)
+  async crearGranel(nombre){
+    if(DEMO_MODE) return null;
+    const row={nombre, tipo:'producto', categoria:'PRODUCCIÓN', precio:0, costo:0, controla_stock:true,
+      activo:true, fabricable:true, vende_pos:false, precio_variable:false};
+    const {data,error}=await sb.from('productos').insert(row).select('id').single();
+    if(error) throw error; return data.id;
+  },
   async setPresentacion(productoId, granelId, granelKg){
     if(DEMO_MODE) return;
     const {error}=await sb.from('productos').update({granel_id:granelId||null, granel_kg:Number(granelKg)||0}).eq('id',productoId);
@@ -2718,6 +2726,51 @@ function Costeo({showToast,clave,onUnlock}){
       showToast("Ficha guardada ✓","ok"); }
     catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
 
+  // "Esto en realidad es una presentación": saca la fórmula a un granel nuevo y liga esta presentación
+  const [sep,setSep]=useState(null);   // {nombre, kg}
+  // Adivina los kg desde el nombre: "250 ML" -> 0.25 · "20 KG" -> 20 · "540" -> 0.540
+  const kgDelNombre=(n)=>{ const s=(n||"").toUpperCase();
+    let m=s.match(/(\d+(?:[.,]\d+)?)\s*(ML|KG|GR|G)\b/);
+    if(m){ const v=parseFloat(m[1].replace(',','.')); const u=m[2];
+      return (u==='KG')?v:(v/1000); }
+    m=s.match(/(\d{3,4})\s*$/); if(m){ return parseFloat(m[1])/1000; }
+    return ""; };
+  // Presentaciones de la misma familia (mismo nombre base)
+  const hermanosDe=(p)=>{ const base=(p.nombre||"").trim().toUpperCase();
+    return prods.filter(x=>x.fabricable && x.id!==p.id && (x.nombre||"").trim().toUpperCase().startsWith(base)); };
+
+  const abrirSep=()=>{
+    const hs=hermanosDe(prod).map(h=>({id:h.id,nombre:h.nombre,kg:String(kgDelNombre(h.nombre)||""),on:true}));
+    setSep({nombre:(prod.nombre||"")+" GRANEL", existente:"", kg:String(kgDelNombre(prod.nombre)||""), hermanos:hs});
+  };
+  const setHerm=(i,patch)=>setSep(s=>({...s,hermanos:s.hermanos.map((x,j)=>j===i?{...x,...patch}:x)}));
+
+  const separarGranel=async()=>{
+    const k=Number(sep.kg)||0;
+    if(k<=0){ showToast("Indica cuántos kg lleva "+prod.nombre,"err"); return; }
+    const hs=(sep.hermanos||[]).filter(h=>h.on);
+    if(hs.some(h=>!(Number(h.kg)>0))){ showToast("Indica los kg de todas las presentaciones marcadas","err"); return; }
+    setBusy(true);
+    try{
+      let gId=sep.existente;
+      if(!gId){                                               // crear granel nuevo con esta fórmula
+        const nom=(sep.nombre||"").trim();
+        if(nom.length<3){ showToast("Ponle nombre al granel","err"); setBusy(false); return; }
+        gId=await db.crearGranel(nom);
+        await db.saveReceta(gId, items, clave);               // la fórmula queda SOLO aquí
+        await db.setCostoProducto(gId, costoKg);
+      }
+      await db.saveReceta(pid, [], clave);                    // esta presentación ya no lleva fórmula
+      await db.setPresentacion(pid, gId, k);
+      for(const h of hs){                                     // y sus hermanas tampoco: se ligan al mismo granel
+        await db.saveReceta(h.id, [], clave);
+        await db.setPresentacion(h.id, gId, Number(h.kg)||0);
+      }
+      await recargarProds();
+      setSep(null); await elegir(pid);
+      showToast("Listo: 1 fórmula y "+(hs.length+1)+" presentación(es) ligadas ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+
   if(!clave) return (
     <div className="card" style={{textAlign:"center",padding:"34px 20px"}}>
       <div style={{fontSize:40,marginBottom:8}}>🔒</div>
@@ -2793,7 +2846,11 @@ function Costeo({showToast,clave,onUnlock}){
       {/* ---------- GRANEL: costo por kg ---------- */}
       {pid && esGranel && (<div>
         <div className="card" style={{background:"var(--blue-d)",border:"1px solid var(--bd)",marginBottom:12}}>
-          <b style={{color:"var(--blue)"}}>🧪 Este producto tiene fórmula: es un GRANEL.</b> <span className="muted">Su costo se calcula <b>por kilo</b>. Las presentaciones que salgan de él toman este costo según los kg que lleven.</span>
+          <b style={{color:"var(--blue)"}}>🧪 Este producto tiene fórmula, así que el sistema lo trata como GRANEL.</b> <span className="muted">Su costo de <b>{fmt(costoKg)} es por KILO</b>, no por unidad.</span>
+          {prod.vende_pos!==false && <div style={{marginTop:8}}>
+            <div className="muted" style={{fontSize:12,marginBottom:6}}>⚠ Pero este producto <b>sí se vende</b> en el POS, o sea que en realidad es una <b>presentación</b> (un frasco de cierto tamaño). Sepárale la fórmula a un granel para que su costo quede por unidad:</div>
+            <button className="btn btn-amber btn-sm" onClick={abrirSep}>🔄 Es una presentación — separar el granel</button>
+          </div>}
         </div>
         {kpis("Costo por kilo")}
         {Math.abs(pctTotal-100)>0.5 && <div className="card" style={{background:"var(--amber-d)",border:"1px solid var(--amber)",marginBottom:12}}>
@@ -2820,6 +2877,57 @@ function Costeo({showToast,clave,onUnlock}){
         </div>
         {pieGuardar()}
       </div>)}
+
+      {/* modal: separar el granel de una presentación */}
+      {sep && (
+        <div className="modal-bg" onClick={()=>!busy&&setSep(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">🔄 Separar el granel</div>
+            <div className="muted" style={{marginBottom:12,fontSize:13}}>
+              La fórmula pasa a un producto nuevo de solo producción (medido en kg) y <b>{prod.nombre}</b> queda como una presentación que sale de él.
+              Después puedes ligarle también las otras presentaciones (250 ml, etc.) desde esta misma pantalla.
+            </div>
+            <label className="label">Granel</label>
+            <select className="select" value={sep.existente||""} onChange={e=>setSep({...sep,existente:e.target.value})}>
+              <option value="">➕ Crear uno nuevo con esta fórmula</option>
+              {prods.filter(p=>p.fabricable && p.vende_pos===false && p.id!==pid).map(p=>(
+                <option key={p.id} value={p.id}>Usar el existente: {p.nombre}{Number(p.costo)>0?(" · "+fmt(p.costo)+"/kg"):""}</option>
+              ))}
+            </select>
+            {!sep.existente && <div><label className="label">Nombre del granel nuevo</label>
+              <input className="input" value={sep.nombre} onChange={e=>setSep({...sep,nombre:e.target.value})}/></div>}
+            {sep.existente && <div className="muted" style={{marginTop:-6,marginBottom:10,fontSize:12}}>Se usará la fórmula del granel elegido y <b>se borrará la fórmula propia</b> de {prod.nombre} (queda solo en el granel).</div>}
+            <label className="label" style={{marginTop:10}}>Presentaciones que salen de este granel</label>
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid var(--bd)"}}>
+              <span className="row-name" style={{flex:1}}>{prod.nombre}</span>
+              <input className="input" style={{margin:0,width:100,textAlign:"right"}} type="number" step="0.001" value={sep.kg} onChange={e=>setSep({...sep,kg:e.target.value})} placeholder="kg"/>
+            </div>
+            {(sep.hermanos||[]).map((h,i)=>(
+              <div key={h.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid var(--bd)",opacity:h.on?1:.5}}>
+                <input type="checkbox" checked={h.on} onChange={e=>setHerm(i,{on:e.target.checked})}/>
+                <span className="row-name" style={{flex:1}}>{h.nombre}</span>
+                <input className="input" style={{margin:0,width:100,textAlign:"right"}} type="number" step="0.001" value={h.kg} disabled={!h.on} onChange={e=>setHerm(i,{kg:e.target.value})} placeholder="kg"/>
+              </div>
+            ))}
+            <div className="muted" style={{marginTop:6,fontSize:12}}>
+              {(sep.hermanos||[]).length>0
+                ? <span>Detecté estas presentaciones de la misma familia. <b>Todas usarán la misma fórmula</b> — se les borra la que tengan repetida.</span>
+                : <span>Escribe los kg que lleva. Si el frasco es de 540 ml/g, escribe <b>0.540</b>.</span>}
+            </div>
+            {(()=>{ const ck=sep.existente?(Number((prods.find(p=>p.id===sep.existente)||{}).costo)||0):costoKg; return (
+              <div className="card" style={{marginTop:10,background:"var(--sf2)"}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}><span className="muted">Costo del granel</span><b>{fmt(ck)}/kg</b></div>
+                <div style={{display:"flex",justifyContent:"space-between"}}><span className="muted">Costo de esta presentación</span><b style={{color:"var(--amber)"}}>{fmt((Number(sep.kg)||0)*ck)}</b></div>
+                <div className="muted" style={{fontSize:12,marginTop:4}}>(sin el empaque todavía — se lo agregas después)</div>
+              </div>
+            );})()}
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setSep(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={separarGranel}>{busy?"Separando…":("Separar y ligar "+(1+(sep.hermanos||[]).filter(h=>h.on).length)+" presentación(es)")}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---------- PRESENTACIÓN: granel + empaque ---------- */}
       {pid && items && !esGranel && (<div>

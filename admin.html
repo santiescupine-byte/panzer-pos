@@ -5664,10 +5664,15 @@ function Membresias({showToast, admin}){
     const tel=String(c.telefono||'').replace(/\D/g,'');
     return (c.nombre||'').toLowerCase().includes(filtro) || (c.id||'').toLowerCase().includes(filtro) || (filtroDig && tel.includes(filtroDig));
   });
-  const tot=clientes.length;
+  // Las CORTESÍAS son un regalo: nadie las pagó. No cuentan como miembros ni como dinero prepagado.
+  const esCortesia=c=>c.membresia==='Cortesía';
+  const pagos=clientes.filter(c=>!esCortesia(c));
+  const corts=clientes.filter(esCortesia);
+  const cortSaldo=corts.reduce((s,c)=>s+(Number(c.saldo)||0),0);
+  const tot=pagos.length;
   const VIP_FACTOR={Standard:0.8, Silver:0.7, Gold:2/3};  // dinero real = saldo × (precio/saldo del paquete)
   const porTipo={Standard:0,Silver:0,Gold:0}; let saldoTot=0, realTot=0;
-  clientes.forEach(c=>{ if(porTipo[c.membresia]!==undefined) porTipo[c.membresia]++; const s=Number(c.saldo)||0; saldoTot+=s; realTot+=s*(VIP_FACTOR[c.membresia]??0.8); });
+  pagos.forEach(c=>{ if(porTipo[c.membresia]!==undefined) porTipo[c.membresia]++; const s=Number(c.saldo)||0; saldoTot+=s; realTot+=s*(VIP_FACTOR[c.membresia]??0.8); });
 
   return (
     <div>
@@ -5688,7 +5693,8 @@ function Membresias({showToast, admin}){
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Miembros activos</div><div style={{fontSize:24,fontWeight:800}}>{tot}</div></div>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">⭐ Standard / 🥈 Silver / 🥇 Gold</div><div style={{fontSize:20,fontWeight:800}}>{porTipo.Standard} / {porTipo.Silver} / {porTipo.Gold}</div></div>
         <div className="card" style={{flex:"1 1 130px"}}><div className="muted">Saldo total en circulación</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{fmt(saldoTot)}</div></div>
-        <div className="card" style={{flex:"1 1 130px"}}><div className="muted">💵 Dinero real prepagado <span title="Saldo × factor por membresía (Gold 0,67 · Silver 0,70 · Standard 0,80). Es la plata real que los clientes te pagaron y aún no consumen.">ⓘ</span></div><div style={{fontSize:22,fontWeight:800,color:"var(--green)"}}>{fmt(Math.round(realTot))}</div></div>
+        <div className="card" style={{flex:"1 1 130px"}}><div className="muted">💵 Dinero real prepagado <span title="Saldo × factor por membresía (Gold 0,67 · Silver 0,70 · Standard 0,80). Es la plata real que los clientes te pagaron y aún no consumen. NO incluye las cortesías (son regalo).">ⓘ</span></div><div style={{fontSize:22,fontWeight:800,color:"var(--green)"}}>{fmt(Math.round(realTot))}</div></div>
+        {corts.length>0 && <div className="card" style={{flex:"1 1 130px"}}><div className="muted">🎟️ Cortesías <span title="Cuentas de cortesía (apertura). Son un regalo: no entran en el dinero prepagado ni en los miembros.">ⓘ</span></div><div style={{fontSize:20,fontWeight:800,color:"var(--blue)"}}>{corts.length}</div><div className="muted" style={{fontSize:12}}>{fmt(cortSaldo)} en saldo de regalo</div></div>}
       </div>
 
       <div className="toolbar"><input className="input" style={{maxWidth:320}} placeholder="Buscar por nombre, código VIP o teléfono…" value={q} onChange={e=>setQ(e.target.value)}/></div>

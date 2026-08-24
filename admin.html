@@ -527,6 +527,15 @@ const db = {
     const {data,error}=await sb.from('productos').insert(row).select('id').single();
     if(error) throw error; return data.id;
   },
+  // Crea una PRESENTACIÓN vendible (frasco/garrafa) ligada luego a su granel
+  async crearPresentacion(nombre, precio, categoria){
+    if(DEMO_MODE) return null;
+    const row={nombre, tipo:'producto', categoria:categoria||'PRODUCTOS PANZER CARWASH',
+      precio:Number(precio)||0, costo:0, controla_stock:true, activo:true,
+      fabricable:true, vende_pos:true, precio_variable:false};
+    const {data,error}=await sb.from('productos').insert(row).select('id').single();
+    if(error) throw error; return data.id;
+  },
   async setPresentacion(productoId, granelId, granelKg){
     if(DEMO_MODE) return;
     const {error}=await sb.from('productos').update({granel_id:granelId||null, granel_kg:Number(granelKg)||0}).eq('id',productoId);
@@ -1252,6 +1261,9 @@ function Productos({showToast}){
   const [sedes,setSedes]=useState([]);
   const [q,setQ]=useState("");
   const [filtroCat,setFiltroCat]=useState("");
+  // Por defecto se muestran solo los productos DE VENTA (los que existen en las sedes).
+  // Los graneles viven en Producción; se pueden ver aquí cambiando el filtro.
+  const [verTipo,setVerTipo]=useState("venta");   // 'venta' | 'granel' | '' todos
   const [editing,setEditing]=useState(null);
 
   const load=async()=>{
@@ -1273,15 +1285,18 @@ function Productos({showToast}){
   };
 
   if(!prods) return <div className="empty">Cargando…</div>;
+  const esGranel=p=>p.fabricable && p.vende_pos===false;
   const filtrados=prods.filter(p=>
     (!filtroCat||p.categoria===filtroCat) &&
+    (verTipo==='venta' ? !esGranel(p) : verTipo==='granel' ? esGranel(p) : true) &&
     (!q||p.nombre.toLowerCase().includes(q.toLowerCase()) || (p.codigo_barras||"").includes(q))
   );
+  const nGranel=prods.filter(esGranel).length;
 
   return (
     <div>
       <div className="toolbar">
-        <div className="sec-title" style={{marginRight:"auto"}}>Productos <span className="muted">({prods.length})</span></div>
+        <div className="sec-title" style={{marginRight:"auto"}}>Productos <span className="muted">({filtrados.length}{verTipo==='venta'?" de venta":""})</span></div>
         <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",tipo:"producto",categoria:cats[0]?.nombre||"",precio:0,costo:0,codigo_barras:"",controla_stock:true,precio_variable:false,iva:true,activo:true,stock:{}})}>+ Nuevo producto</button>
       </div>
       <div className="toolbar">
@@ -1290,6 +1305,11 @@ function Productos({showToast}){
           <option value="">Todas las categorías</option>
           {cats.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
         </select>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+          {[['venta','🏬 De venta'],['granel','🧪 Graneles'+(nGranel?(" ("+nGranel+")"):"")],['','Todos']].map(([k,l])=>(
+            <button key={k} className={"btn btn-sm "+(verTipo===k?'btn-amber':'btn-ghost')} onClick={()=>setVerTipo(k)}>{l}</button>
+          ))}
+        </div>
       </div>
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
@@ -1300,7 +1320,10 @@ function Productos({showToast}){
               const stockTotal=p.controla_stock?Object.values(p.stock||{}).reduce((s,v)=>s+(Number(v)||0),0):null;
               return (
                 <tr key={p.id} className={p.activo?"":"inactive"}>
-                  <td><div className="row-name">{p.nombre}</div>{p.codigo_barras&&<div className="muted">#{p.codigo_barras}</div>}</td>
+                  <td><div className="row-name">{p.nombre}
+                    {p.fabricable && p.vende_pos===false && <span className="pill pill-token" style={{marginLeft:6}} title="Solo producción: no se vende en el POS">🧪 Granel</span>}
+                    {p.granel_id && <span className="pill pill-prod" style={{marginLeft:6}} title="Se envasa desde un granel">📦 Presentación</span>}
+                  </div>{p.codigo_barras&&<div className="muted">#{p.codigo_barras}</div>}</td>
                   <td className="muted">{p.categoria}</td>
                   <td><span className={"pill pill-"+(p.tipo==="token"?"token":p.tipo==="servicio"?"serv":"prod")}>{p.tipo}</span></td>
                   <td>{p.precio_variable?<span className="muted">Variable</span>:fmt(p.precio)}</td>
@@ -2459,7 +2482,7 @@ function Produccion({showToast}){
   return (
     <div>
       <div className="subnav">
-        {[["insumos","Insumos"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["producir","Producir"],["historial","Historial"]].map(([k,l])=>(
+        {[["insumos","Insumos"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["historial","Historial"]].map(([k,l])=>(
           <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
         ))}
       </div>
@@ -2473,7 +2496,7 @@ function Produccion({showToast}){
       {sub==="insumos"   && <Insumos showToast={showToast}/>}
       {sub==="recetas"   && <Recetas showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
       {sub==="costeo"    && <Costeo showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
-      {sub==="envasar"   && <Envasar showToast={showToast}/>}
+      {sub==="envasar"   && <Envasar showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
       {sub==="producir"  && <Producir showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
       {sub==="historial" && <HistorialProd showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
 
@@ -2994,8 +3017,11 @@ function Costeo({showToast,clave,onUnlock}){
 }
 
 // Produce un lote de granel y lo reparte en presentaciones (envasado)
-function Envasar({showToast}){
+function Envasar({showToast,clave,onUnlock}){
   const [prods,setProds]=useState([]);
+  const [insumos,setInsumos]=useState([]);
+  const [recetaG,setRecetaG]=useState([]);     // fórmula del granel (% en peso)
+  const [empPorProd,setEmpPorProd]=useState({});
   const [sedes,setSedes]=useState([]);
   const [gid,setGid]=useState("");
   const [kg,setKg]=useState("");
@@ -3004,8 +3030,18 @@ function Envasar({showToast}){
   const [nota,setNota]=useState("");
   const [busy,setBusy]=useState(false);
   const [res,setRes]=useState(null);
+  const [cfg,setCfg]=useState(null);        // panel de configuración de graneles/presentaciones
   const recargar=()=>db.listProductos().then(setProds).catch(()=>{});
-  useEffect(()=>{ recargar(); db.listSedes().then(s=>{ setSedes(s); const b=s.find(x=>x.es_bodega)||s[0]; if(b) setSede(b.nombre); }).catch(()=>{}); },[]);
+  const recargarInsumos=()=>db.listInsumos().then(setInsumos).catch(()=>{});
+  useEffect(()=>{ recargar(); recargarInsumos(); db.listSedes().then(s=>{ setSedes(s); const b=s.find(x=>x.es_bodega)||s[0]; if(b) setSede(b.nombre); }).catch(()=>{}); },[]);
+  // al elegir granel: traer su fórmula (si están desbloqueadas) y el empaque de sus presentaciones
+  useEffect(()=>{
+    if(!gid){ setRecetaG([]); setEmpPorProd({}); return; }
+    if(clave) db.getReceta(gid,clave).then(setRecetaG).catch(()=>setRecetaG([])); else setRecetaG([]);
+    const hijas=prods.filter(p=>p.granel_id===gid);
+    Promise.all(hijas.map(h=>db.getEmpaques(h.id).then(e=>[h.id,e]).catch(()=>[h.id,[]])))
+      .then(pares=>{ const m={}; pares.forEach(([k,v])=>m[k]=v); setEmpPorProd(m); });
+  },[gid,clave,prods.length]);
 
   const granel=prods.find(p=>p.id===gid)||{};
   // graneles = los que tienen presentaciones ligadas
@@ -3019,6 +3055,106 @@ function Envasar({showToast}){
   const cKg=Number(granel.costo)||0;
   const costoKgEfect=kgUsados>0?(cKg*kgNum/kgUsados):0;   // reparte el lote entre lo envasado
 
+  // ---- material que se va a consumir (químicos del granel + empaque de cada presentación) ----
+  const insDe=id=>insumos.find(x=>x.id===id)||{};
+  const consumo={};   // insumo_id -> cantidad total
+  recetaG.forEach(r=>{ const i=insDe(r.insumo_id);
+    const c=(Number(r.cantidad)||0)/100*kgNum*((i.unidad==='g'||i.unidad==='ml')?1000:1);
+    consumo[r.insumo_id]=(consumo[r.insumo_id]||0)+c; });
+  items.forEach(x=>{ (empPorProd[x.p.id]||[]).forEach(e=>{
+    consumo[e.insumo_id]=(consumo[e.insumo_id]||0)+((Number(e.cantidad)||0)*x.n); }); });
+  const lineasCons=Object.keys(consumo).map(id=>{ const i=insDe(id);
+    const necesita=consumo[id], stock=Number(i.stock)||0;
+    return {id, nombre:i.nombre||"(insumo)", unidad:i.unidad||"", tipo:i.tipo||'quimico',
+            necesita, stock, falta:Math.max(0,necesita-stock), costo:(Number(i.costo)||0)*necesita}; })
+    .sort((a,b)=>b.necesita-a.necesita);
+  const faltantes=lineasCons.filter(l=>l.falta>0);
+  const costoMaterial=lineasCons.reduce((s,l)=>s+l.costo,0);
+
+  // ================= ASISTENTE: crear un producto desde cero =================
+  const [nv,setNv]=useState(null);   // {nombre, categoria, formula:[], pres:[]}
+  const [cats,setCats]=useState([]);
+  useEffect(()=>{ db.listCategorias().then(setCats).catch(()=>{}); },[]);
+  const abrirNuevo=()=>setNv({nombre:"", categoria:"PRODUCTOS PANZER CARWASH",
+    formula:[{insumo_id:"",pct:""}], pres:[{nombre:"",precio:"",kg:"",emp:[]}]});
+  const nvSet=(patch)=>setNv(n=>({...n,...patch}));
+  const nvFor=(i,patch)=>setNv(n=>({...n,formula:n.formula.map((x,j)=>j===i?{...x,...patch}:x)}));
+  const nvPre=(i,patch)=>setNv(n=>({...n,pres:n.pres.map((x,j)=>j===i?{...x,...patch}:x)}));
+  const nvEmp=(i,j,patch)=>nvPre(i,{emp:nv.pres[i].emp.map((e,k)=>k===j?{...e,...patch}:e)});
+  // costo por kg de la fórmula que está escribiendo
+  const nvCostoKg=!nv?0:nv.formula.reduce((s,f)=>{ const i=insumos.find(x=>x.id===f.insumo_id)||{};
+    const kg=(Number(f.pct)||0)/100, cant=(i.unidad==='g'||i.unidad==='ml')?kg*1000:kg;
+    return s+cant*(Number(i.costo)||0); },0);
+  const nvPctTotal=!nv?0:nv.formula.reduce((s,f)=>s+(Number(f.pct)||0),0);
+  const nvCostoEmp=(p)=>p.emp.reduce((s,e)=>{ const i=insumos.find(x=>x.id===e.insumo_id)||{};
+    return s+(Number(e.cantidad)||0)*(Number(i.costo)||0); },0);
+  // crear material de empaque al vuelo
+  const [matNuevo,setMatNuevo]=useState(null);   // {nombre,costo,dest:[i,j]}
+  const crearMaterial=async()=>{
+    const nom=(matNuevo.nombre||"").trim(); if(nom.length<2){ showToast("Nombre del material","err"); return; }
+    setBusy(true);
+    try{ await db.saveInsumo({nombre:nom, unidad:'unidad', costo:Number(matNuevo.costo)||0, stock:0, stock_minimo:0, activo:true, tipo:'empaque'});
+      const lst=await db.listInsumos(); setInsumos(lst);
+      const creado=lst.find(x=>x.nombre===nom);
+      if(creado && matNuevo.dest){ const [i,j]=matNuevo.dest; nvEmp(i,j,{insumo_id:creado.id}); }
+      setMatNuevo(null); showToast("Material creado ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+
+  const guardarNuevo=async()=>{
+    if(!clave){ showToast("Desbloquea las fórmulas primero","err"); return; }
+    const nom=(nv.nombre||"").trim();
+    if(nom.length<3){ showToast("Ponle nombre al producto","err"); return; }
+    const form=nv.formula.filter(f=>f.insumo_id && Number(f.pct)>0);
+    if(form.length===0){ showToast("Agrega al menos un químico a la fórmula","err"); return; }
+    const pres=nv.pres.filter(p=>(p.nombre||"").trim() && Number(p.kg)>0);
+    if(pres.length===0){ showToast("Agrega al menos una presentación con sus kg","err"); return; }
+    setBusy(true);
+    try{
+      const gId=await db.crearGranel(nom.toUpperCase()+" GRANEL");
+      await db.saveReceta(gId, form.map(f=>({insumo_id:f.insumo_id, cantidad:Number(f.pct)})), clave);
+      await db.setCostoProducto(gId, nvCostoKg);
+      for(const p of pres){
+        const pid=await db.crearPresentacion(p.nombre.trim(), p.precio, nv.categoria);
+        await db.setPresentacion(pid, gId, p.kg);
+        await db.saveEmpaques(pid, p.emp.filter(e=>e.insumo_id));
+        await db.setCostoProducto(pid, (Number(p.kg)||0)*nvCostoKg + nvCostoEmp(p));
+      }
+      await recargar(); await recargarInsumos();
+      setNv(null); setGid(gId);
+      showToast("Producto creado con "+pres.length+" presentación(es) ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+
+  // ---------- configuración de graneles y sus presentaciones ----------
+  const abrirCfg=async(granelId)=>{
+    const g=granelId||gid||"";
+    const hijas=prods.filter(p=>p.granel_id===g);
+    const pares=await Promise.all(hijas.map(h=>db.getEmpaques(h.id).then(e=>({id:h.id,nombre:h.nombre,kg:String(Number(h.granel_kg)||0),emp:e})).catch(()=>({id:h.id,nombre:h.nombre,kg:String(Number(h.granel_kg)||0),emp:[]}))));
+    setCfg({granelId:g, nuevo:"", pres:pares, quitadas:[]});
+  };
+  const cfgSetPres=(i,patch)=>setCfg(c=>({...c,pres:c.pres.map((x,j)=>j===i?{...x,...patch}:x)}));
+  const cfgAddPres=(prodId)=>{ const p=prods.find(x=>x.id===prodId); if(!p) return;
+    setCfg(c=>({...c,pres:[...c.pres,{id:p.id,nombre:p.nombre,kg:"",emp:[]}]})); };
+  const cfgDelPres=(i)=>setCfg(c=>({...c,pres:c.pres.filter((_,j)=>j!==i),quitadas:[...c.quitadas,c.pres[i].id]}));
+  const cfgAddEmp=(i)=>cfgSetPres(i,{emp:[...cfg.pres[i].emp,{insumo_id:"",cantidad:1}]});
+  const cfgSetEmp=(i,j,patch)=>cfgSetPres(i,{emp:cfg.pres[i].emp.map((e,k)=>k===j?{...e,...patch}:e)});
+  const cfgDelEmp=(i,j)=>cfgSetPres(i,{emp:cfg.pres[i].emp.filter((_,k)=>k!==j)});
+  const crearGranelNuevo=async()=>{
+    const nom=(cfg.nuevo||"").trim(); if(nom.length<3){ showToast("Escribe el nombre del granel","err"); return; }
+    setBusy(true);
+    try{ const id=await db.crearGranel(nom); await recargar(); setCfg(c=>({...c,granelId:id,nuevo:"",pres:[],quitadas:[]}));
+      showToast("Granel creado — ahora dale su fórmula en Recetas","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+  const guardarCfg=async()=>{
+    if(!cfg.granelId){ showToast("Elige o crea el granel","err"); return; }
+    if(cfg.pres.some(p=>!(Number(p.kg)>0))){ showToast("Todas las presentaciones necesitan sus kg","err"); return; }
+    setBusy(true);
+    try{
+      for(const q of cfg.quitadas) await db.setPresentacion(q,null,0);
+      for(const p of cfg.pres){ await db.setPresentacion(p.id,cfg.granelId,p.kg); await db.saveEmpaques(p.id,p.emp); }
+      await recargar(); setGid(cfg.granelId); setCfg(null);
+      showToast("Configuración guardada ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+
   const enviar=async()=>{
     if(!gid){ showToast("Elige el granel","err"); return; }
     if(kgNum<=0){ showToast("Escribe los kilos fabricados","err"); return; }
@@ -3027,7 +3163,7 @@ function Envasar({showToast}){
     setBusy(true);
     try{
       const r=await db.envasar(gid,kgNum,sede,items.map(x=>({producto_id:x.p.id,cantidad:x.n})),"ADMIN",nota.trim()||null);
-      setRes(r); await recargar(); setCant({}); setKg(""); setNota("");
+      setRes(r); await recargar(); await recargarInsumos(); setCant({}); setKg(""); setNota("");
       showToast("Envasado registrado ✓","ok");
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
@@ -3036,7 +3172,188 @@ function Envasar({showToast}){
     <div>
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Producir y envasar</div>
+        {!cfg && !nv && <button className="btn btn-amber btn-sm" onClick={abrirNuevo}>➕ Producto nuevo</button>}
+        {!cfg && !nv && <button className="btn btn-ghost btn-sm" onClick={()=>abrirCfg()}>⚙️ Configurar graneles</button>}
+        {cfg && <button className="btn btn-ghost btn-sm" onClick={()=>setCfg(null)}>← Volver a envasar</button>}
+        {nv && <button className="btn btn-ghost btn-sm" onClick={()=>setNv(null)}>← Cancelar</button>}
       </div>
+
+      {/* ================= ASISTENTE: PRODUCTO NUEVO DESDE CERO ================= */}
+      {nv && (<div>
+        <div className="muted" style={{marginBottom:12,fontSize:12}}>Crea todo de una: la fórmula química, las presentaciones y su empaque. Al guardar se crean los productos, quedan listos para vender y para envasar.</div>
+        {!clave && <div className="card" style={{background:"var(--amber-d)",border:"1px solid var(--amber)",marginBottom:12}}>
+          <b style={{color:"var(--amber)"}}>🔒 Necesitas desbloquear las fórmulas</b> <span className="muted">para poder guardar la receta.</span>
+          <button className="btn btn-amber btn-sm" style={{marginLeft:10}} onClick={onUnlock}>Desbloquear</button></div>}
+
+        {/* 1. datos */}
+        <div className="card">
+          <div className="card-t">1️⃣ El producto</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            <div className="fld" style={{flex:"2 1 240px"}}><label className="label">Nombre</label>
+              <input className="input" style={{margin:0}} value={nv.nombre} onChange={e=>nvSet({nombre:e.target.value})} placeholder="ej. ULTRA WAX"/></div>
+            <div className="fld" style={{flex:"1 1 200px"}}><label className="label">Categoría (para el POS)</label>
+              <select className="select" style={{margin:0}} value={nv.categoria} onChange={e=>nvSet({categoria:e.target.value})}>
+                {cats.map(c=><option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+              </select></div>
+          </div>
+          <div className="muted" style={{fontSize:12,marginTop:6}}>Se creará el granel <b>{(nv.nombre||"…").toUpperCase()} GRANEL</b> con la fórmula, y las presentaciones como productos de venta.</div>
+        </div>
+
+        {/* 2. fórmula */}
+        <div className="card" style={{marginTop:12}}>
+          <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>2️⃣ Fórmula química <span className="muted">(% en peso)</span></div>
+            <button className="btn btn-ghost btn-sm" onClick={()=>nvSet({formula:[...nv.formula,{insumo_id:"",pct:""}]})}>＋ Químico</button></div>
+          {nv.formula.map((f,i)=>(
+            <div key={i} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
+              <select className="select" style={{margin:0,flex:1}} value={f.insumo_id} onChange={e=>nvFor(i,{insumo_id:e.target.value})}>
+                <option value="">— Elige el químico —</option>
+                {insumos.filter(x=>(x.tipo||'quimico')!=='empaque' && x.activo!==false).map(x=>
+                  <option key={x.id} value={x.id}>{x.nombre} · {fmt(x.costo)}/{x.unidad}</option>)}
+              </select>
+              <input className="input" style={{margin:0,width:80,textAlign:"right"}} type="number" step="0.01" value={f.pct} onChange={e=>nvFor(i,{pct:e.target.value})} placeholder="%"/>
+              <button className="btn btn-danger btn-sm" onClick={()=>nvSet({formula:nv.formula.filter((_,j)=>j!==i)})}>✕</button>
+            </div>
+          ))}
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:8,fontWeight:800}}>
+            <span style={{color:Math.abs(nvPctTotal-100)<0.5?"var(--green)":"var(--amber)"}}>Total: {nvPctTotal.toFixed(2)}% {Math.abs(nvPctTotal-100)<0.5?"✓":"(debe sumar 100%)"}</span>
+            <span>Costo del granel: <span style={{color:"var(--amber)"}}>{fmt(nvCostoKg)}/kg</span></span>
+          </div>
+        </div>
+
+        {/* 3. presentaciones */}
+        <div className="card" style={{marginTop:12}}>
+          <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>3️⃣ Presentaciones</div>
+            <button className="btn btn-ghost btn-sm" onClick={()=>nvSet({pres:[...nv.pres,{nombre:"",precio:"",kg:"",emp:[]}]})}>＋ Presentación</button></div>
+          {nv.pres.map((p,i)=>{ const cu=(Number(p.kg)||0)*nvCostoKg+nvCostoEmp(p); const pv=Number(p.precio)||0; return (
+            <div key={i} className="card" style={{background:"var(--sf2)",marginBottom:10}}>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+                <div className="fld" style={{flex:"2 1 180px"}}><label className="label">Nombre para vender</label>
+                  <input className="input" style={{margin:0}} value={p.nombre} onChange={e=>nvPre(i,{nombre:e.target.value})} placeholder="ej. ULTRA WAX 500 ML"/></div>
+                <div className="fld" style={{flex:"1 1 100px"}}><label className="label">Kg por unidad</label>
+                  <input className="input" style={{margin:0}} type="number" step="0.001" value={p.kg} onChange={e=>nvPre(i,{kg:e.target.value})} placeholder="0.500"/></div>
+                <div className="fld" style={{flex:"1 1 110px"}}><label className="label">Precio de venta</label>
+                  <input className="input" style={{margin:0}} type="number" value={p.precio} onChange={e=>nvPre(i,{precio:e.target.value})} placeholder="25000"/></div>
+                <button className="btn btn-danger btn-sm" onClick={()=>nvSet({pres:nv.pres.filter((_,j)=>j!==i)})}>✕</button>
+              </div>
+              <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid var(--bd)"}}>
+                <div style={{display:"flex",alignItems:"center",marginBottom:6}}>
+                  <span className="muted" style={{fontSize:12,marginRight:"auto"}}>📦 Empaque (envase, tapa/válvula, etiqueta)</span>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>nvPre(i,{emp:[...p.emp,{insumo_id:"",cantidad:1}]})}>＋ Material</button>
+                </div>
+                {p.emp.map((e,j)=>(
+                  <div key={j} style={{display:"flex",gap:6,marginBottom:5,alignItems:"center"}}>
+                    <select className="select" style={{margin:0,flex:1}} value={e.insumo_id} onChange={ev=>nvEmp(i,j,{insumo_id:ev.target.value})}>
+                      <option value="">— Elige material —</option>
+                      {insumos.filter(x=>(x.tipo||'quimico')==='empaque' && x.activo!==false).map(x=><option key={x.id} value={x.id}>{x.nombre} · {fmt(x.costo)}</option>)}
+                    </select>
+                    <input className="input" style={{margin:0,width:60,textAlign:"center"}} type="number" step="0.01" value={e.cantidad} onChange={ev=>nvEmp(i,j,{cantidad:ev.target.value})}/>
+                    <button className="btn btn-ghost btn-sm" title="Crear un material nuevo" onClick={()=>setMatNuevo({nombre:"",costo:"",dest:[i,j]})}>➕</button>
+                    <button className="btn btn-danger btn-sm" onClick={()=>nvPre(i,{emp:p.emp.filter((_,k)=>k!==j)})}>✕</button>
+                  </div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:8,paddingTop:6,borderTop:"1px solid var(--bd)",fontWeight:700}}>
+                  <span className="muted">Costo por unidad: granel {fmt((Number(p.kg)||0)*nvCostoKg)} + empaque {fmt(nvCostoEmp(p))}</span>
+                  <span>= <b style={{color:"var(--amber)"}}>{fmt(cu)}</b>{pv>0 && <span className="muted" style={{marginLeft:8}}>margen {Math.round((pv-cu)/pv*100)}%</span>}</span>
+                </div>
+              </div>
+            </div>
+          );})}
+        </div>
+
+        <div className="toolbar" style={{marginTop:12}}>
+          <button className="btn btn-amber" disabled={busy||!clave} onClick={guardarNuevo}>{busy?"Creando…":"✅ Crear producto"}</button>
+          <button className="btn btn-ghost" onClick={()=>setNv(null)}>Cancelar</button>
+        </div>
+
+        {matNuevo && (
+          <div className="modal-bg" onClick={()=>!busy&&setMatNuevo(null)}>
+            <div className="modal" onClick={e=>e.stopPropagation()}>
+              <div className="modal-t">➕ Nuevo material de empaque</div>
+              <label className="label">Nombre</label>
+              <input className="input" value={matNuevo.nombre} onChange={e=>setMatNuevo({...matNuevo,nombre:e.target.value})} placeholder="ej. Envase 500 ml"/>
+              <label className="label">Costo por unidad</label>
+              <input className="input" type="number" value={matNuevo.costo} onChange={e=>setMatNuevo({...matNuevo,costo:e.target.value})} placeholder="800"/>
+              <div className="muted" style={{fontSize:12}}>Se crea como insumo tipo 📦 Empaque con stock 0. Cárgale existencias desde <b>Insumos</b>.</div>
+              <div className="modal-actions">
+                <button className="btn btn-ghost" onClick={()=>setMatNuevo(null)}>Cancelar</button>
+                <button className="btn btn-amber" disabled={busy} onClick={crearMaterial}>{busy?"Creando…":"Crear"}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>)}
+
+      {/* ---------- CONFIGURAR GRANELES Y PRESENTACIONES ---------- */}
+      {cfg && (<div>
+        <div className="muted" style={{marginBottom:12,fontSize:12}}>Arma aquí tus graneles: qué presentaciones salen de cada uno, cuántos kg lleva cada una y con qué material se envasa. Úsalo cada vez que metas un producto nuevo.</div>
+        <div className="card">
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div className="fld" style={{flex:"2 1 240px"}}><label className="label">Granel</label>
+              <select className="select" style={{margin:0}} value={cfg.granelId} onChange={e=>abrirCfg(e.target.value)}>
+                <option value="">— Elige un granel —</option>
+                {prods.filter(p=>p.fabricable && !p.granel_id).map(p=><option key={p.id} value={p.id}>{p.nombre}{Number(p.costo)>0?(" · "+fmt(p.costo)+"/kg"):" · sin costo"}</option>)}
+              </select></div>
+            <div className="fld" style={{flex:"2 1 220px"}}><label className="label">…o crea uno nuevo</label>
+              <div style={{display:"flex",gap:6}}>
+                <input className="input" style={{margin:0}} value={cfg.nuevo} onChange={e=>setCfg({...cfg,nuevo:e.target.value})} placeholder="ej. ODOR FRESH GRANEL"/>
+                <button className="btn btn-ghost btn-sm" disabled={busy||!cfg.nuevo.trim()} onClick={crearGranelNuevo}>Crear</button>
+              </div></div>
+          </div>
+          {cfg.granelId && (()=>{ const g=prods.find(p=>p.id===cfg.granelId)||{};
+            return Number(g.costo)>0 ? null : (
+              <div className="muted" style={{marginTop:8,color:"var(--amber)",fontSize:12}}>⚠ Este granel está en $0/kg — falta darle su fórmula en <b>Recetas</b> y guardar su costo en <b>💰 Costeo</b>.</div>
+            ); })()}
+        </div>
+
+        {cfg.granelId && (<div className="card" style={{marginTop:12}}>
+          <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>Presentaciones que salen de este granel</div></div>
+          {cfg.pres.length===0 && <div className="muted" style={{fontSize:12,marginBottom:8}}>Ninguna todavía. Agrégalas abajo.</div>}
+          {cfg.pres.map((p,i)=>(
+            <div key={p.id} className="card" style={{background:"var(--sf2)",marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <span className="row-name" style={{flex:1,minWidth:150}}>{p.nombre}</span>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span className="muted" style={{fontSize:12}}>kg por unidad</span>
+                  <input className="input" style={{margin:0,width:100,textAlign:"right"}} type="number" step="0.001" value={p.kg} onChange={e=>cfgSetPres(i,{kg:e.target.value})} placeholder="0.250"/>
+                </div>
+                <button className="btn btn-danger btn-sm" onClick={()=>cfgDelPres(i)}>Desligar</button>
+              </div>
+              <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid var(--bd)"}}>
+                <div style={{display:"flex",alignItems:"center",marginBottom:6}}>
+                  <span className="muted" style={{fontSize:12,marginRight:"auto"}}>📦 Material de empaque (por unidad)</span>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>cfgAddEmp(i)}>＋ Material</button>
+                </div>
+                {p.emp.length===0 && <div className="muted" style={{fontSize:12}}>Sin empaque. Agrega envase, tapa/válvula y etiqueta.</div>}
+                {p.emp.map((e,j)=>(
+                  <div key={j} style={{display:"flex",gap:6,marginBottom:5,alignItems:"center"}}>
+                    <select className="select" style={{margin:0,flex:1}} value={e.insumo_id} onChange={ev=>cfgSetEmp(i,j,{insumo_id:ev.target.value})}>
+                      <option value="">— Elige material —</option>
+                      {insumos.filter(x=>(x.tipo||'quimico')==='empaque' && x.activo!==false).map(x=><option key={x.id} value={x.id}>{x.nombre} · {fmt(x.costo)}</option>)}
+                    </select>
+                    <input className="input" style={{margin:0,width:70,textAlign:"center"}} type="number" step="0.01" value={e.cantidad} onChange={ev=>cfgSetEmp(i,j,{cantidad:ev.target.value})}/>
+                    <button className="btn btn-danger btn-sm" onClick={()=>cfgDelEmp(i,j)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <select className="select" style={{margin:0,maxWidth:320}} value="" onChange={e=>{ if(e.target.value) cfgAddPres(e.target.value); }}>
+              <option value="">＋ Agregar una presentación…</option>
+              {prods.filter(p=>p.controla_stock && p.activo!==false && p.id!==cfg.granelId
+                             && !cfg.pres.some(x=>x.id===p.id)
+                             && (!p.granel_id || p.granel_id===cfg.granelId))
+                    .map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+            </select>
+            <div className="muted" style={{fontSize:12}}>Salen de la pestaña <b>Productos</b>. Si el producto es nuevo, créalo allá primero.</div>
+          </div>
+          <div className="toolbar" style={{marginTop:12}}>
+            <button className="btn btn-amber" disabled={busy} onClick={guardarCfg}>{busy?"Guardando…":"💾 Guardar configuración"}</button>
+          </div>
+        </div>)}
+      </div>)}
+
+      {!cfg && !nv && (<div>
       <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabricas el granel una sola vez y anotas cuántas unidades salieron de cada presentación. El sistema descuenta los químicos y el empaque, carga las unidades al inventario y le pone su costo real a cada una.</div>
 
       <div className="card">
@@ -3091,6 +3408,38 @@ function Envasar({showToast}){
           {busy?"Registrando…":"✅ Registrar producción y envasado"}</button>
       </div>)}
 
+      {/* ---- material que se va a consumir ---- */}
+      {gid && kgNum>0 && (<div className="card" style={{marginTop:12}}>
+        <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>🧾 Material que vas a gastar</div>
+          {!clave && <button className="btn btn-ghost btn-sm" onClick={onUnlock}>🔒 Desbloquear fórmulas</button>}</div>
+        {!clave && <div className="muted" style={{fontSize:12,marginBottom:8}}>Desbloquea las fórmulas para ver los químicos. El empaque sí se muestra.</div>}
+        {lineasCons.length===0 && <div className="empty">Nada por consumir todavía.</div>}
+        {faltantes.length>0 && <div className="card" style={{background:"var(--red-d)",border:"1px solid var(--red)",marginBottom:10}}>
+          <b style={{color:"var(--red)"}}>⚠ No te alcanza para {faltantes.length} material(es):</b>
+          <div className="muted" style={{fontSize:12,marginTop:4}}>{faltantes.map(l=>l.nombre+" (faltan "+Number(l.falta.toFixed(3))+" "+l.unidad+")").join(" · ")}</div>
+          <div className="muted" style={{fontSize:12,marginTop:4}}>Puedes producir igual, pero el stock quedará en negativo.</div>
+        </div>}
+        {lineasCons.length>0 && (<div style={{overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Material</th><th className="num">Vas a gastar</th><th className="num">Tienes</th><th className="num">Costo</th></tr></thead>
+            <tbody>
+              {lineasCons.map(l=>(
+                <tr key={l.id}>
+                  <td className="row-name">{l.tipo==='empaque'?"📦 ":"🧪 "}{l.nombre}</td>
+                  <td className="num"><b>{Number(l.necesita.toFixed(3))}</b> <span className="muted">{l.unidad}</span></td>
+                  <td className="num" style={{color:l.falta>0?"var(--red)":"var(--green)",fontWeight:700}}>{Number(l.stock.toFixed(3))}</td>
+                  <td className="num muted">{fmt(l.costo)}</td>
+                </tr>
+              ))}
+              <tr style={{borderTop:"2px solid var(--bd2)"}}>
+                <td colSpan="3" style={{fontWeight:800}}>COSTO DEL MATERIAL</td>
+                <td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{fmt(costoMaterial)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>)}
+      </div>)}
+
       {res && res.ok && (<div className="card" style={{marginTop:12,border:"1px solid var(--green)"}}>
         <div className="card-t" style={{color:"var(--green)"}}>✓ Envasado registrado</div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:8}}>
@@ -3104,6 +3453,7 @@ function Envasar({showToast}){
             <tr key={i}><td className="row-name">{x.nombre}</td><td className="num">{x.cantidad}</td><td className="num"><b>{fmt(x.costo_unitario)}</b></td></tr>
           ))}</tbody>
         </table>
+      </div>)}
       </div>)}
     </div>
   );
@@ -3134,13 +3484,20 @@ function Producir({showToast,clave,onUnlock}){
   const valido = pid && n>0 && sede;
   return (
     <div>
-      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Producir</div></div>
+      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Producir granel (sin envasar)</div></div>
+      <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabrica <b>kilos de granel</b> y los deja en stock. Úsalo solo para graneles que no se envasan de una (por ejemplo los que sirven de base para otras fórmulas). Si vas a envasar, hazlo desde <b>📦 Envasar</b>.</div>
+      {pid && prods.some(p=>p.granel_id===pid) && (
+        <div className="card" style={{background:"var(--amber-d)",border:"1px solid var(--amber)",marginBottom:12}}>
+          <b style={{color:"var(--amber)"}}>⚠ Este granel tiene presentaciones ligadas.</b> <span className="muted">Lo normal es fabricarlo desde <b>📦 Envasar</b>, para que quede repartido en unidades. Si lo produces aquí, te quedan <b>kilos sueltos</b> en el inventario.</span>
+        </div>
+      )}
       <div className="card">
         <div className="grid2">
-          <div><label className="label">Producto a fabricar</label>
+          <div><label className="label">Granel a fabricar</label>
             <select className="select" value={pid} onChange={e=>setPid(e.target.value)}>
               <option value="">Seleccionar…</option>
-              {prods.filter(p=>p.fabricable).map(p=><option key={p.id} value={p.id}>{p.nombre}{p.vende_pos===false?" (solo producción)":""}</option>)}
+              {/* solo GRANELES: las presentaciones ya no tienen fórmula y se hacen desde 📦 Envasar */}
+              {prods.filter(p=>p.fabricable && !p.granel_id).map(p=><option key={p.id} value={p.id}>{p.nombre}{p.vende_pos===false?" (solo producción)":""}</option>)}
             </select>
           </div>
           <div><label className="label">Kilos a fabricar</label><input className="input" type="number" min="0" step="0.1" value={cantidad} onChange={e=>setCantidad(e.target.value)}/></div>

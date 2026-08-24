@@ -2482,7 +2482,7 @@ function Produccion({showToast}){
   return (
     <div>
       <div className="subnav">
-        {[["insumos","Insumos"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["historial","Historial"]].map(([k,l])=>(
+        {[["insumos","Insumos"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["producir","🧪 Producir granel"],["historial","Historial"]].map(([k,l])=>(
           <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
         ))}
       </div>

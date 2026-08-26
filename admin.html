@@ -192,9 +192,18 @@ async function vipApiSupabase(params){
   const a=params.accion;
   try{
     if(a==='listar_clientes'){
-      const {data,error}=await sb.from('clientes_vip').select('id,nombre,telefono,membresia,saldo,activo').order('nombre');
-      if(error) return {ok:false,error:error.message};
-      return {ok:true, clientes:(data||[]).map(c=>({id:c.id,nombre:c.nombre,telefono:c.telefono,membresia:c.membresia,saldo:Number(c.saldo)}))};
+      // OJO: la base devuelve máximo 1000 filas por consulta → hay que paginar,
+      // si no se pierden clientes y los totales salen bajos.
+      const todos=[]; const PAGE=1000; let from=0;
+      for(;;){
+        const {data,error}=await sb.from('clientes_vip')
+          .select('id,nombre,telefono,membresia,saldo,activo').order('nombre').range(from,from+PAGE-1);
+        if(error) return {ok:false,error:error.message};
+        todos.push(...(data||[]));
+        if(!data || data.length<PAGE) break;
+        from+=PAGE;
+      }
+      return {ok:true, clientes:todos.map(c=>({id:c.id,nombre:c.nombre,telefono:c.telefono,membresia:c.membresia,saldo:Number(c.saldo),activo:c.activo}))};
     }
     if(a==='historial_cliente'){
       const {data,error}=await sb.from('transacciones_vip').select('created_at,tipo,monto,tokens,sede').eq('id_vip',params.id_vip).order('created_at',{ascending:false}).limit(30);
@@ -279,16 +288,30 @@ async function vipOrigenMembresias(){
     if(!data || data.length<page) break;
     from+=page;
   }
-  const {data:cli}=await sb.from('clientes_vip').select('id,membresia,activo').limit(5000);
-  const info={}; (cli||[]).forEach(c=>info[c.id]={membresia:c.membresia,activo:c.activo});
+  const cli=[]; let f2=0;   // paginado: la base nunca devuelve más de 1000 por consulta
+  for(;;){
+    const {data,error}=await sb.from('clientes_vip').select('id,membresia,activo').range(f2,f2+page-1);
+    if(error) break;
+    cli.push(...(data||[]));
+    if(!data || data.length<page) break;
+    f2+=page;
+  }
+  const info={}; cli.forEach(c=>info[c.id]={membresia:c.membresia,activo:c.activo});
   return tx.map(t=>({...t, membresia:(info[t.id_vip]||{}).membresia||'—', activo:(info[t.id_vip]||{}).activo}));
 }
 
 // Cortesías de apertura (captación por link/Instagram)
 async function listCortesias(){
   if(DEMO_MODE) return [];
-  const {data,error}=await sb.from('cortesias').select('*').order('created_at',{ascending:false}).limit(3000);
-  return error?[]:(data||[]);
+  const todas=[]; const PAGE=1000; let from=0;   // paginado: la base corta en 1000 por consulta
+  for(;;){
+    const {data,error}=await sb.from('cortesias').select('*').order('created_at',{ascending:false}).range(from,from+PAGE-1);
+    if(error) break;
+    todas.push(...(data||[]));
+    if(!data || data.length<PAGE) break;
+    from+=PAGE;
+  }
+  return todas;
 }
 // Borra una campaña completa: las cortesías Y sus cuentas VIP.
 // Ojo: si se borrara solo la cortesía, la cuenta VIP quedaría sin restricción de sede.

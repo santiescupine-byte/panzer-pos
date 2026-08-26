@@ -290,6 +290,23 @@ async function listCortesias(){
   const {data,error}=await sb.from('cortesias').select('*').order('created_at',{ascending:false}).limit(3000);
   return error?[]:(data||[]);
 }
+// Borra una campaña completa: las cortesías Y sus cuentas VIP.
+// Ojo: si se borrara solo la cortesía, la cuenta VIP quedaría sin restricción de sede.
+async function borrarCampanaCortesias(campana, sede){
+  if(DEMO_MODE) return 0;
+  let q=sb.from('cortesias').select('id,id_vip');
+  q = (!campana || campana==='(sin campaña)') ? q.is('campana',null) : q.eq('campana',campana);
+  if(sede) q=q.eq('sede',sede);
+  const {data,error}=await q; if(error) throw error;
+  const filas=data||[]; if(!filas.length) return 0;
+  const vips=filas.map(x=>x.id_vip).filter(Boolean);
+  const ids=filas.map(x=>x.id);
+  const lotes=(arr,n)=>{ const o=[]; for(let i=0;i<arr.length;i+=n) o.push(arr.slice(i,i+n)); return o; };
+  for(const l of lotes(vips,50)){ await sb.from('transacciones_vip').delete().in('id_vip',l); }
+  for(const l of lotes(vips,50)){ await sb.from('clientes_vip').delete().in('id',l); }
+  for(const l of lotes(ids,50)){ const {error:e}=await sb.from('cortesias').delete().in('id',l); if(e) throw e; }
+  return ids.length;
+}
 
 // ============================================================
 // DATOS DEMO (en memoria, editables) — sembrados del catálogo real
@@ -5576,7 +5593,20 @@ function Membresias({showToast, admin}){
   const [cortSedeGen,setCortSedeGen]=useState(""); // sede para generar el link
   const [cortSede2,setCortSede2]=useState("");     // 2ª sede opcional (la cortesía vale en ambas)
   const [cortCampana,setCortCampana]=useState(""); // nombre de campaña para el link
-  const [cortFiltro,setCortFiltro]=useState("");   // filtro por campaña/sede en la tabla
+  const [cortFiltro,setCortFiltro]=useState("");   // búsqueda por texto
+  const [cortCamp,setCortCamp]=useState(null);     // {campana,sede} de la campaña que estás viendo
+  const [cortEstado,setCortEstado]=useState("");   // '' | 'pendiente' | 'canjeada'
+  const borrarCampana=async(c)=>{
+    const canj=cortesias.filter(x=>(x.campana||'(sin campaña)')===c.campana && x.sede===c.sede && x.estado==='canjeada').length;
+    let msg="⚠ Vas a BORRAR la campaña:\n\n"+c.campana+"\nSede: "+String(c.sede||'').replace(/\|/g,' o ')+"\n\n"+c.total+" cortesía(s) y sus cuentas VIP.";
+    if(canj>0) msg+="\n\n🚨 OJO: "+canj+" ya fueron CANJEADAS. Se perderá ese registro.";
+    msg+="\n\nEsto no se puede deshacer. ¿Continuar?";
+    if(!confirm(msg)) return;
+    if(canj>0 && !confirm("Confirma otra vez: se borrarán también las "+canj+" ya canjeadas.")) return;
+    try{ const n=await borrarCampanaCortesias(c.campana,c.sede);
+      if(cortCamp && cortCamp.campana===c.campana && cortCamp.sede===c.sede) setCortCamp(null);
+      cargarCortesias(); showToast(n+" cortesía(s) borradas ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } };
   const cargarCortesias=()=>{ setCortesias(null); listCortesias().then(setCortesias).catch(()=>setCortesias([])); };
   // Arma el link de registro de una campaña (sirve para generarlo y para RECUPERARLO después)
   const linkCortesia=(sede,campana)=>location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html'
@@ -5944,7 +5974,10 @@ function Membresias({showToast, admin}){
               o.total++; if(c.estado==='canjeada') o.canj++; });
             const camps=Object.values(byCamp).sort((a,b)=>b.total-a.total);
             const filtro=cortFiltro.trim().toLowerCase();
-            const lista=cortesias.filter(c=> !filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro));
+            const lista=cortesias.filter(c=>
+              (!cortCamp || ((c.campana||'(sin campaña)')===cortCamp.campana && c.sede===cortCamp.sede)) &&
+              (!cortEstado || c.estado===cortEstado) &&
+              (!filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro)));
             const totReg=cortesias.length, totCanj=cortesias.filter(c=>c.estado==='canjeada').length;
             return (
               <div>
@@ -5956,9 +5989,10 @@ function Membresias({showToast, admin}){
                 {camps.length>0 && (
                   <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
                     <table className="tbl">
-                      <thead><tr><th>Campaña · Sede</th><th className="num">Registrados</th><th className="num">Canjeados</th><th className="num">Conversión</th><th>Link</th></tr></thead>
-                      <tbody>{camps.map(c=>(<tr key={c.label}>
-                        <td className="row-name">{c.label}</td>
+                      <thead><tr><th>Campaña · Sede</th><th className="num">Registrados</th><th className="num">Canjeados</th><th className="num">Conversión</th><th>Link</th><th></th></tr></thead>
+                      <tbody>{camps.map(c=>{ const sel=cortCamp&&cortCamp.campana===c.campana&&cortCamp.sede===c.sede; return (
+                        <tr key={c.label} style={{background:sel?"var(--amber-d)":"transparent"}}>
+                        <td className="row-name" style={{cursor:"pointer"}} onClick={()=>setCortCamp(sel?null:{campana:c.campana,sede:c.sede})}>{c.label}{sel&&<span className="pill pill-token" style={{marginLeft:6}}>viendo</span>}</td>
                         <td className="num">{c.total}</td>
                         <td className="num" style={{color:"var(--green)"}}>{c.canj}</td>
                         <td className="num">{c.total?Math.round(c.canj/c.total*100):0}%</td>
@@ -5966,13 +6000,25 @@ function Membresias({showToast, admin}){
                           <button className="btn btn-ghost btn-sm" title={linkCortesia(c.sede,c.campana)} onClick={()=>copiarLink(linkCortesia(c.sede,c.campana))}>📋 Copiar</button>
                           <a className="btn btn-ghost btn-sm" style={{marginLeft:4,textDecoration:"none"}} href={linkCortesia(c.sede,c.campana)} target="_blank" rel="noopener">↗ Abrir</a>
                         </td>
-                      </tr>))}</tbody>
+                        <td style={{whiteSpace:"nowrap"}}>
+                          <button className="btn btn-ghost btn-sm" onClick={()=>setCortCamp(sel?null:{campana:c.campana,sede:c.sede})}>{sel?"✕ Quitar":"👁 Ver"}</button>
+                          <button className="btn btn-danger btn-sm" style={{marginLeft:4}} onClick={()=>borrarCampana(c)}>🗑</button>
+                        </td>
+                      </tr>);})}</tbody>
                     </table>
                   </div>
                 )}
                 <div className="toolbar">
-                  <div className="sec-title" style={{marginRight:"auto",fontSize:15}}>Leads ({lista.length})</div>
-                  <input className="input" style={{maxWidth:220,margin:0}} value={cortFiltro} onChange={e=>setCortFiltro(e.target.value)} placeholder="Buscar nombre, tel, campaña…"/>
+                  <div className="sec-title" style={{marginRight:"auto",fontSize:15}}>
+                    {cortCamp ? <span>📋 {cortCamp.campana} <span className="muted" style={{fontWeight:400}}>· {sedeTxt(cortCamp.sede)}</span></span> : "Leads"} <span className="muted">({lista.length})</span>
+                  </div>
+                  {cortCamp && <button className="btn btn-ghost btn-sm" onClick={()=>setCortCamp(null)}>✕ Ver todas las campañas</button>}
+                  <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+                    {[['','Todos'],['pendiente','Pendientes'],['canjeada','✓ Canjeados']].map(([k,l])=>(
+                      <button key={k} className={"btn btn-sm "+(cortEstado===k?'btn-amber':'btn-ghost')} onClick={()=>setCortEstado(k)}>{l}</button>
+                    ))}
+                  </div>
+                  <input className="input" style={{maxWidth:200,margin:0}} value={cortFiltro} onChange={e=>setCortFiltro(e.target.value)} placeholder="Buscar nombre o tel…"/>
                   <button className="btn btn-ghost btn-sm" onClick={cargarCortesias}>🔄</button>
                 </div>
                 <div className="card" style={{padding:0,overflowX:"auto"}}>

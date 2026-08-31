@@ -81,39 +81,61 @@
   const SEDE=(qs.get('sede')||'').trim();
   const CAMPANA=(qs.get('campana')||qs.get('campaña')||'').trim();
   const $=id=>document.getElementById(id);
-  if(SEDE){ $('sedeName').textContent=SEDE; } else { $('sedeName').textContent='Panzer'; }
+  const sedeTxt=s=>String(s||'').replace(/\s*\(franquicia\)\s*/gi,'').replace(/\|/g,' o ').trim();  // "A (franquicia)|B" -> "A o B"
+  $('sedeName').textContent = SEDE ? sedeTxt(SEDE) : 'Panzer';
 
   // Mismo formato de QR que lee el sistema/las máquinas: JSON {id,nombre,membresia} vía api.qrserver.com
   const qrImgSrc=(id,nombre)=>'https://api.qrserver.com/v1/create-qr-code/?size=240x240&data='+encodeURIComponent(JSON.stringify({id:id,nombre:nombre||'',membresia:'Cortesía'}));
 
+  // Normaliza el celular: quita el 57 del país y lo que no sea número
+  const telNorm=t=>{ let n=String(t||'').replace(/\D/g,'');
+    if(n.length===12 && n.startsWith('57')) n=n.slice(2);
+    if(n.length===13 && n.startsWith('057')) n=n.slice(3);
+    return n; };
+  const claveLocal=()=>'panzer_cort_'+SEDE+'_'+CAMPANA;
+  const yaRegistrado=()=>{ try{ return JSON.parse(localStorage.getItem(claveLocal())||'null'); }catch(e){ return null; } };
+
   async function registrar(){
     const nombre=$('nombre').value.trim();
-    const tel=($('telefono').value||'').replace(/\D/g,'');
+    const tel=telNorm($('telefono').value);
     $('err').textContent='';
     if(nombre.length<3){ $('err').textContent='Escribe tu nombre completo.'; return; }
-    if(tel.length<7){ $('err').textContent='Escribe un número de WhatsApp válido.'; return; }
+    if(!(tel.length===10 && tel.startsWith('3'))){ $('err').textContent='Escribe un celular válido de 10 dígitos que empiece por 3.'; return; }
     if(!SEDE){ $('err').textContent='Falta la sede en el enlace. Pide el link correcto.'; return; }
+    // ya se registró desde este celular en esta campaña
+    const prev=yaRegistrado();
+    if(prev && prev.id){ mostrarOk(prev, prev.nombre||nombre, true); return; }
     $('btn').disabled=true; $('btn').textContent='Registrando…';
     try{
       const { data, error } = await sb.rpc('cortesia_crear',{ p_nombre:nombre, p_telefono:tel, p_sede:SEDE, p_campana:CAMPANA||null });
       if(error) throw error;
       if(!data || !data.ok){ $('err').textContent=(data&&data.error)||'No se pudo registrar. Intenta de nuevo.'; $('btn').disabled=false; $('btn').textContent='Quiero mi cortesía 🎁'; return; }
-      $('okTitle').textContent = data.existe ? ('¡Hola de nuevo, '+nombre.split(' ')[0]+'!') : ('¡Listo, '+nombre.split(' ')[0]+'! 🎉');
-      $('okSub').textContent = data.existe ? 'Ya tenías tu cortesía registrada. Aquí está de nuevo.' : 'Tu lavada de cortesía está activa.';
-      $('okCode').textContent = data.id_vip||'—';
-      $('okSede').textContent = data.sede||SEDE;
-      $('okSede2').textContent = data.sede||SEDE;
-      $('okVence').textContent = data.vence||'—';
-      $('qrImg').src = qrImgSrc(data.id_vip, nombre);
-      $('form').classList.add('hidden');
-      $('ok').classList.remove('hidden');
-      window.scrollTo(0,0);
+      const reg={id:data.id_vip, nombre:nombre, sede:data.sede||SEDE, vence:data.vence, existe:data.existe};
+      try{ localStorage.setItem(claveLocal(), JSON.stringify(reg)); }catch(e){}
+      mostrarOk(reg, nombre, data.existe===true);
     }catch(e){
       $('err').textContent='Error de conexión. Revisa tu internet e intenta de nuevo.';
       $('btn').disabled=false; $('btn').textContent='Quiero mi cortesía 🎁';
     }
   }
+
+  function mostrarOk(reg, nombre, yaTenia){
+    const pila=(nombre||reg.nombre||'').split(' ')[0];
+    $('okTitle').textContent = yaTenia ? ('¡Hola de nuevo, '+pila+'!') : ('¡Listo, '+pila+'! 🎉');
+    $('okSub').textContent = yaTenia ? 'Ya tenías tu cortesía registrada. Aquí está de nuevo.' : 'Tu lavada de cortesía está activa.';
+    $('okCode').textContent = reg.id||'—';
+    $('okSede').textContent = sedeTxt(reg.sede||SEDE);
+    $('okSede2').textContent = sedeTxt(reg.sede||SEDE);
+    $('okVence').textContent = reg.vence||'—';
+    $('qrImg').src = qrImgSrc(reg.id, nombre||reg.nombre);
+    $('form').classList.add('hidden');
+    $('ok').classList.remove('hidden');
+    window.scrollTo(0,0);
+  }
+
   $('telefono').addEventListener('keydown',e=>{ if(e.key==='Enter') registrar(); });
+  // Si ya se registró desde este celular en esta campaña, se le muestra su QR (no puede sacar otra)
+  (function(){ const p=yaRegistrado(); if(p && p.id) mostrarOk(p, p.nombre, true); })();
 </script>
 </body>
 </html>

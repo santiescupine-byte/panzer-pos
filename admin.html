@@ -5665,6 +5665,28 @@ function Membresias({showToast, admin}){
     setEdC(null);
   };
 
+  // eliminar un miembro (para fichas mal generadas o que hay que dar de baja)
+  const eliminarCliente=async()=>{
+    const c=sel.cliente, saldo=Number(c.saldo)||0;
+    let msg="⚠ Vas a ELIMINAR a este miembro:\n\n"+c.nombre+"\n"+c.id+" · "+c.membresia+"\nSaldo: "+fmt(saldo)+
+            "\n\nSe borra la cuenta y todo su historial de movimientos.\nEsto no se puede deshacer.";
+    if(saldo>0) msg+="\n\n🚨 OJO: todavía tiene "+fmt(saldo)+" de saldo sin usar.";
+    msg+="\n\n¿Continuar?";
+    if(!confirm(msg)) return;
+    if(saldo>0 && !confirm("Confirma otra vez: se pierde el saldo de "+fmt(saldo)+" de "+c.nombre+".")) return;
+    setBusyM(true);
+    try{
+      await sb.from('transacciones_vip').delete().eq('id_vip',c.id);
+      await sb.from('canjes_cupon_vip').delete().eq('codigo_vip',c.id);
+      await sb.from('cortesias').delete().eq('id_vip',c.id);          // por si era cuenta de cortesía
+      const {error}=await sb.from('clientes_vip').delete().eq('id',c.id); if(error) throw error;
+      setClientes(cs=>cs.filter(x=>x.id!==c.id));
+      setSel(null); setEdC(null);
+      showToast("Miembro eliminado","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    finally{ setBusyM(false); }
+  };
+
   // CRUD de cupones
   const nuevoCupon=()=>{
     const nums=(cupones||[]).map(c=>parseInt((c.id_cupon||'').replace(/\D/g,''))||0);
@@ -5991,6 +6013,14 @@ function Membresias({showToast, admin}){
 
           {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
             const sedeTxt=s=>String(s||'—').replace(/\|/g,' o ');   // "A|B" -> "A o B"
+            // 🚩 Sospechosos: mismo nombre registrado con teléfonos distintos (posible abuso)
+            const telN=t=>{ let n=String(t||'').replace(/\D/g,''); if(n.length===12&&n.startsWith('57')) n=n.slice(2); return n; };
+            const porNombre={};
+            cortesias.forEach(c=>{ const k=(c.nombre||'').trim().toLowerCase().replace(/\s+/g,' ');
+              (porNombre[k]=porNombre[k]||new Set()).add(telN(c.telefono)); });
+            const sospechoso=c=>{ const k=(c.nombre||'').trim().toLowerCase().replace(/\s+/g,' ');
+              return porNombre[k] && porNombre[k].size>1; };
+            const nSosp=cortesias.filter(sospechoso).length;
             const byCamp={};
             cortesias.forEach(c=>{ const camp=c.campana||'(sin campaña)'; const k=camp+' · '+sedeTxt(c.sede);
               const o=byCamp[k]||(byCamp[k]={label:k, campana:camp, sede:c.sede, total:0, canj:0});
@@ -5999,7 +6029,7 @@ function Membresias({showToast, admin}){
             const filtro=cortFiltro.trim().toLowerCase();
             const lista=cortesias.filter(c=>
               (!cortCamp || ((c.campana||'(sin campaña)')===cortCamp.campana && c.sede===cortCamp.sede)) &&
-              (!cortEstado || c.estado===cortEstado) &&
+              (cortEstado!=='sospechoso' ? (!cortEstado || c.estado===cortEstado) : sospechoso(c)) &&
               (!filtro || (c.nombre||'').toLowerCase().includes(filtro) || (c.telefono||'').includes(filtro) || (c.campana||'').toLowerCase().includes(filtro) || (c.sede||'').toLowerCase().includes(filtro)));
             const totReg=cortesias.length, totCanj=cortesias.filter(c=>c.estado==='canjeada').length;
             return (
@@ -6037,7 +6067,7 @@ function Membresias({showToast, admin}){
                   </div>
                   {cortCamp && <button className="btn btn-ghost btn-sm" onClick={()=>setCortCamp(null)}>✕ Ver todas las campañas</button>}
                   <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
-                    {[['','Todos'],['pendiente','Pendientes'],['canjeada','✓ Canjeados']].map(([k,l])=>(
+                    {[['','Todos'],['pendiente','Pendientes'],['canjeada','✓ Canjeados'],['sospechoso','🚩 Sospechosos'+(nSosp?(" ("+nSosp+")"):"")]].map(([k,l])=>(
                       <button key={k} className={"btn btn-sm "+(cortEstado===k?'btn-amber':'btn-ghost')} onClick={()=>setCortEstado(k)}>{l}</button>
                     ))}
                   </div>
@@ -6052,8 +6082,8 @@ function Membresias({showToast, admin}){
                       {lista.slice(0,500).map(c=>(
                         <tr key={c.id}>
                           <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(c.created_at)}</td>
-                          <td className="row-name">{c.nombre}</td>
-                          <td><a href={'https://wa.me/57'+(c.telefono||'').replace(/\D/g,'')} target="_blank" rel="noopener" style={{color:"var(--green)"}}>{c.telefono}</a></td>
+                          <td className="row-name">{c.nombre}{sospechoso(c)&&<span className="pill pill-off" style={{marginLeft:6}} title="Este mismo nombre se registró con más de un teléfono">🚩</span>}</td>
+                          <td><a href={'https://wa.me/57'+telN(c.telefono)} target="_blank" rel="noopener" style={{color:"var(--green)"}}>{c.telefono}</a></td>
                           <td>{sedeTxt(c.sede)}</td>
                           <td className="muted">{c.campana||"—"}</td>
                           <td>{c.estado==='canjeada'?<span className="pill pill-prod">Canjeada</span>:<span className="pill pill-token">Pendiente</span>}</td>
@@ -6134,10 +6164,12 @@ function Membresias({showToast, admin}){
                 <label className="label">Membresía</label>
                 <select className="select" value={edC.membresia} onChange={e=>setEdC({...edC,membresia:e.target.value})}>{["Standard","Silver","Gold"].map(m=><option key={m} value={m}>{m}</option>)}</select>
                 <label className="check" style={{marginTop:8}}><input type="checkbox" checked={!!edC.activo} onChange={e=>setEdC({...edC,activo:e.target.checked})}/> Activo</label>
-                <div style={{display:"flex",gap:8,marginTop:10}}>
+                <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
                   <button className="btn btn-amber btn-sm" disabled={busyM} onClick={guardarCliente}>{busyM?"…":"Guardar cambios"}</button>
                   <button className="btn btn-ghost btn-sm" disabled={busyM} onClick={()=>setEdC(null)}>Cancelar</button>
+                  <button className="btn btn-danger btn-sm" style={{marginLeft:"auto"}} disabled={busyM} onClick={eliminarCliente}>🗑 Eliminar miembro</button>
                 </div>
+                <div className="muted" style={{fontSize:11,marginTop:6}}>Para dar de baja sin perder el historial, mejor desmarca <b>Activo</b>. Eliminar borra la cuenta y todos sus movimientos.</div>
               </div>
             )}
             <div className="result-row" style={{borderTop:"1px solid var(--bd)"}}><span className="result-label" style={{fontWeight:800}}>Saldo</span><span className="result-value amber" style={{fontSize:18}}>{fmt(sel.cliente.saldo)}</span></div>

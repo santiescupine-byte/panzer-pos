@@ -460,10 +460,10 @@ const db = {
   // ---- MIS TAREAS (asignadas a este operador en esta sede) ----
   async misTareas(sede, operador){
     if(DEMO_MODE) return [
-      {id:"t1",titulo:"Limpiar trampa de grasa",descripcion:"Antes de cerrar el turno",sede,asignado_a:operador,prioridad:"alta",fecha_limite:new Date().toISOString().slice(0,10),estado:"pendiente",completado_at:null},
-      {id:"t2",titulo:"Revisar nivel de cera líquida",descripcion:"",sede,asignado_a:operador,prioridad:"normal",fecha_limite:null,estado:"pendiente",completado_at:null},
+      {id:"t1",titulo:"Limpiar trampa de grasa",descripcion:"Antes de cerrar el turno",sede,asignado_a:operador,prioridad:"alta",fecha_limite:new Date().toISOString().slice(0,10),estado:"pendiente",completado_at:null,pasos:[{t:"Cerrar la llave de paso",ok:true},{t:"Vaciar la trampa",ok:false},{t:"Lavar la rejilla",ok:false}]},
+      {id:"t2",titulo:"Revisar nivel de cera líquida",descripcion:"",sede,asignado_a:operador,prioridad:"normal",fecha_limite:null,estado:"pendiente",completado_at:null,pasos:null},
     ];
-    const { data, error } = await sb.from('tareas').select('id,titulo,descripcion,prioridad,fecha_limite,estado,completado_at,creado_por')
+    const { data, error } = await sb.from('tareas').select('id,titulo,descripcion,prioridad,fecha_limite,estado,completado_at,creado_por,pasos')
       .eq('asignado_a',operador)
       .order('fecha_limite',{ascending:true,nullsFirst:false}).limit(200);
     if(error) return [];
@@ -472,6 +472,13 @@ const db = {
   async marcarMiTarea(id, hecha){
     if(DEMO_MODE) return;
     const row=hecha?{estado:'hecha',completado_at:new Date().toISOString()}:{estado:'pendiente',completado_at:null};
+    const { error } = await sb.from('tareas').update(row).eq('id',id);
+    if(error) throw error;
+  },
+  // Guarda el avance del checklist de una tarea (hecha solo si están todos los pasos)
+  async marcarMisPasos(id, pasos, estado){
+    if(DEMO_MODE) return;
+    const row={pasos, estado, completado_at: estado==='hecha'?new Date().toISOString():null};
     const { error } = await sb.from('tareas').update(row).eq('id',id);
     if(error) throw error;
   },
@@ -1519,15 +1526,30 @@ function MaquinasSheet({sede,operador,showToast,onClose}){
 // ============================================================
 function TareasSheet({sede,operador,showToast,onClose}){
   const [tareas,setTareas]=useState(null);
+  const [abierto,setAbierto]=useState(null);   // id de la tarea con el checklist desplegado
   const hoy=(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
 
   const load=()=>{ db.misTareas(sede,operador).then(setTareas).catch(()=>setTareas([])); };
   useEffect(()=>{ load(); },[]);
 
+  // Marcar la tarea completa. Si tiene checklist, arrastra todos los pasos.
   const toggle=async t=>{
     const nuevo=t.estado!=='hecha';
-    setTareas(prev=>prev.map(x=>x.id===t.id?{...x,estado:nuevo?'hecha':'pendiente',completado_at:nuevo?new Date().toISOString():null}:x));
-    try{ await db.marcarMiTarea(t.id,nuevo); }
+    const tienePasos=Array.isArray(t.pasos)&&t.pasos.length>0;
+    const pasos=tienePasos?t.pasos.map(p=>({...p,ok:nuevo})):null;
+    setTareas(prev=>prev.map(x=>x.id===t.id?{...x,estado:nuevo?'hecha':'pendiente',completado_at:nuevo?new Date().toISOString():null,...(pasos?{pasos}:{})}:x));
+    try{
+      if(pasos) await db.marcarMisPasos(t.id,pasos,nuevo?'hecha':'pendiente');
+      else await db.marcarMiTarea(t.id,nuevo);
+    }catch(e){ showToast&&showToast("No se pudo guardar, reintenta","err"); load(); }
+  };
+  // Tachar un paso. Cuando se tachan todos, la tarea queda hecha sola.
+  const togglePaso=async(t,i)=>{
+    const pasos=(t.pasos||[]).map((p,j)=>j===i?{...p,ok:!p.ok}:p);
+    const listo=pasos.length>0 && pasos.every(p=>p.ok);
+    const estado=listo?'hecha':'pendiente';
+    setTareas(prev=>prev.map(x=>x.id===t.id?{...x,pasos,estado,completado_at:listo?new Date().toISOString():null}:x));
+    try{ await db.marcarMisPasos(t.id,pasos,estado); }
     catch(e){ showToast&&showToast("No se pudo guardar, reintenta","err"); load(); }
   };
 
@@ -1540,23 +1562,55 @@ function TareasSheet({sede,operador,showToast,onClose}){
     if(t.fecha_limite===hoy) return <span style={{color:"var(--amber)",fontWeight:700}}>🟡 Para hoy</span>;
     return <span style={{color:"var(--td)"}}>⚪ {t.fecha_limite}</span>;
   };
-  const Fila=({t})=>(
-    <div onClick={()=>toggle(t)} style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:8,padding:"14px",borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:"pointer",opacity:t.estado==='hecha'?0.55:1}}>
-      <div style={{width:26,height:26,borderRadius:8,flexShrink:0,marginTop:1,border:"2px solid "+(t.estado==='hecha'?"var(--green)":"var(--bd2)"),background:t.estado==='hecha'?"var(--green)":"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900}}>{t.estado==='hecha'?"✓":""}</div>
+  const Fila=({t})=>{
+    const ps=Array.isArray(t.pasos)?t.pasos:[];
+    const nok=ps.filter(p=>p.ok).length, np=ps.length;
+    const pct=np?Math.round(nok/np*100):0;
+    const ab=abierto===t.id;
+    // Con checklist: tocar la fila despliega los pasos; la casilla marca toda la tarea.
+    const onFila=()=>{ if(np>0) setAbierto(ab?null:t.id); else toggle(t); };
+    return (
+    <div onClick={onFila} style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:8,padding:"14px",borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:"pointer",opacity:t.estado==='hecha'?0.55:1}}>
+      <div onClick={e=>{e.stopPropagation();toggle(t);}} style={{width:26,height:26,borderRadius:8,flexShrink:0,marginTop:1,border:"2px solid "+(t.estado==='hecha'?"var(--green)":"var(--bd2)"),background:t.estado==='hecha'?"var(--green)":"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900}}>{t.estado==='hecha'?"✓":""}</div>
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontWeight:700,fontSize:15,textDecoration:t.estado==='hecha'?"line-through":"none"}}>{t.titulo}{t.prioridad==='alta'?<span style={{fontSize:10,fontWeight:800,padding:"1px 7px",borderRadius:8,background:"var(--red-d)",color:"var(--red)",marginLeft:6}}>ALTA</span>:null}</div>
         {t.descripcion && <div style={{color:"var(--td)",fontSize:13,marginTop:3}}>{t.descripcion}</div>}
+
+        {np>0 && (
+          <div style={{marginTop:7}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,fontWeight:800}}>
+              <span style={{width:10,flexShrink:0,color:"var(--td)"}}>{ab?"▾":"▸"}</span>
+              <span style={{flexShrink:0,color:pct===100?"var(--green)":"var(--amber)"}}>☑️ {nok}/{np}</span>
+              <div style={{flex:1,maxWidth:140,height:7,borderRadius:7,background:"var(--bd)",overflow:"hidden"}}>
+                <div style={{width:pct+"%",height:"100%",background:pct===100?"var(--green)":"var(--amber)",transition:"width .2s"}}/>
+              </div>
+            </div>
+            {ab && (
+              <div style={{marginTop:8,borderLeft:"2px solid var(--bd)",paddingLeft:10}}>
+                {ps.map((p,i)=>(
+                  <div key={i} onClick={e=>{e.stopPropagation();togglePaso(t,i);}}
+                       style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 0",cursor:"pointer"}}>
+                    <div style={{width:22,height:22,borderRadius:6,flexShrink:0,border:"2px solid "+(p.ok?"var(--green)":"var(--bd2)"),background:p.ok?"var(--green)":"transparent",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:900}}>{p.ok?"✓":""}</div>
+                    <span style={{fontSize:14,lineHeight:"22px",color:p.ok?"var(--td)":"inherit",textDecoration:p.ok?"line-through":"none"}}>{p.t}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{fontSize:12,marginTop:5}}>{t.estado==='hecha'?<span style={{color:"var(--green)"}}>✅ Hecha</span>:dueLabel(t)}{t.creado_por?<span style={{color:"var(--td)"}}> · asignó {t.creado_por}</span>:null}</div>
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="sheet-bg" onClick={onClose}>
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
         <div className="card-t">📋 Mis tareas</div>
-        <div className="header-sub" style={{marginBottom:12}}>{operador} · {sede} · toca la casilla para marcar hecho</div>
+        <div className="header-sub" style={{marginBottom:12}}>{operador} · {sede} · toca la casilla para marcar hecho. Las que tienen ☑️ se abren para ir tachando paso a paso.</div>
 
         {tareas===null ? <div className="empty">Cargando…</div> : (
           <div>

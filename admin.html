@@ -1979,12 +1979,104 @@ function Turnos({showToast, quien, sedes, emps}){
     setVerCfg(true); };
   const guardarCfg=async()=>{
     if(!cfgEd.sede){ showToast("Elige la sede","err"); return; }
-    if(!(cfgEd.empleados||[]).filter(Boolean).length){ showToast("Agrega los empleados de la rotación","err"); return; }
+    const nuevos=(cfgEd.empleados||[]).map(n=>String(n||"").trim()).filter(Boolean);
+    if(!nuevos.length){ showToast("Agrega los empleados de la rotación","err"); return; }
+    // Si se renombró a alguien, hay que arrastrar el cambio a las excepciones ya
+    // guardadas: si no, ese día lo sigue mostrando con el nombre viejo y el
+    // reporte de horas lo cuenta como dos personas distintas.
+    const antes=(cfg&&cfgEd.sede===cfg.sede)?(cfg.empleados||[]).map(n=>String(n||"").trim()):[];
+    const renombres=antes.map((v,i)=>[v,nuevos[i]]).filter(([v,n])=>v&&n&&v!==n);
     setBusy(true);
-    try{ await db.saveTurnosConfig({...cfgEd,empleados:cfgEd.empleados.filter(Boolean)});
+    try{
+      await db.saveTurnosConfig({...cfgEd,empleados:nuevos});
+      if(renombres.length){
+        const mapa={}; renombres.forEach(([v,n])=>{ mapa[v]=n; });
+        const todas=await db.listExcepciones(cfgEd.sede,'1900-01-01','2999-12-31');
+        let tocadas=0;
+        for(const ex of todas){
+          const fr=(ex.franjas||[]).map(f=>mapa[String(f.empleado||"").trim()]
+            ?{...f,empleado:mapa[String(f.empleado||"").trim()]}:f);
+          if(JSON.stringify(fr)!==JSON.stringify(ex.franjas)){
+            await db.saveExcepcion({sede:ex.sede,fecha:ex.fecha,franjas:fr,motivo:ex.motivo,creado_por:ex.creado_por});
+            tocadas++;
+          }
+        }
+        if(tocadas) showToast("Ciclo guardado ✓ · "+tocadas+" día(s) con cambio actualizados","ok");
+        else showToast("Ciclo guardado ✓","ok");
+      } else showToast("Ciclo guardado ✓","ok");
       setVerCfg(false); await cargarCfgs(); if(cfgEd.sede===sede) cargarMes();
-      showToast("Ciclo guardado ✓","ok"); }
+    }
     catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---- enviar la quincena por WhatsApp ----
+  // Sin número: WhatsApp abre el selector de chat y eliges el grupo de la sede.
+  const [wa,setWa]=useState(null);            // {q:1|2, texto}
+  // Quita el apellido (la última palabra) y deja los nombres de pila:
+  // "Luis Ferney Marin" -> "Luis Ferney", "Nicolas Moreno" -> "Nicolas".
+  // No sirve tomar solo la 1ª palabra: a Luis Ferney y a Juan David se les
+  // dice por el segundo nombre.
+  const nombreCorto=n=>{ const p=String(n||"").trim().split(/\s+/).filter(Boolean);
+    return p.length>1 ? p.slice(0,-1).join(" ") : (p[0]||""); };
+  const hCorta=t=>{ const [h,mm]=hhmm(t).split(":").map(Number);
+    const ap=h<12?"am":"pm"; const h12=h%12===0?12:h%12;
+    return h12+(mm?(":"+String(mm).padStart(2,"0")):"")+ap; };
+  const textoQuincena=(q)=>{
+    const d1=q===1?1:16, d2=q===1?15:new Date(y,m,0).getDate();
+    const dias=diasDelMes.filter(f=>{ const n=Number(f.slice(8)); return n>=d1&&n<=d2; });
+    const L=[];
+    L.push("🗓️ *TURNOS "+sede.toUpperCase()+"*");
+    L.push("_"+(q===1?"1ª":"2ª")+" quincena · "+d1+" al "+d2+" de "+MES_NOM[m-1].toLowerCase()+" "+y+"_");
+    L.push("");
+    dias.forEach(f=>{
+      const ts=porDia[f]||[];
+      const dow=new Date(f+"T12:00:00").getDay();
+      const cab="*"+DIA_CORTO[dow]+" "+Number(f.slice(8))+"*";
+      if(!ts.length){ L.push(cab+" — _sin turnos_"); return; }
+      const partes=ts.map(t=>nombreCorto(t.empleado)+" "+hCorta(t.desde)+"-"+hCorta(t.hasta));
+      const trabajan=new Set(ts.map(t=>String(t.empleado||"").trim()));
+      const desc=listaEmp.filter(n=>!trabajan.has(String(n||"").trim())).map(nombreCorto);
+      L.push(cab+"  "+partes.join(" · ")+(desc.length?("   💤 "+desc.join(", ")):""));
+    });
+    // horas de la quincena por persona
+    const hs={}; dias.forEach(f=>(porDia[f]||[]).forEach(t=>{ hs[t.empleado]=(hs[t.empleado]||0)+(Number(t.horas)||0); }));
+    const det=listaEmp.filter(n=>hs[n]).map(n=>nombreCorto(n)+" "+Math.round(hs[n])+"h");
+    if(det.length){ L.push(""); L.push("_Horas de la quincena:_ "+det.join(" · ")); }
+    return L.join("\n");
+  };
+  const abrirWA=()=>{ const q=(new Date().getDate()<=15)?1:2; setWa({q, modo:'imagen', texto:textoQuincena(q)}); };
+  const cambiarQ=q=>setWa(w=>({...w, q, texto:textoQuincena(q)}));
+  const enviarWA=()=>{ try{ window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(wa.texto),'_blank'); }
+    catch(e){ showToast("No se pudo abrir WhatsApp","err"); } };
+  const copiarWA=()=>{ try{ navigator.clipboard.writeText(wa.texto); showToast("Copiado ✓","ok"); }catch(e){} };
+
+  // días de la quincena elegida
+  const diasQ=q=>{ const d1=q===1?1:16, d2=q===1?15:new Date(y,m,0).getDate();
+    return diasDelMes.filter(f=>{ const n=Number(f.slice(8)); return n>=d1&&n<=d2; }); };
+  // Se parte en bloques de 8 días: 15 columnas seguidas quedan ilegibles en el celular.
+  const bloquesQ=q=>{ const a=diasQ(q), out=[]; for(let i=0;i<a.length;i+=8) out.push(a.slice(i,i+8)); return out; };
+
+  const [genImg,setGenImg]=useState(false);
+  const compartirImagen=async()=>{
+    const node=document.getElementById('turnos-img-card');
+    if(!node){ showToast("No se encontró el cuadro","err"); return; }
+    if(typeof html2canvas==='undefined'){ showToast("Generador de imagen no cargó (revisa internet)","err"); return; }
+    setGenImg(true);
+    try{
+      const canvas=await html2canvas(node,{scale:2, backgroundColor:'#ffffff', useCORS:true});
+      const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+      const fname='Turnos_'+sede.replace(/[^a-z0-9]+/gi,'_')+'_'+(wa.q===1?'1a':'2a')+'quincena_'+MES_NOM[m-1]+'_'+y+'.png';
+      const file=new File([blob],fname,{type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        await navigator.share({files:[file], title:'Turnos '+sede,
+          text:'Turnos '+sede+' — '+(wa.q===1?'1ª':'2ª')+' quincena de '+MES_NOM[m-1].toLowerCase()});
+      } else {
+        const url=URL.createObjectURL(blob); const a=document.createElement('a');
+        a.href=url; a.download=fname; a.click(); URL.revokeObjectURL(url);
+        showToast("Imagen descargada — adjúntala en WhatsApp","ok");
+      }
+    }catch(e){ if(e&&e.name!=='AbortError') showToast("No se pudo generar la imagen: "+(e.message||e),"err"); }
+    finally{ setGenImg(false); }
   };
 
   // ---- reporte de horas ----
@@ -2009,6 +2101,7 @@ function Turnos({showToast, quien, sedes, emps}){
           <b style={{minWidth:130,textAlign:"center"}}>{MES_NOM[m-1]} {y}</b>
           <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(1)}>→</button>
         </div>
+        {sede && <button className="btn btn-sm" style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={abrirWA}>📲 WhatsApp</button>}
         <button className="btn btn-ghost btn-sm" onClick={abrirHoras}>⏱️ Horas</button>
         <button className="btn btn-ghost btn-sm" onClick={abrirCfg}>⚙️ Ciclo</button>
       </div>
@@ -2078,21 +2171,24 @@ function Turnos({showToast, quien, sedes, emps}){
                           style={{minWidth:ANCHO,width:ANCHO,height:52,padding:3,verticalAlign:"middle",
                                   borderTop:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
                                   background:hl?"rgba(37,99,235,.18)":(finde?"var(--sf2)":"transparent")}}>
-                        {t && (
+                        {t && (()=>{ const raro=!listaEmp.some(n=>n.trim()===String(t.empleado||"").trim());
+                          const col=raro?"#dc2626":colorDe(t.empleado); return (
                           <div draggable
                                onDragStart={()=>setDrag({fecha:f,franja:fr,empleado:t.empleado})}
                                onDragEnd={()=>{setDrag(null);setSobre(null);}}
-                               title={"Arrastra para mover o intercambiar · "+t.empleado+" "+hhmmCorto(t.desde)+"–"+hhmmCorto(t.hasta)}
-                               style={{background:colorDe(t.empleado)+"22",color:colorDe(t.empleado),
-                                       border:"1px solid "+colorDe(t.empleado)+"55",borderRadius:8,
+                               title={raro?("⚠ \""+t.empleado+"\" no está en el ciclo de esta sede. Ábrelo con ✎ y vuelve a elegir la persona.")
+                                          :("Arrastra para mover o intercambiar · "+t.empleado+" "+hhmmCorto(t.desde)+"–"+hhmmCorto(t.hasta))}
+                               style={{background:col+"22",color:col,
+                                       border:(raro?"2px dashed ":"1px solid ")+col+(raro?"":"55"),borderRadius:8,
                                        padding:"5px 6px",cursor:"grab",textAlign:"center",lineHeight:1.25,
                                        opacity:(drag&&drag.fecha===f&&drag.franja===fr)?0.35:1,userSelect:"none"}}>
-                            <div style={{fontWeight:800,fontSize:12,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.empleado}</div>
+                            <div style={{fontWeight:800,fontSize:12,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                              {raro?"⚠ ":""}{t.empleado}</div>
                             <div style={{fontSize:10,opacity:.85,fontWeight:600}}>
                               {hhmmCorto(t.desde)}–{hhmmCorto(t.hasta)}{Number(t.horas)===12?" · 12h":""}
                             </div>
                           </div>
-                        )}
+                        );})()}
                       </td>
                     );
                   })}
@@ -2104,8 +2200,9 @@ function Turnos({showToast, quien, sedes, emps}){
                             borderTop:"1px solid var(--bd)",borderRight:"1px solid var(--bd)",
                             fontWeight:800,fontSize:12,color:"var(--td)"}}>DESCANSA</td>
                 {diasDelMes.map(f=>{
-                  const trabajan=new Set((porDia[f]||[]).map(x=>x.empleado));
-                  const d=listaEmp.filter(n=>!trabajan.has(n));
+                  // se compara sin espacios sobrantes: "Overly Usuga " y "Overly Usuga" son el mismo
+                  const trabajan=new Set((porDia[f]||[]).map(x=>String(x.empleado||"").trim()));
+                  const d=listaEmp.filter(n=>!trabajan.has(String(n||"").trim()));
                   return (
                     <td key={f} style={{minWidth:ANCHO,width:ANCHO,padding:3,textAlign:"center",
                                         borderTop:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
@@ -2226,6 +2323,136 @@ function Turnos({showToast, quien, sedes, emps}){
               <button className="btn btn-ghost" disabled={busy} onClick={()=>setVerCfg(false)}>Cancelar</button>
               <button className="btn btn-amber" disabled={busy} onClick={guardarCfg}>{busy?"Guardando…":"Guardar ciclo"}</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- enviar quincena por WhatsApp ---- */}
+      {wa && (
+        <div className="modal-bg" onClick={()=>setWa(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:520}}>
+            <div className="modal-t">📲 Enviar turnos por WhatsApp</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+              {sede} · {MES_NOM[m-1]} {y}. Al enviar, WhatsApp te deja <b>elegir el grupo</b>.
+            </div>
+            <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+              <button className={"btn btn-sm "+(wa.q===1?'btn-amber':'btn-ghost')} onClick={()=>cambiarQ(1)}>1ª quincena (1–15)</button>
+              <button className={"btn btn-sm "+(wa.q===2?'btn-amber':'btn-ghost')} onClick={()=>cambiarQ(2)}>2ª quincena (16–fin)</button>
+              <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4,marginLeft:"auto"}}>
+                <button className={"btn btn-sm "+(wa.modo==='imagen'?'btn-amber':'btn-ghost')} onClick={()=>setWa(w=>({...w,modo:'imagen'}))}>🖼️ Imagen</button>
+                <button className={"btn btn-sm "+(wa.modo==='texto'?'btn-amber':'btn-ghost')} onClick={()=>setWa(w=>({...w,modo:'texto'}))}>📝 Texto</button>
+              </div>
+            </div>
+
+            {wa.modo==='texto' ? (<div>
+              <label className="label">Mensaje <span className="muted">(lo puedes editar antes de enviar)</span></label>
+              <textarea className="input" style={{minHeight:230,fontFamily:"ui-monospace,Menlo,Consolas,monospace",fontSize:12,lineHeight:1.5,whiteSpace:"pre",overflowX:"auto"}}
+                value={wa.texto} onChange={e=>setWa(w=>({...w,texto:e.target.value}))}/>
+              <div className="muted" style={{fontSize:11,marginTop:-4}}>
+                Los <b>*asteriscos*</b> y los <b>_guiones bajos_</b> son el formato de WhatsApp: se ven como negrita y cursiva al enviarlo.
+              </div>
+              <div className="modal-actions">
+                <button className="btn btn-ghost" onClick={()=>setWa(null)}>Cerrar</button>
+                <button className="btn btn-ghost" onClick={copiarWA}>📋 Copiar</button>
+                <button className="btn" style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={enviarWA}>Abrir WhatsApp →</button>
+              </div>
+            </div>) : (<div>
+              <div className="muted" style={{fontSize:12,marginBottom:8}}>Así les va a llegar la imagen:</div>
+              <div style={{overflow:"auto",maxHeight:420,border:"1px solid var(--bd)",borderRadius:10,background:"#fff"}}>
+                {/* Colores fijos: la imagen debe verse igual sin importar el tema */}
+                <div id="turnos-img-card" style={{background:"#ffffff",padding:20,width:"fit-content",minWidth:560,
+                     fontFamily:"'Outfit',system-ui,sans-serif",color:"#0f172a"}}>
+                  {/* Sin logo a propósito: el servidor de la imagen no permite CORS y
+                      html2canvas la omite en silencio, dejando un hueco en la foto. */}
+                  <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+                    <div style={{background:"#2563eb",color:"#fff",borderRadius:10,padding:"7px 12px",
+                                 fontSize:15,fontWeight:900,letterSpacing:1}}>PANZER</div>
+                    <div>
+                      <div style={{fontSize:20,fontWeight:900,letterSpacing:-.3}}>TURNOS · {sede.toUpperCase()}</div>
+                      <div style={{fontSize:13,color:"#64748b",fontWeight:600}}>
+                        {wa.q===1?"1ª":"2ª"} quincena · {wa.q===1?1:16} al {wa.q===1?15:new Date(y,m,0).getDate()} de {MES_NOM[m-1].toLowerCase()} {y}
+                      </div>
+                    </div>
+                  </div>
+
+                  {bloquesQ(wa.q).map((bloque,bi)=>{
+                    const usadas=[0,1,2].filter(fr=>bloque.some(f=>(porDia[f]||[]).some(t=>franjaDe(t.desde)===fr)));
+                    const filas=usadas.length?usadas:[0];
+                    const W=112;
+                    return (
+                    <table key={bi} style={{borderCollapse:"collapse",marginBottom:bi<bloquesQ(wa.q).length-1?14:0}}>
+                      <thead><tr>
+                        <th style={{width:56,minWidth:56}}></th>
+                        {bloque.map(f=>{ const dow=new Date(f+"T12:00:00").getDay(); const finde=(dow===0||dow===6);
+                          return (
+                          <th key={f} style={{width:W,minWidth:W,padding:"5px 4px",border:"1px solid #e2e8f0",
+                                              background:finde?"#eef2f7":"#f8fafc"}}>
+                            <div style={{fontSize:13,fontWeight:900}}>{Number(f.slice(8))}</div>
+                            <div style={{fontSize:10,fontWeight:800,color:"#64748b",letterSpacing:.4}}>{DIA_CORTO[dow].toUpperCase()}</div>
+                          </th>);})}
+                      </tr></thead>
+                      <tbody>
+                        {filas.map(fr=>(
+                          <tr key={fr}>
+                            <td style={{padding:"4px 6px",border:"1px solid #e2e8f0",background:"#f8fafc"}}>
+                              <div style={{fontSize:12,fontWeight:900,color:"#2563eb"}}>{FRANJAS[fr].lbl}</div>
+                            </td>
+                            {bloque.map(f=>{ const t=(porDia[f]||[]).find(x=>franjaDe(x.desde)===fr);
+                              const dow=new Date(f+"T12:00:00").getDay(); const finde=(dow===0||dow===6);
+                              const c=t?colorDe(t.empleado):"#94a3b8";
+                              return (
+                              <td key={f} style={{width:W,height:46,padding:3,border:"1px solid #e2e8f0",
+                                                  background:finde?"#f8fafc":"#ffffff",verticalAlign:"middle"}}>
+                                {t && (
+                                  <div style={{background:c+"22",border:"1px solid "+c+"66",borderRadius:7,
+                                               padding:"4px 3px",textAlign:"center",lineHeight:1.2}}>
+                                    <div style={{fontSize:11,fontWeight:900,color:c,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nombreCorto(t.empleado)}</div>
+                                    <div style={{fontSize:9.5,fontWeight:700,color:c,opacity:.85}}>{hCorta(t.desde)}-{hCorta(t.hasta)}</div>
+                                  </div>
+                                )}
+                              </td>);})}
+                          </tr>
+                        ))}
+                        <tr>
+                          <td style={{padding:"4px 6px",border:"1px solid #e2e8f0",background:"#f8fafc",
+                                      fontSize:11,fontWeight:900,color:"#64748b"}}>DESCANSA</td>
+                          {bloque.map(f=>{ const trab=new Set((porDia[f]||[]).map(x=>String(x.empleado||"").trim()));
+                            const d=listaEmp.filter(n=>!trab.has(String(n||"").trim()));
+                            return (
+                            <td key={f} style={{width:W,padding:"4px 3px",textAlign:"center",border:"1px solid #e2e8f0",
+                                                background:d.length?"#fef2f2":"#ffffff"}}>
+                              {d.map(n=><div key={n} style={{fontSize:10.5,fontWeight:900,color:colorDe(n)}}>{nombreCorto(n)}</div>)}
+                            </td>);})}
+                        </tr>
+                      </tbody>
+                    </table>);
+                  })}
+
+                  {(()=>{ const hs={}; diasQ(wa.q).forEach(f=>(porDia[f]||[]).forEach(t=>{
+                      const k=String(t.empleado||"").trim(); hs[k]=(hs[k]||0)+(Number(t.horas)||0); }));
+                    const det=listaEmp.filter(n=>hs[String(n).trim()]);
+                    if(!det.length) return null;
+                    return (
+                    <div style={{marginTop:14,paddingTop:10,borderTop:"2px solid #e2e8f0",display:"flex",gap:16,flexWrap:"wrap",alignItems:"center"}}>
+                      <span style={{fontSize:12,fontWeight:800,color:"#64748b"}}>HORAS DE LA QUINCENA</span>
+                      {det.map(n=>(
+                        <span key={n} style={{fontSize:13,fontWeight:800,color:colorDe(n)}}>
+                          {nombreCorto(n)} <span style={{color:"#0f172a"}}>{Math.round(hs[String(n).trim()])}h</span>
+                        </span>
+                      ))}
+                    </div>);})()}
+                </div>
+              </div>
+              <div className="modal-actions">
+                <button className="btn btn-ghost" disabled={genImg} onClick={()=>setWa(null)}>Cerrar</button>
+                <button className="btn" disabled={genImg} style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={compartirImagen}>
+                  {genImg?"Generando…":"📲 Compartir imagen"}
+                </button>
+              </div>
+              <div className="muted" style={{fontSize:11,marginTop:6}}>
+                En el celular abre el menú de compartir y eliges el grupo. En el computador se <b>descarga la imagen</b> y la adjuntas en WhatsApp.
+              </div>
+            </div>)}
           </div>
         </div>
       )}

@@ -676,6 +676,54 @@ const db = {
     if(DEMO_MODE) return [];
     const {data,error}=await sb.from('mantenimiento_repuestos').select('*').eq('mantenimiento_id',mantId); if(error) return []; return data||[];
   },
+  // TODOS los mantenimientos de TODAS las sedes (para el consolidado de costos).
+  // Paginado: PostgREST corta en 1000 filas por página.
+  async listMantTodos(){
+    if(DEMO_MODE) return (DEMO.mant||[]).slice();
+    const out=[]; const paso=1000;
+    for(let i=0;i<40;i++){
+      const {data,error}=await sb.from('mantenimientos')
+        .select('id,sede,equipo_id,equipo_nombre,descripcion,operador,supervisor,estado,reportado_at,reparado_at,costo_repuestos,costo_mano_obra,costo_total')
+        .order('reportado_at',{ascending:false}).range(i*paso,(i+1)*paso-1);
+      if(error) break;
+      out.push(...(data||[]));
+      if(!data || data.length<paso) break;
+    }
+    return out;
+  },
+  // ---- MANTENIMIENTOS LOCATIVOS (de la sede, no de una máquina) ----
+  async listLocativos(sede){
+    if(DEMO_MODE) return (DEMO.mant||[]).filter(m=>m.tipo==='locativo'&&(!sede||m.sede===sede));
+    let q=sb.from('mantenimientos').select('*').eq('tipo','locativo').order('reportado_at',{ascending:false}).limit(1000);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async crearLocativo(l){
+    if(DEMO_MODE){ DEMO.mant=DEMO.mant||[]; DEMO.mant.push({...l,id:uid(),tipo:'locativo',estado:'cerrado'}); return; }
+    const {error}=await sb.rpc('registrar_locativo',{
+      p_sede:l.sede, p_categoria:l.categoria||null, p_descripcion:l.descripcion,
+      p_proveedor:l.proveedor||null, p_fecha:l.fecha, p_mano_obra:Number(l.mano_obra)||0,
+      p_materiales:l.materiales||[], p_nota:l.nota||null});
+    if(error) throw error;
+  },
+  async borrarLocativo(id){
+    if(DEMO_MODE){ DEMO.mant=(DEMO.mant||[]).filter(x=>x.id!==id); return; }
+    const {error}=await sb.rpc('borrar_locativo',{p_id:id}); if(error) throw error;
+  },
+  // Hoja de vida de una máquina: su historial + los repuestos de cada intervención
+  async hojaVidaEquipo(equipoId){
+    if(DEMO_MODE) return {mant:(DEMO.mant||[]).filter(m=>m.equipo_id===equipoId), reps:[]};
+    const {data:mant,error}=await sb.from('mantenimientos').select('*')
+      .eq('equipo_id',equipoId).order('reportado_at',{ascending:false}).limit(500);
+    if(error) return {mant:[],reps:[]};
+    const ids=(mant||[]).map(m=>m.id);
+    let reps=[];
+    if(ids.length){
+      const {data:r}=await sb.from('mantenimiento_repuestos').select('*').in('mantenimiento_id',ids);
+      reps=r||[];
+    }
+    return {mant:mant||[], reps};
+  },
   // ---- REPUESTOS (inventario central) ----
   async listRepuestos(){
     if(DEMO_MODE){ DEMO.repuestos=DEMO.repuestos||[]; return DEMO.repuestos.slice(); }
@@ -1281,7 +1329,7 @@ function App(){
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
-                {tab==="mantenimiento" && <Mantenimiento showToast={showToast}/>}
+                {tab==="mantenimiento" && <Mantenimiento showToast={showToast} quien={auth.nombre}/>}
                 {tab==="recaudo"    && <Recaudo showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
@@ -2518,7 +2566,8 @@ const UNIDADES=["g","kg","ml","L","unidad"];
 // factor para pasar de "kg equivalente" a la unidad del insumo (g/ml van en milésimas)
 const convInsumo=u=>(u==='g'||u==='ml')?1000:1;
 // duración legible entre dos fechas (para tiempo de solución de mantenimiento)
-const fmtDur=(desde,hasta)=>{ if(!desde||!hasta) return '—'; let ms=new Date(hasta)-new Date(desde); if(ms<0) ms=0; const min=Math.floor(ms/60000); const d=Math.floor(min/1440), h=Math.floor((min%1440)/60), m=min%60; return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'; };
+// Ojo: acepta 0 como "desde" (se usa para formatear una duración suelta en ms).
+const fmtDur=(desde,hasta)=>{ if(desde==null||hasta==null||desde===''||hasta==='') return '—'; let ms=new Date(hasta)-new Date(desde); if(!isFinite(ms)) return '—'; if(ms<0) ms=0; const min=Math.floor(ms/60000); const d=Math.floor(min/1440), h=Math.floor((min%1440)/60), m=min%60; return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'; };
 
 function Produccion({showToast}){
   const [sub,setSub]=useState("insumos");
@@ -3630,7 +3679,7 @@ function HistorialProd({showToast,clave,onUnlock}){
   );
 }
 
-function Mantenimiento({showToast}){
+function Mantenimiento({showToast, quien}){
   const [sedes,setSedes]=useState([]);
   const [sede,setSede]=useState("");
   const [equipos,setEquipos]=useState(null);
@@ -3648,6 +3697,13 @@ function Mantenimiento({showToast}){
   const [repuestos,setRepuestos]=useState([]);    // catálogo de repuestos (para el formulario)
   const [manoObra,setManoObra]=useState("");      // costo de mano de obra de la reparación
   const [repsUsados,setRepsUsados]=useState([]);  // repuestos consumidos en la reparación
+  const [hoja,setHoja]=useState(null);            // equipo cuya hoja de vida está abierta
+  const [todos,setTodos]=useState(null);          // TODOS los mantenimientos (consolidado de costos)
+  const [anio,setAnio]=useState("");              // año del consolidado
+  const [celda,setCelda]=useState(null);          // {sede,mes,tipo} detalle de una celda del consolidado
+  const [locs,setLocs]=useState(null);            // mantenimientos locativos (de la sede)
+  const [locSede,setLocSede]=useState("");        // filtro de sede en la pestaña Locativos
+  const [nuevoLoc,setNuevoLoc]=useState(false);   // abre el modal de nuevo locativo
 
   useEffect(()=>{ db.listRepuestos().then(setRepuestos).catch(()=>{}); },[]);
   useEffect(()=>{ if(rep){ setManoObra(""); setRepsUsados([]); } },[rep]);
@@ -3658,7 +3714,7 @@ function Mantenimiento({showToast}){
     if(!sede) return;
     try{
       const [eq,ab,h]=await Promise.all([db.listEquipos(sede),db.mantAbiertos(sede),db.listMantenimientos(sede)]);
-      setEquipos(eq); setAbiertos(ab); setHist(h);
+      setEquipos(eq); setAbiertos(ab); setHist((h||[]).filter(m=>m.tipo!=='locativo'));   // los locativos van en su pestaña
     }catch(e){ showToast(""+(e.message||e),"err"); setEquipos([]); }
   };
   useEffect(()=>{ if(sede){ setEquipos(null); load(); } },[sede]);
@@ -3701,6 +3757,45 @@ function Mantenimiento({showToast}){
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
   };
 
+  // ---- MANTENIMIENTOS LOCATIVOS ----
+  const cargarLocs=async()=>{ setLocs(null); try{ setLocs(await db.listLocativos()); }catch(e){ setLocs([]); } };
+  const borrarLoc=async(l)=>{
+    if(!confirm("¿Borrar el mantenimiento locativo \""+(l.descripcion||"")+"\" de "+l.sede+"?\n\nSi descontó materiales del catálogo, se devuelven al stock.")) return;
+    try{ await db.borrarLocativo(l.id); cargarLocs(); if(todos!==null) cargarCostos(); db.listRepuestos().then(setRepuestos).catch(()=>{}); showToast("Locativo eliminado ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  // ---- CONSOLIDADO DE COSTOS (sede × mes) ----
+  const cargarCostos=async()=>{ setTodos(null); try{ setTodos(await db.listMantTodos()); }catch(e){ setTodos([]); } };
+  const mesDe=m=>String(m.reportado_at||"").slice(0,7);          // "2026-06"
+  const MESES=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+  const mesTxt=k=>{ const [y,mm]=String(k).split("-"); return (MESES[Number(mm)-1]||mm)+" "+String(y).slice(2); };
+  const nInt=n=>n+(n===1?" intervención":" intervenciones");
+  const esLoc=m=>m.tipo==='locativo';
+  const cons=(()=>{
+    const rows=todos||[];
+    const anios=[...new Set(rows.map(m=>mesDe(m).slice(0,4)).filter(Boolean))].sort().reverse();
+    const y=anio||anios[0]||"";
+    const del=rows.filter(m=>mesDe(m).slice(0,4)===y);
+    const meses=[...new Set(del.map(mesDe))].sort();
+    const sedes=[...new Set(del.map(m=>m.sede||"(sin sede)"))].sort();
+    const sum=a=>a.reduce((x,m)=>x+(Number(m.costo_total)||0),0);
+    // tipo: 'todo' | 'equipo' | 'locativo'
+    const porTipo=(a,t)=>t==='equipo'?a.filter(m=>!esLoc(m)):t==='locativo'?a.filter(esLoc):a;
+    const val=(s,k,t)=>porTipo(del.filter(m=>(m.sede||"(sin sede)")===s && mesDe(m)===k),t||'todo');
+    const hayLoc=del.some(esLoc);
+    return {anios, y, del, meses, sedes, val, sum, porTipo, hayLoc,
+      totMes:(k,t)=>sum(porTipo(del.filter(m=>mesDe(m)===k),t||'todo')),
+      cntMes:(k,t)=>porTipo(del.filter(m=>mesDe(m)===k),t||'todo').length,
+      totSede:(s,t)=>sum(porTipo(del.filter(m=>(m.sede||"(sin sede)")===s),t||'todo')),
+      cntSede:(s,t)=>porTipo(del.filter(m=>(m.sede||"(sin sede)")===s),t||'todo').length,
+      gran:sum(del),
+      granEq:sum(del.filter(m=>!esLoc(m))),
+      granLoc:sum(del.filter(esLoc)),
+      granReps:del.reduce((x,m)=>x+(Number(m.costo_repuestos)||0),0),
+      granMO:del.reduce((x,m)=>x+(Number(m.costo_mano_obra)||0),0)};
+  })();
+
   const cerrados=hist.filter(m=>m.estado==='cerrado'&&m.reparado_at);
   const promedio=cerrados.length? cerrados.reduce((a,m)=>a+(new Date(m.reparado_at)-new Date(m.reportado_at)),0)/cerrados.length : 0;
   const paradas=(equipos||[]).filter(e=>e.estado==='parada').length;
@@ -3719,8 +3814,202 @@ function Mantenimiento({showToast}){
         <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
           <button className={"btn btn-sm "+(vista==='panorama'?'btn-amber':'btn-ghost')} onClick={()=>{setVista('panorama');loadPanorama();}}>🌐 Panorama</button>
           <button className={"btn btn-sm "+(vista==='sede'?'btn-amber':'btn-ghost')} onClick={()=>setVista('sede')}>🔧 Por sede</button>
+          <button className={"btn btn-sm "+(vista==='locativos'?'btn-amber':'btn-ghost')} onClick={()=>{setVista('locativos'); if(locs===null) cargarLocs();}}>🏠 Locativos</button>
+          <button className={"btn btn-sm "+(vista==='costos'?'btn-amber':'btn-ghost')} onClick={()=>{setVista('costos'); if(todos===null) cargarCostos();}}>💵 Costos</button>
         </div>
       </div>
+
+      {/* ===== MANTENIMIENTOS LOCATIVOS (de la sede, no de una máquina) ===== */}
+      {vista==='locativos' && (
+        locs===null ? <div className="empty">Cargando locativos…</div> : (()=>{
+          const vis=locSede?locs.filter(l=>l.sede===locSede):locs;
+          const tot=vis.reduce((a,l)=>a+(Number(l.costo_total)||0),0);
+          const porCat={}; vis.forEach(l=>{ const k=l.categoria||"Sin categoría"; porCat[k]=(porCat[k]||0)+(Number(l.costo_total)||0); });
+          const cats=Object.entries(porCat).sort((a,b)=>b[1]-a[1]);
+          return (
+          <div>
+            <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+              <select className="select" style={{maxWidth:220,margin:0}} value={locSede} onChange={e=>setLocSede(e.target.value)}>
+                <option value="">🏬 Todas las sedes</option>
+                {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+              </select>
+              <button className="btn btn-amber btn-sm" onClick={()=>setNuevoLoc(true)}>＋ Registrar locativo</button>
+              <button className="btn btn-ghost btn-sm" onClick={cargarLocs}>↻</button>
+            </div>
+
+            <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Registros</div><div style={{fontSize:24,fontWeight:800}}>{vis.length}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Costo total</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(tot)}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Materiales</div><div style={{fontSize:24,fontWeight:800}}>{fmt(vis.reduce((a,l)=>a+(Number(l.costo_repuestos)||0),0))}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Mano de obra</div><div style={{fontSize:24,fontWeight:800}}>{fmt(vis.reduce((a,l)=>a+(Number(l.costo_mano_obra)||0),0))}</div></div>
+            </div>
+
+            {cats.length>0 && (
+              <div style={{marginBottom:14}}>
+                <div className="sec-title" style={{margin:"0 0 6px",fontSize:13}}>Gasto por categoría</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {cats.map(([c,v])=><span key={c} className="pill" style={{background:"var(--sf3)",color:"var(--tb)"}}>{c} · {fmt(v)}</span>)}
+                </div>
+              </div>
+            )}
+
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Fecha</th><th>Sede</th><th>Categoría</th><th>Qué se hizo</th><th>Quién</th><th style={{textAlign:"right"}}>Materiales</th><th style={{textAlign:"right"}}>Mano obra</th><th style={{textAlign:"right"}}>Total</th><th></th></tr></thead>
+                <tbody>
+                  {vis.length===0 && <tr><td colSpan="9"><div className="empty">Sin mantenimientos locativos{locSede?(" en "+locSede):""}. Registra el primero arriba.</div></td></tr>}
+                  {vis.map(l=>(
+                    <tr key={l.id}>
+                      <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(l.reportado_at)}</td>
+                      <td className="muted">{l.sede}</td>
+                      <td className="row-name">{l.categoria||"—"}</td>
+                      <td>{l.descripcion}{l.nota_reparacion?<div className="muted">↳ {l.nota_reparacion}</div>:null}</td>
+                      <td className="muted">{l.proveedor||"—"}</td>
+                      <td style={{textAlign:"right"}}>{Number(l.costo_repuestos)>0?fmt(l.costo_repuestos):"—"}</td>
+                      <td style={{textAlign:"right"}}>{Number(l.costo_mano_obra)>0?fmt(l.costo_mano_obra):"—"}</td>
+                      <td style={{textAlign:"right",fontWeight:700}}>{fmt(l.costo_total)}</td>
+                      <td><button className="btn btn-ghost btn-sm" onClick={()=>borrarLoc(l)} title="Borrar">✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="muted" style={{fontSize:12,marginTop:10}}>
+              Estos gastos entran en el consolidado de 💵 Costos como <b>🏠 Locativos</b>, sumados al total de la sede pero separados de las máquinas.
+            </div>
+          </div>
+        );})()
+      )}
+
+      {/* ===== CONSOLIDADO DE COSTOS (sede × mes) ===== */}
+      {vista==='costos' && (
+        todos===null ? <div className="empty">Cargando costos…</div> : (
+          <div>
+            <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+              <select className="select" style={{maxWidth:130,margin:0}} value={cons.y} onChange={e=>{setAnio(e.target.value);setCelda(null);}}>
+                {cons.anios.map(a=><option key={a} value={a}>{a}</option>)}
+              </select>
+              <button className="btn btn-ghost btn-sm" onClick={cargarCostos}>↻ Actualizar</button>
+            </div>
+
+            <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Costo del año {cons.y}</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(cons.gran)}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">🔧 Equipos</div><div style={{fontSize:24,fontWeight:800}}>{fmt(cons.granEq)}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">🏠 Locativos</div><div style={{fontSize:24,fontWeight:800}}>{fmt(cons.granLoc)}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Materiales / Mano de obra</div><div style={{fontSize:19,fontWeight:800}}>{fmt(cons.granReps)} <span className="muted" style={{fontWeight:400}}>/</span> {fmt(cons.granMO)}</div></div>
+              <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Intervenciones</div><div style={{fontSize:24,fontWeight:800}}>{cons.del.length}</div></div>
+            </div>
+
+            <div className="sec-title" style={{margin:"4px 0 8px"}}>Costo de mantenimiento por sede y mes <span className="muted">· toca una celda para ver el detalle</span></div>
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th style={{position:"sticky",left:0,background:"var(--sf)"}}>Sede</th>
+                    {cons.meses.map(k=><th key={k} style={{textAlign:"right",whiteSpace:"nowrap"}}>{mesTxt(k)}</th>)}
+                    <th style={{textAlign:"right"}}>Total año</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cons.sedes.length===0 && <tr><td colSpan={cons.meses.length+2}><div className="empty">Sin mantenimientos en {cons.y}.</div></td></tr>}
+                  {cons.sedes.map(s=>{
+                    // por cada sede: la fila total y, debajo, el desglose 🔧 equipos / 🏠 locativos
+                    const subs=[['equipo','🔧 Equipos'],['locativo','🏠 Locativos']]
+                      .filter(([t])=>cons.cntSede(s,t)>0);
+                    return (
+                    <React.Fragment key={s}>
+                      <tr style={{borderTop:"1px solid var(--bd2)"}}>
+                        <td className="row-name" style={{position:"sticky",left:0,background:"var(--sf)"}}>{s}<div className="muted" style={{fontSize:11}}>{nInt(cons.cntSede(s))}</div></td>
+                        {cons.meses.map(k=>{ const ms=cons.val(s,k); const v=cons.sum(ms); const act=celda&&celda.sede===s&&celda.mes===k&&celda.tipo==='todo'; return (
+                          <td key={k} onClick={()=>ms.length&&setCelda(act?null:{sede:s,mes:k,tipo:'todo'})}
+                              style={{textAlign:"right",whiteSpace:"nowrap",cursor:ms.length?"pointer":"default",
+                                      background:act?"rgba(37,99,235,.12)":"transparent",
+                                      fontWeight:v>0?700:400,color:v>0?"var(--tb)":"var(--td)"}}>
+                            {v>0?fmt(v):(ms.length?"—":"")}
+                            {ms.length>0 && <div className="muted" style={{fontSize:11,fontWeight:400}}>{ms.length} int.</div>}
+                          </td>
+                        );})}
+                        <td style={{textAlign:"right",fontWeight:800,color:"var(--amber)",whiteSpace:"nowrap"}}>{fmt(cons.totSede(s))}</td>
+                      </tr>
+                      {subs.length>1 && subs.map(([t,lbl])=>(
+                        <tr key={s+t} style={{fontSize:12}}>
+                          <td className="muted" style={{position:"sticky",left:0,background:"var(--sf)",paddingLeft:22}}>{lbl}</td>
+                          {cons.meses.map(k=>{ const ms=cons.val(s,k,t); const v=cons.sum(ms); const act=celda&&celda.sede===s&&celda.mes===k&&celda.tipo===t; return (
+                            <td key={k} onClick={()=>ms.length&&setCelda(act?null:{sede:s,mes:k,tipo:t})}
+                                style={{textAlign:"right",whiteSpace:"nowrap",cursor:ms.length?"pointer":"default",
+                                        background:act?"rgba(37,99,235,.12)":"transparent",color:"var(--td)"}}>
+                              {v>0?fmt(v):(ms.length?"—":"")}
+                              {ms.length>0 && <span className="muted"> ({ms.length})</span>}
+                            </td>
+                          );})}
+                          <td className="muted" style={{textAlign:"right",whiteSpace:"nowrap"}}>{fmt(cons.totSede(s,t))}</td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  );})}
+                </tbody>
+                {cons.sedes.length>0 && (
+                  <tfoot>
+                    <tr style={{borderTop:"2px solid var(--bd2)"}}>
+                      <td style={{fontWeight:800,position:"sticky",left:0,background:"var(--sf)"}}>TOTAL</td>
+                      {cons.meses.map(k=>(
+                        <td key={k} style={{textAlign:"right",fontWeight:800,whiteSpace:"nowrap"}}>
+                          {fmt(cons.totMes(k))}
+                          <div className="muted" style={{fontSize:11,fontWeight:400}}>{cons.cntMes(k)} int.</div>
+                        </td>
+                      ))}
+                      <td style={{textAlign:"right",fontWeight:900,color:"var(--amber)",whiteSpace:"nowrap"}}>{fmt(cons.gran)}</td>
+                    </tr>
+                    {cons.hayLoc && [['equipo','🔧 Equipos'],['locativo','🏠 Locativos']].map(([t,lbl])=>(
+                      <tr key={t} style={{fontSize:12}}>
+                        <td className="muted" style={{position:"sticky",left:0,background:"var(--sf)",paddingLeft:22}}>{lbl}</td>
+                        {cons.meses.map(k=>(
+                          <td key={k} className="muted" style={{textAlign:"right",whiteSpace:"nowrap"}}>
+                            {fmt(cons.totMes(k,t))}<span className="muted"> ({cons.cntMes(k,t)})</span>
+                          </td>
+                        ))}
+                        <td className="muted" style={{textAlign:"right",fontWeight:700,whiteSpace:"nowrap"}}>{fmt(t==='equipo'?cons.granEq:cons.granLoc)}</td>
+                      </tr>
+                    ))}
+                  </tfoot>
+                )}
+              </table>
+            </div>
+
+            {celda && (()=>{ const ms=cons.val(celda.sede,celda.mes,celda.tipo);
+              const et=celda.tipo==='equipo'?" · 🔧 Equipos":celda.tipo==='locativo'?" · 🏠 Locativos":""; return (
+              <div style={{marginTop:14}}>
+                <div className="sec-title" style={{margin:"0 0 8px"}}>
+                  {celda.sede} · {mesTxt(celda.mes)}{et} <span className="muted">({nInt(ms.length)} · {fmt(cons.sum(ms))})</span>
+                  <button className="btn btn-ghost btn-sm" style={{marginLeft:8}} onClick={()=>setCelda(null)}>✕ Cerrar</button>
+                </div>
+                <div className="card" style={{padding:0,overflowX:"auto"}}>
+                  <table className="tbl">
+                    <thead><tr><th>Fecha</th><th>Equipo / Concepto</th><th>Descripción</th><th>Responsable</th><th style={{textAlign:"right"}}>Materiales</th><th style={{textAlign:"right"}}>Mano obra</th><th style={{textAlign:"right"}}>Total</th></tr></thead>
+                    <tbody>
+                      {ms.map(m=>(
+                        <tr key={m.id}>
+                          <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(m.reportado_at)}</td>
+                          <td className="row-name">{esLoc(m)?<span>🏠 {m.categoria||"Locativo"}</span>:(m.equipo_nombre||"—")}</td>
+                          <td>{m.descripcion||"—"}</td>
+                          <td className="muted">{(esLoc(m)?m.proveedor:m.supervisor)||"—"}</td>
+                          <td style={{textAlign:"right"}}>{Number(m.costo_repuestos)>0?fmt(m.costo_repuestos):"—"}</td>
+                          <td style={{textAlign:"right"}}>{Number(m.costo_mano_obra)>0?fmt(m.costo_mano_obra):"—"}</td>
+                          <td style={{textAlign:"right",fontWeight:700}}>{Number(m.costo_total)>0?fmt(m.costo_total):"—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );})()}
+
+            <div className="muted" style={{fontSize:12,marginTop:10}}>
+              El costo se cuenta en el mes en que se <b>reportó</b> la falla. Las intervenciones sin costo registrado aparecen como “—”.
+            </div>
+          </div>
+        )
+      )}
 
       {/* ===== PANORAMA (todas las sedes) ===== */}
       {vista==='panorama' && (
@@ -3792,9 +4081,13 @@ function Mantenimiento({showToast}){
                   </td>
                   <td>{r? <span><b>{r.descripcion||"(sin descripción)"}</b><br/><span className="muted">{r.operador?("Reportó "+r.operador+" · "):""}{fLocalDia(r.reportado_at)} {fLocalHora(r.reportado_at)} · lleva {fmtDur(r.reportado_at,new Date().toISOString())}</span></span> : <span className="muted">—</span>}</td>
                   <td style={{whiteSpace:"nowrap"}}>
-                    {parada
-                      ? <button className="btn btn-amber btn-sm" onClick={()=>{setRep({equipo:eq,reporte:r});}}>🔧 Reparar / Encender</button>
-                      : <span style={{display:"inline-flex",gap:6}}><button className="btn btn-amber btn-sm" onClick={()=>setRep({equipo:eq,reporte:null,directo:true})}>🔧 Mantenimiento</button><button className="btn btn-ghost btn-sm" onClick={()=>borrar(eq)}>Borrar</button></span>}
+                    <span style={{display:"inline-flex",gap:6}}>
+                      {parada
+                        ? <button className="btn btn-amber btn-sm" onClick={()=>{setRep({equipo:eq,reporte:r});}}>🔧 Reparar / Encender</button>
+                        : <button className="btn btn-amber btn-sm" onClick={()=>setRep({equipo:eq,reporte:null,directo:true})}>🔧 Mantenimiento</button>}
+                      <button className="btn btn-ghost btn-sm" onClick={()=>setHoja(eq)} title="Hoja de vida de la máquina">🗂️ Hoja de vida</button>
+                      {!parada && <button className="btn btn-ghost btn-sm" onClick={()=>borrar(eq)}>Borrar</button>}
+                    </span>
                   </td>
                 </tr>
               );})}
@@ -3877,6 +4170,252 @@ function Mantenimiento({showToast}){
           </div>
         </div>
       )}
+
+      {hoja && <HojaVidaModal equipo={hoja} onClose={()=>setHoja(null)}/>}
+
+      {nuevoLoc && <NuevoLocativoModal sedes={sedes} defSede={locSede||sede} repuestos={repuestos} quien={quien}
+        onClose={()=>setNuevoLoc(false)} showToast={showToast}
+        onCreated={()=>{ cargarLocs(); if(todos!==null) cargarCostos(); db.listRepuestos().then(setRepuestos).catch(()=>{}); }}/>}
+    </div>
+  );
+}
+
+// ============================================================
+// REGISTRAR UN MANTENIMIENTO LOCATIVO (gasto de la sede, no de una máquina)
+// ============================================================
+const CAT_LOCATIVAS=["Plomería / Hidráulica","Eléctrico","Pintura","Obra civil (pisos, muros, techo)",
+  "Avisos / Publicidad","Jardinería / Zonas verdes","Aseo profundo","Cámaras / Seguridad",
+  "Puertas / Cerrajería","Aire / Ventilación","Otro"];
+
+function NuevoLocativoModal({sedes, defSede, repuestos, quien, onClose, onCreated, showToast}){
+  const sede0=defSede || (sedes.find(s=>!s.es_bodega)||sedes[0]||{}).nombre || "";
+  const [l,setL]=useState({sede:sede0, categoria:CAT_LOCATIVAS[0], catOtra:"", descripcion:"",
+    proveedor:quien||"", fecha:fLocalDia(new Date()), mano_obra:"", nota:""});
+  const [mats,setMats]=useState([]);
+  const [busy,setBusy]=useState(false);
+
+  const addMat=()=>setMats(a=>[...a,{key:uid(),repuesto_id:"",nombre:"",cantidad:1,valor_unit:0,condicion:'nuevo'}]);
+  const setMat=(k,patch)=>setMats(a=>a.map(x=>x.key===k?{...x,...patch}:x));
+  const delMat=k=>setMats(a=>a.filter(x=>x.key!==k));
+  const pickMat=(k,id)=>{ const r=repuestos.find(x=>x.id===id); setMat(k,{repuesto_id:id, nombre:r?r.nombre:"", valor_unit:r?(Number(r.costo)||0):0}); };
+  const costoMats=mats.reduce((a,x)=>a+(Number(x.cantidad)||0)*(Number(x.valor_unit)||0),0);
+  const total=costoMats+(Number(l.mano_obra)||0);
+
+  const guardar=async()=>{
+    const desc=(l.descripcion||"").trim();
+    if(!l.sede){ showToast("Elige la sede","err"); return; }
+    if(!desc){ showToast("Describe qué se hizo","err"); return; }
+    const categoria=(l.categoria==="Otro"?(l.catOtra||"").trim():l.categoria)||"Otro";
+    const items=mats.map(x=>({repuesto_id:x.repuesto_id||"", nombre:(x.nombre||"").trim(),
+      cantidad:Number(x.cantidad)||1, valor_unit:Number(x.valor_unit)||0, condicion:x.condicion||'nuevo'}))
+      .filter(i=>i.nombre);
+    setBusy(true);
+    try{
+      // la fecha se guarda al mediodía local para que no se corra de día por zona horaria
+      await db.crearLocativo({sede:l.sede, categoria, descripcion:desc, proveedor:(l.proveedor||"").trim(),
+        fecha:new Date(l.fecha+"T12:00:00").toISOString(), mano_obra:l.mano_obra, materiales:items, nota:(l.nota||"").trim()});
+      showToast("Mantenimiento locativo registrado ✓","ok");
+      onCreated&&onCreated(); onClose();
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  return (
+    <div className="modal-bg" onClick={()=>!busy&&onClose()}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-t">🏠 Mantenimiento locativo</div>
+        <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+          Gasto de la sede que no pertenece a ninguna máquina (pintura, plomería, obra…).
+        </div>
+
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <div style={{flex:"1 1 170px"}}>
+            <label className="label">Sede</label>
+            <select className="select" value={l.sede} onChange={e=>setL({...l,sede:e.target.value})}>
+              {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
+            </select>
+          </div>
+          <div style={{flex:"1 1 130px"}}>
+            <label className="label">Fecha del trabajo</label>
+            <input className="input" type="date" value={l.fecha} onChange={e=>setL({...l,fecha:e.target.value})}/>
+          </div>
+        </div>
+
+        <label className="label">Categoría</label>
+        <select className="select" value={l.categoria} onChange={e=>setL({...l,categoria:e.target.value})}>
+          {CAT_LOCATIVAS.map(c=><option key={c} value={c}>{c}</option>)}
+        </select>
+        {l.categoria==="Otro" && <input className="input" value={l.catOtra} onChange={e=>setL({...l,catOtra:e.target.value})} placeholder="¿Qué categoría?"/>}
+
+        <label className="label">Qué se hizo</label>
+        <input className="input" autoFocus value={l.descripcion} onChange={e=>setL({...l,descripcion:e.target.value})} placeholder="Ej. Cambio de tubería del lavadero 2"/>
+
+        <label className="label">Quién lo hizo (contratista / técnico)</label>
+        <input className="input" value={l.proveedor} onChange={e=>setL({...l,proveedor:e.target.value})} placeholder="Nombre o empresa"/>
+
+        <label className="label">Materiales usados</label>
+        {mats.length===0 && <div className="muted" style={{fontSize:12,marginBottom:6}}>Si el contratista puso los materiales, déjalo vacío y registra todo en “Mano de obra”.</div>}
+        {mats.map(x=>(
+          <div key={x.key} style={{border:"1px solid var(--bd)",borderRadius:10,padding:8,marginBottom:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+              <select className="select" style={{margin:0,flex:1}} value={x.repuesto_id} onChange={e=>pickMat(x.key,e.target.value)}>
+                <option value="">— Otro (comprado por fuera) —</option>
+                {repuestos.map(r=><option key={r.id} value={r.id}>{r.nombre} (stock {Number(r.stock)||0})</option>)}
+              </select>
+              <button className="btn btn-ghost btn-sm" onClick={()=>delMat(x.key)}>✕</button>
+            </div>
+            {!x.repuesto_id && <input className="input" style={{marginBottom:6}} value={x.nombre} onChange={e=>setMat(x.key,{nombre:e.target.value})} placeholder="Nombre del material (no descuenta stock)"/>}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 70px"}}><label className="label" style={{fontSize:11}}>Cantidad</label><input className="input" style={{margin:0}} type="number" value={x.cantidad} onChange={e=>setMat(x.key,{cantidad:e.target.value})}/></div>
+              <div style={{flex:"1 1 100px"}}><label className="label" style={{fontSize:11}}>Valor unit.</label><input className="input" style={{margin:0}} type="number" value={x.valor_unit} onChange={e=>setMat(x.key,{valor_unit:e.target.value})}/></div>
+            </div>
+          </div>
+        ))}
+        <button className="btn btn-ghost btn-sm" onClick={addMat}>＋ Agregar material</button>
+
+        <label className="label" style={{marginTop:10}}>Mano de obra / cobro del contratista ($)</label>
+        <input className="input" type="number" value={l.mano_obra} onChange={e=>setL({...l,mano_obra:e.target.value})} placeholder="0"/>
+
+        <label className="label">Nota (opcional)</label>
+        <input className="input" value={l.nota} onChange={e=>setL({...l,nota:e.target.value})} placeholder="Garantía, factura, observaciones…"/>
+
+        <div className="card" style={{marginBottom:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+          <span>Costo total</span>
+          <span style={{color:"var(--amber)"}}>{fmt(total)}</span>
+        </div>
+
+        <div className="modal-actions">
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancelar</button>
+          <button className="btn btn-amber" disabled={busy} onClick={guardar}>{busy?"Guardando…":"✅ Registrar"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// HOJA DE VIDA DE UNA MÁQUINA
+// Todo el historial de una máquina: intervenciones, costos, repuestos
+// y tiempo fuera de servicio.
+// ============================================================
+function HojaVidaModal({equipo, onClose}){
+  const [data,setData]=useState(null);     // {mant, reps}
+  const [abierto,setAbierto]=useState(null);
+  useEffect(()=>{ db.hojaVidaEquipo(equipo.id).then(setData).catch(()=>setData({mant:[],reps:[]})); },[equipo.id]);
+
+  const mant=(data&&data.mant)||[];
+  const reps=(data&&data.reps)||[];
+  const repsDe=id=>reps.filter(r=>r.mantenimiento_id===id);
+
+  const cerrados=mant.filter(m=>m.reparado_at);
+  const costo=mant.reduce((a,m)=>a+(Number(m.costo_total)||0),0);
+  const costoReps=mant.reduce((a,m)=>a+(Number(m.costo_repuestos)||0),0);
+  const costoMO=mant.reduce((a,m)=>a+(Number(m.costo_mano_obra)||0),0);
+  // tiempo total fuera de servicio (solo las que sí apagaron la máquina)
+  const msParada=mant.reduce((a,m)=>{
+    if(!m.reportado_at) return a;
+    const fin=m.reparado_at?new Date(m.reparado_at):new Date();
+    return a+Math.max(0,fin-new Date(m.reportado_at));
+  },0);
+  const promRep=cerrados.length? cerrados.reduce((a,m)=>a+(new Date(m.reparado_at)-new Date(m.reportado_at)),0)/cerrados.length : 0;
+  const ultima=mant[0];
+  const diasUlt=ultima? Math.floor((Date.now()-new Date(ultima.reportado_at))/86400000) : null;
+  // repuestos más usados en esta máquina
+  const porRepuesto=(()=>{ const m={}; reps.forEach(r=>{ const k=(r.nombre||"?").trim(); m[k]=m[k]||{n:0,$:0}; m[k].n+=Number(r.cantidad)||0; m[k].$+=(Number(r.cantidad)||0)*(Number(r.valor_unit)||0); });
+    return Object.entries(m).sort((a,b)=>b[1].n-a[1].n); })();
+
+  const KPI=({t,v,c})=>(
+    <div className="card" style={{flex:"1 1 130px",padding:"10px 12px"}}>
+      <div className="muted" style={{fontSize:12}}>{t}</div>
+      <div style={{fontSize:19,fontWeight:800,color:c||"var(--tb)"}}>{v}</div>
+    </div>
+  );
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:760}}>
+        <div className="modal-t">🗂️ Hoja de vida — {equipo.nombre}</div>
+        <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+          🏬 {equipo.sede} · estado actual:{" "}
+          <b style={{color:equipo.estado==='parada'?"var(--red)":"var(--green)"}}>{equipo.estado==='parada'?"🔴 Parada":"🟢 Operativa"}</b>
+        </div>
+
+        {data===null ? <div className="empty">Cargando historial…</div> : mant.length===0 ? (
+          <div className="card" style={{textAlign:"center",color:"var(--green)",fontWeight:700}}>
+            ✓ Esta máquina no ha tenido ni una sola intervención 🎉
+          </div>
+        ) : (
+          <div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+              <KPI t="Intervenciones" v={mant.length}/>
+              <KPI t="Costo acumulado" v={fmt(costo)} c="var(--amber)"/>
+              <KPI t="Tiempo fuera de servicio" v={fmtDur(0,msParada)} c={msParada>0?"var(--red)":"var(--green)"}/>
+              <KPI t="Prom. reparación" v={cerrados.length?fmtDur(0,promRep):"—"}/>
+              <KPI t="Última intervención" v={diasUlt===0?"Hoy":(diasUlt===1?"Ayer":("hace "+diasUlt+" días"))}/>
+            </div>
+
+            {costo>0 && (
+              <div className="card" style={{marginBottom:12,display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
+                <span>🔩 Repuestos: <b>{fmt(costoReps)}</b></span>
+                <span>👷 Mano de obra: <b>{fmt(costoMO)}</b></span>
+                <span style={{marginLeft:"auto"}}>Promedio por intervención: <b>{fmt(costo/mant.length)}</b></span>
+              </div>
+            )}
+
+            {porRepuesto.length>0 && (
+              <div style={{marginBottom:12}}>
+                <div className="sec-title" style={{margin:"0 0 6px",fontSize:13}}>🔩 Repuestos que más ha consumido</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {porRepuesto.map(([n,d])=>(
+                    <span key={n} className="pill" style={{background:"var(--sf3)",color:"var(--tb)"}}>{n} · {d.n}×{d.$>0?(" · "+fmt(d.$)):""}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="sec-title" style={{margin:"0 0 8px",fontSize:13}}>📜 Historial ({mant.length}) <span className="muted">· toca para ver el detalle</span></div>
+            {mant.map(m=>{ const ab=abierto===m.id; const rs=repsDe(m.id); const dur=m.reparado_at?fmtDur(m.reportado_at,m.reparado_at):fmtDur(m.reportado_at,new Date().toISOString()); return (
+              <div key={m.id} className="card" style={{marginBottom:8,padding:"10px 12px",cursor:"pointer",borderLeft:"3px solid "+(m.reparado_at?"var(--green)":"var(--red)")}}
+                   onClick={()=>setAbierto(ab?null:m.id)}>
+                <div style={{display:"flex",gap:10,alignItems:"baseline",flexWrap:"wrap"}}>
+                  <span className="muted" style={{fontSize:12}}>{ab?"▾":"▸"}</span>
+                  <b style={{fontSize:13}}>{fLocalDia(m.reportado_at)}</b>
+                  <span style={{flex:1,minWidth:120,fontSize:13}}>{m.descripcion||"(sin descripción)"}</span>
+                  {!m.reparado_at && <span className="pill pill-off">Abierta</span>}
+                  {Number(m.costo_total)>0 && <b style={{color:"var(--amber)",fontSize:13}}>{fmt(m.costo_total)}</b>}
+                </div>
+                {ab && (
+                  <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid var(--bd)",fontSize:13}}>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:6}}>
+                      <div><span className="muted">Reportó:</span> {m.operador||"—"}</div>
+                      <div><span className="muted">Apagada:</span> {fLocalDia(m.reportado_at)} {fLocalHora(m.reportado_at)}</div>
+                      <div><span className="muted">Reparada:</span> {m.reparado_at?(fLocalDia(m.reparado_at)+" "+fLocalHora(m.reparado_at)):<span style={{color:"var(--red)"}}>todavía abierta</span>}</div>
+                      <div><span className="muted">Fuera de servicio:</span> <b>{dur}</b></div>
+                      <div><span className="muted">Supervisor:</span> {m.supervisor||"—"}</div>
+                      {Number(m.costo_mano_obra)>0 && <div><span className="muted">Mano de obra:</span> {fmt(m.costo_mano_obra)}</div>}
+                    </div>
+                    {m.nota_reparacion && <div style={{marginTop:6}}><span className="muted">Qué se hizo:</span> {m.nota_reparacion}</div>}
+                    {rs.length>0 && (
+                      <div style={{marginTop:8}}>
+                        <div className="muted" style={{fontSize:12,marginBottom:4}}>Repuestos usados</div>
+                        {rs.map(r=>(
+                          <div key={r.id} style={{display:"flex",gap:8,justifyContent:"space-between",padding:"2px 0"}}>
+                            <span>🔩 {r.nombre} <span className="muted">×{Number(r.cantidad)||0}{r.condicion==='usado'?" (usado)":""}</span></span>
+                            <span style={{fontWeight:700}}>{fmt((Number(r.cantidad)||0)*(Number(r.valor_unit)||0))}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );})}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4055,7 +4594,10 @@ function Recaudo({showToast, quien, rol}){
     const nombres=(m&&m.length)?m.map(x=>x.nombre):MAQ_DEFAULT;
     setContMaqs(nombres.map(nm=>{ const r=byName[nm]||{}; return {id:r.id||null, sede:s, nombre:nm, gen_actual:String(Number(r.gen_actual)||0), gen_token_actual:String(Number(r.gen_token_actual)||0)}; }));
   };
-  const abrirContadores=()=>{ const s=contSede || (sedes.find(x=>!x.es_bodega)||sedes[0]||{}).nombre || ""; setContSede(s); setPaso('contadores'); if(s) cargarContadores(s); };
+  // Ojo: los contadores de las FRANQUICIAS viven en otra tabla (franquicia_maquinas)
+  // y se editan en 🏭 Franquicias. Aquí solo van las sedes propias.
+  const sedesPropias=sedes.filter(s=>!s.es_bodega && !s.es_franquicia);
+  const abrirContadores=()=>{ const s=contSede || (sedesPropias[0]||{}).nombre || ""; setContSede(s); setPaso('contadores'); if(s) cargarContadores(s); };
 
   // ---- Liquidaciones pendientes (ver/borrar, SOLO admin) ----
   const [pendList,setPendList]=useState(null);
@@ -4767,7 +5309,7 @@ function Recaudo({showToast, quien, rol}){
       {paso==='frmaq' && (
         <div>
           <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-            <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Configura máquinas, el reparto % y la amortización de cada franquicia. El "contador" es el último valor leído (= valor anterior del próximo mes); aquí lo siembras la primera vez.</span>
+            <b style={{color:"var(--amber)"}}>⚠ Zona de admin — aquí están los contadores de las franquicias.</b> <span className="muted">Configura máquinas, el reparto % y la amortización de cada franquicia. El "contador" es el último valor leído (= valor anterior del próximo mes); aquí lo siembras la primera vez o lo corriges si se reinició la máquina.</span>
           </div>
           <div className="toolbar">
             <select className="select" style={{maxWidth:240,margin:0}} value={frCfgSede} onChange={e=>{setFrCfgSede(e.target.value);cargarFrCfg(e.target.value);}}>
@@ -4941,10 +5483,14 @@ function Recaudo({showToast, quien, rol}){
         <div>
           <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
             <b style={{color:"var(--amber)"}}>⚠ Zona de admin.</b> <span className="muted">Edita los contadores GEN y tokens de cada máquina (úsalo solo cuando se quema/cambia una máquina y el contador se reinicia). Esto define el "anterior" del próximo ciclo.</span>
+            <div className="muted" style={{marginTop:6,fontSize:12}}>
+              🏭 <b>¿Buscas una franquicia?</b> Sus contadores son otros (no llevan GEN ni tokens) y se editan en{" "}
+              <a onClick={abrirFrConfig} style={{color:"var(--amber)",fontWeight:700,cursor:"pointer",textDecoration:"underline"}}>🏭 Franquicias</a>.
+            </div>
           </div>
           <div className="toolbar">
             <select className="select" style={{maxWidth:240,margin:0}} value={contSede} onChange={e=>{setContSede(e.target.value);cargarContadores(e.target.value);}}>
-              {sedes.filter(s=>!s.es_bodega).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+              {sedesPropias.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
             </select>
           </div>
           {contMaqs===null ? <div className="empty">Cargando…</div> : (

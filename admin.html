@@ -772,6 +772,49 @@ const db = {
     if(DEMO_MODE) return;
     const {error}=await sb.from('pedidos_productos').update({estado,resuelto_por:quien||null,resuelto_at:new Date().toISOString()}).eq('id',id); if(error) throw error;
   },
+  // ---- TURNOS (cuadro cíclico por sede) ----
+  async listTurnosConfig(){
+    if(DEMO_MODE) return (DEMO.turnos||[]).slice();
+    const {data,error}=await sb.from('turnos_config').select('*').order('sede'); if(error) return []; return data||[];
+  },
+  async saveTurnosConfig(c){
+    if(DEMO_MODE){ DEMO.turnos=(DEMO.turnos||[]).filter(x=>x.sede!==c.sede).concat([c]); return; }
+    const row={sede:c.sede, empleados:c.empleados||[], ciclo_dias:Number(c.ciclo_dias)||14,
+      inicio:c.inicio, plantilla:c.plantilla||[], activo:c.activo!==false, nota:c.nota||null,
+      updated_at:new Date().toISOString()};
+    const {error}=await sb.from('turnos_config').upsert(row,{onConflict:'sede'}); if(error) throw error;
+  },
+  async borrarTurnosConfig(sede){
+    if(DEMO_MODE){ DEMO.turnos=(DEMO.turnos||[]).filter(x=>x.sede!==sede); return; }
+    const {error}=await sb.from('turnos_config').delete().eq('sede',sede); if(error) throw error;
+  },
+  // Cuadro ya resuelto (plantilla + excepciones) para un rango
+  async turnosRango(desde, hasta, sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('turnos_rango',{p_desde:desde,p_hasta:hasta,p_sede:sede||null});
+    if(error) throw error; return data||[];
+  },
+  // Horas y días por empleado en un rango (nómina)
+  async turnosHoras(desde, hasta, sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('turnos_horas',{p_desde:desde,p_hasta:hasta,p_sede:sede||null});
+    if(error) throw error; return data||[];
+  },
+  async listExcepciones(sede, desde, hasta){
+    if(DEMO_MODE) return [];
+    let q=sb.from('turnos_excepciones').select('*').gte('fecha',desde).lte('fecha',hasta).order('fecha');
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
+  },
+  async saveExcepcion(e){
+    if(DEMO_MODE) return;
+    const row={sede:e.sede, fecha:e.fecha, franjas:e.franjas||[], motivo:e.motivo||null, creado_por:e.creado_por||null};
+    const {error}=await sb.from('turnos_excepciones').upsert(row,{onConflict:'sede,fecha'}); if(error) throw error;
+  },
+  async borrarExcepcion(sede, fecha){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('turnos_excepciones').delete().eq('sede',sede).eq('fecha',fecha); if(error) throw error;
+  },
   // ---- TAREAS ----
   async listTareas(f={}){
     if(DEMO_MODE){ let a=(DEMO.tareas||[]).slice(); if(f.sede)a=a.filter(t=>t.sede===f.sede); if(f.asignado)a=a.filter(t=>t.asignado_a===f.asignado); if(f.estado)a=a.filter(t=>t.estado===f.estado); return a; }
@@ -1338,7 +1381,7 @@ function App(){
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
                 {tab==="descuentos" && <Descuentos showToast={showToast}/>}
                 {tab==="sedes"      && <Sedes showToast={showToast}/>}
-                {tab==="empleados"  && <Empleados showToast={showToast}/>}
+                {tab==="empleados"  && <Empleados showToast={showToast} quien={auth.nombre}/>}
               </div>
             </div>
           </div>
@@ -1705,7 +1748,8 @@ function Sedes({showToast}){
 // ============================================================
 // SECCIÓN: EMPLEADOS
 // ============================================================
-function Empleados({showToast}){
+function Empleados({showToast, quien}){
+  const [vista,setVista]=useState('lista');   // 'lista' | 'turnos'
   const [emps,setEmps]=useState(null);
   const [sedes,setSedes]=useState([]);
   const [editing,setEditing]=useState(null);
@@ -1719,8 +1763,16 @@ function Empleados({showToast}){
     <div>
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Empleados <span className="muted">({emps.length})</span></div>
-        <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",rol:"cajero",activo:true,pin:"",sedes:[]})}>+ Nuevo empleado</button>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4,marginRight:8}}>
+          <button className={"btn btn-sm "+(vista==='lista'?'btn-amber':'btn-ghost')} onClick={()=>setVista('lista')}>👥 Lista</button>
+          <button className={"btn btn-sm "+(vista==='turnos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('turnos')}>🗓️ Turnos</button>
+        </div>
+        {vista==='lista' && <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",rol:"cajero",activo:true,pin:"",sedes:[]})}>+ Nuevo empleado</button>}
       </div>
+
+      {vista==='turnos' && <Turnos showToast={showToast} quien={quien} sedes={sedes} emps={emps}/>}
+
+      {vista==='lista' && (<div>
       <div className="card" style={{padding:0}}>
         <table className="tbl">
           <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Sedes asignadas</th><th>Estado</th><th></th></tr></thead>
@@ -1741,6 +1793,8 @@ function Empleados({showToast}){
           </tbody>
         </table>
       </div>
+      </div>)}
+
       {editing && (
         <div className="modal-bg" onClick={()=>setEditing(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
@@ -1770,6 +1824,460 @@ function Empleados({showToast}){
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={()=>setEditing(null)}>Cancelar</button>
               <button className="btn btn-amber" disabled={!editing.nombre.trim() || (!!editing.pin && editing.pin.length<4)} onClick={()=>guardar(editing)}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// TURNOS — cuadro cíclico por sede
+//   La plantilla guarda POSICIONES (0,1,2), no nombres: al cambiar la lista
+//   de empleados, todo el calendario futuro se actualiza solo.
+//   Los cambios de un día puntual se guardan como excepción y mandan sobre
+//   la plantilla.
+// ============================================================
+const DIA_CORTO=["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+const MES_NOM=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const hhmm=t=>String(t||"").slice(0,5);
+const hhmmCorto=t=>{ const s=hhmm(t); return s.replace(/^0/,''); };
+const horasEntre=(a,b)=>{ const p=s=>{const[h,m]=hhmm(s).split(":").map(Number); return h*60+(m||0);};
+  let d=(p(b)-p(a))/60; if(d<=0) d+=24; return Math.round(d*10)/10; };
+const isoDia=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const sumaDias=(iso,n)=>{ const d=new Date(iso+"T12:00:00"); d.setDate(d.getDate()+n); return isoDia(d); };
+// color estable por empleado (para leer el cuadro de un vistazo)
+const COLOR_EMP=["#2563eb","#16a34a","#d97706","#9333ea","#dc2626","#0891b2"];
+// Las 3 franjas del cuadro, igual que las filas del Excel (6–2 / 2–10 / 10–6).
+// Un turno de 12h cae en la franja donde ARRANCA: 6am-6pm va en la de mañana,
+// 6pm-6am en la de noche. Por eso se agrupa por hora de entrada.
+const FRANJAS=[{lbl:"6 – 2",sub:"mañana"},{lbl:"2 – 10",sub:"tarde"},{lbl:"10 – 6",sub:"noche"}];
+const franjaDe=desde=>{ const h=parseInt(hhmm(desde),10)||0; return h<12?0:(h<17?1:2); };
+
+function Turnos({showToast, quien, sedes, emps}){
+  const [cfgs,setCfgs]=useState(null);
+  const [sede,setSede]=useState("");
+  const [mes,setMes]=useState(()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
+  const [cuadro,setCuadro]=useState(null);      // filas de turnos_rango del mes
+  const [excs,setExcs]=useState([]);            // excepciones del mes
+  const [cargando,setCargando]=useState(false);
+  const [edDia,setEdDia]=useState(null);        // {fecha, franjas:[…]} en edición
+  const [verCfg,setVerCfg]=useState(false);     // panel de configuración del ciclo
+  const [cfgEd,setCfgEd]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [rango,setRango]=useState(null);        // {desde,hasta} del reporte de horas
+  const [horas,setHoras]=useState(null);
+
+  const sedesPropias=(sedes||[]).filter(s=>!s.es_bodega && !s.es_franquicia);
+  const cargarCfgs=()=>db.listTurnosConfig().then(c=>{ setCfgs(c);
+    if(!sede && c.length) setSede(c[0].sede); }).catch(()=>setCfgs([]));
+  useEffect(()=>{ cargarCfgs(); },[]);
+
+  const cfg=(cfgs||[]).find(c=>c.sede===sede)||null;
+  const [y,m]=mes.split('-').map(Number);
+  const desde=mes+'-01';
+  const hasta=isoDia(new Date(y,m,0));          // último día del mes
+
+  const cargarMes=async()=>{
+    if(!sede){ setCuadro([]); return; }
+    setCargando(true);
+    try{
+      const [r,e]=await Promise.all([db.turnosRango(desde,hasta,sede), db.listExcepciones(sede,desde,hasta)]);
+      setCuadro(r); setExcs(e);
+    }catch(er){ showToast(""+(er.message||er),"err"); setCuadro([]); }
+    finally{ setCargando(false); }
+  };
+  useEffect(()=>{ setCuadro(null); cargarMes(); },[sede,mes]);
+
+  const moverMes=n=>{ const d=new Date(y,m-1+n,1); setMes(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); };
+
+  // ---- datos del mes agrupados por día ----
+  const porDia={}; (cuadro||[]).forEach(t=>{ (porDia[t.fecha]=porDia[t.fecha]||[]).push(t); });
+  Object.values(porDia).forEach(a=>a.sort((x,z)=>hhmm(x.desde).localeCompare(hhmm(z.desde))));
+  const excDe=f=>excs.find(e=>e.fecha===f);
+  const listaEmp=(cfg&&cfg.empleados)||[];
+  const colorDe=n=>COLOR_EMP[Math.max(0,listaEmp.indexOf(n))%COLOR_EMP.length];
+  const diasDelMes=(()=>{ const a=[]; const ult=new Date(y,m,0).getDate();
+    for(let i=1;i<=ult;i++) a.push(isoDia(new Date(y,m-1,i))); return a; })();
+  const totalMes=(cuadro||[]).reduce((a,t)=>a+(Number(t.horas)||0),0);
+  const horasMes={}; (cuadro||[]).forEach(t=>{ horasMes[t.empleado]=(horasMes[t.empleado]||0)+(Number(t.horas)||0); });
+
+  // ---- mover bloques (arrastrar y soltar) ----
+  // Al mover, el HORARIO se queda en la franja y lo que cambia es la PERSONA:
+  // sacar a alguien de la mañana y ponerlo en la tarde = ahora hace la tarde.
+  const [drag,setDrag]=useState(null);       // {fecha, franja, empleado}
+  const [sobre,setSobre]=useState(null);     // celda resaltada mientras se arrastra
+  const mapaDia=f=>{ const m={}; (porDia[f]||[]).forEach(t=>{ m[franjaDe(t.desde)]={empleado:t.empleado,
+    desde:hhmm(t.desde),hasta:hhmm(t.hasta),horas:Number(t.horas)||horasEntre(t.desde,t.hasta)}; }); return m; };
+  // horario típico de una franja en la sede (para cuando la celda destino está vacía)
+  const horarioFranja=(fr)=>{
+    const c={}; (cuadro||[]).forEach(t=>{ if(franjaDe(t.desde)!==fr) return;
+      const k=hhmm(t.desde)+"|"+hhmm(t.hasta); c[k]=(c[k]||0)+1; });
+    const top=Object.entries(c).sort((a,b)=>b[1]-a[1])[0];
+    if(!top) return null;
+    const [de,ha]=top[0].split("|"); return {desde:de,hasta:ha,horas:horasEntre(de,ha)};
+  };
+  const guardarDias=async(cambios)=>{   // cambios = {fecha: mapaFranja}
+    for(const f of Object.keys(cambios)){
+      const franjas=Object.keys(cambios[f]).sort().map(k=>cambios[f][k]).filter(x=>x&&x.empleado);
+      await db.saveExcepcion({sede,fecha:f,franjas,motivo:(excDe(f)||{}).motivo||"Cambio de turno",creado_por:quien});
+    }
+  };
+  const soltar=async(destFecha,destFranja)=>{
+    const d=drag; setDrag(null); setSobre(null);
+    if(!d || (d.fecha===destFecha && d.franja===destFranja)) return;
+    const mismaFecha=d.fecha===destFecha;
+    const A=mapaDia(d.fecha);
+    const B=mismaFecha?A:mapaDia(destFecha);
+    const src=A[d.franja]; if(!src) return;
+    const dst=B[destFranja];
+    // horario destino: el que ya tenía esa franja, o el típico de la sede, o el del origen
+    const hDest=dst||horarioFranja(destFranja)||src;
+    B[destFranja]={empleado:src.empleado,desde:hDest.desde,hasta:hDest.hasta,
+                   horas:hDest.horas||horasEntre(hDest.desde,hDest.hasta)};
+    if(dst) A[d.franja]={empleado:dst.empleado,desde:src.desde,hasta:src.hasta,horas:src.horas};
+    else delete A[d.franja];
+    setBusy(true);
+    try{
+      await guardarDias(mismaFecha?{[d.fecha]:A}:{[d.fecha]:A,[destFecha]:B});
+      await cargarMes();
+      showToast(dst?"Turnos intercambiados ✓":"Turno movido ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); cargarMes(); }
+    finally{ setBusy(false); }
+  };
+
+  // ---- editar un día (excepción) ----
+  const abrirDia=f=>{
+    const act=(porDia[f]||[]).map(t=>({empleado:t.empleado,desde:hhmm(t.desde),hasta:hhmm(t.hasta),horas:Number(t.horas)||0}));
+    setEdDia({fecha:f, franjas:act, motivo:(excDe(f)||{}).motivo||"", esExc:!!excDe(f)});
+  };
+  const setFranja=(i,patch)=>setEdDia(d=>({...d,franjas:d.franjas.map((f,j)=>{
+    if(j!==i) return f; const n={...f,...patch};
+    if(patch.desde!==undefined||patch.hasta!==undefined) n.horas=horasEntre(n.desde,n.hasta);
+    return n; })}));
+  const addFranja=()=>setEdDia(d=>({...d,franjas:[...d.franjas,{empleado:"",desde:"06:00",hasta:"14:00",horas:8}]}));
+  const delFranja=i=>setEdDia(d=>({...d,franjas:d.franjas.filter((_,j)=>j!==i)}));
+  const guardarDia=async()=>{
+    const fr=edDia.franjas.filter(f=>(f.empleado||"").trim())
+      .map(f=>({empleado:f.empleado.trim(),desde:f.desde,hasta:f.hasta,horas:Number(f.horas)||horasEntre(f.desde,f.hasta)}));
+    setBusy(true);
+    try{ await db.saveExcepcion({sede,fecha:edDia.fecha,franjas:fr,motivo:edDia.motivo,creado_por:quien});
+      setEdDia(null); cargarMes(); showToast("Día actualizado ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+  const volverAlCiclo=async()=>{
+    if(!confirm("Se elimina el cambio de ese día y vuelve a mandar el ciclo. ¿Continuar?")) return;
+    setBusy(true);
+    try{ await db.borrarExcepcion(sede,edDia.fecha); setEdDia(null); cargarMes(); showToast("Volvió al ciclo ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---- configuración del ciclo ----
+  const abrirCfg=()=>{ setCfgEd(cfg?{...cfg,empleados:[...(cfg.empleados||[])]}
+    :{sede:(sedesPropias[0]||{}).nombre||"",empleados:[],ciclo_dias:14,inicio:isoDia(new Date()),plantilla:[],activo:true});
+    setVerCfg(true); };
+  const guardarCfg=async()=>{
+    if(!cfgEd.sede){ showToast("Elige la sede","err"); return; }
+    if(!(cfgEd.empleados||[]).filter(Boolean).length){ showToast("Agrega los empleados de la rotación","err"); return; }
+    setBusy(true);
+    try{ await db.saveTurnosConfig({...cfgEd,empleados:cfgEd.empleados.filter(Boolean)});
+      setVerCfg(false); await cargarCfgs(); if(cfgEd.sede===sede) cargarMes();
+      showToast("Ciclo guardado ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---- reporte de horas ----
+  const abrirHoras=()=>{ setRango({desde, hasta, sede:sede||""}); setHoras(null); };
+  const calcularHoras=async()=>{
+    setBusy(true);
+    try{ setHoras(await db.turnosHoras(rango.desde,rango.hasta,rango.sede||null)); }
+    catch(e){ showToast(""+(e.message||e),"err"); setHoras([]); } finally{ setBusy(false); }
+  };
+
+  if(cfgs===null) return <div className="empty">Cargando turnos…</div>;
+
+  return (
+    <div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <select className="select" style={{maxWidth:200,margin:0}} value={sede} onChange={e=>setSede(e.target.value)}>
+          <option value="">— Elige sede —</option>
+          {cfgs.map(c=><option key={c.sede} value={c.sede}>{c.sede}</option>)}
+        </select>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(-1)}>←</button>
+          <b style={{minWidth:130,textAlign:"center"}}>{MES_NOM[m-1]} {y}</b>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(1)}>→</button>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={abrirHoras}>⏱️ Horas</button>
+        <button className="btn btn-ghost btn-sm" onClick={abrirCfg}>⚙️ Ciclo</button>
+      </div>
+
+      {cfgs.length===0 && (
+        <div className="card" style={{textAlign:"center"}}>
+          <div style={{fontWeight:700,marginBottom:6}}>Todavía no hay ciclos configurados</div>
+          <div className="muted" style={{fontSize:13,marginBottom:10}}>Corre <b>turnos_seed.sql</b> para cargar los ciclos que ya tienes en el Excel, o crea uno con ⚙️ Ciclo.</div>
+        </div>
+      )}
+
+      {sede && cfg && (
+        <div className="card" style={{marginBottom:12,display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",fontSize:13}}>
+          <span>🔁 Ciclo de <b>{cfg.ciclo_dias} días</b></span>
+          <span className="muted">arranca {cfg.inicio}</span>
+          <span style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {listaEmp.map(n=><span key={n} className="pill" style={{background:colorDe(n)+"22",color:colorDe(n),fontWeight:700}}>{n}</span>)}
+          </span>
+          <span style={{marginLeft:"auto"}}>Mes: <b>{Math.round(totalMes)}h</b>{" "}
+            <span className="muted">({listaEmp.map(n=>n.split(' ')[0].toLowerCase()+" "+Math.round(horasMes[n]||0)+"h").join(" · ")})</span></span>
+        </div>
+      )}
+
+      {!sede ? <div className="empty">Elige una sede para ver su cuadro.</div>
+       : cargando || cuadro===null ? <div className="empty">Cargando cuadro…</div>
+       : (()=>{
+        // solo se muestran las franjas que la sede realmente usa este mes
+        const usadas=[0,1,2].filter(fr=>(cuadro||[]).some(t=>franjaDe(t.desde)===fr));
+        const filas=usadas.length?usadas:[0,1];
+        const ANCHO=104;
+        return (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table style={{borderCollapse:"separate",borderSpacing:0,minWidth:"100%"}}>
+            <thead>
+              <tr>
+                <th style={{position:"sticky",left:0,zIndex:3,background:"var(--sf)",borderBottom:"1px solid var(--bd)",
+                            minWidth:74,padding:"6px 8px",textAlign:"left"}}></th>
+                {diasDelMes.map(f=>{ const dow=new Date(f+"T12:00:00").getDay(); const finde=(dow===0||dow===6);
+                  return (
+                  <th key={f} onClick={()=>abrirDia(f)} title="Cambiar este día"
+                      style={{minWidth:ANCHO,width:ANCHO,padding:"5px 4px",cursor:"pointer",
+                              borderBottom:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
+                              background:finde?"var(--sf3)":"var(--sf)"}}>
+                    <div style={{fontSize:12,fontWeight:800}}>{Number(f.slice(8))}-{MES_NOM[m-1].slice(0,3).toLowerCase()}</div>
+                    <div className="muted" style={{fontSize:10,fontWeight:700,letterSpacing:.3}}>{DIA_CORTO[dow].toUpperCase()}</div>
+                    {excDe(f) && <div style={{fontSize:9,color:"var(--amber)",fontWeight:800}}>cambio</div>}
+                  </th>);})}
+              </tr>
+            </thead>
+            <tbody>
+              {filas.map(fr=>(
+                <tr key={fr}>
+                  <td style={{position:"sticky",left:0,zIndex:2,background:"var(--sf)",padding:"6px 8px",
+                              borderTop:"1px solid var(--bd)",borderRight:"1px solid var(--bd)"}}>
+                    <div style={{fontWeight:800,fontSize:13,color:"var(--amber)"}}>{FRANJAS[fr].lbl}</div>
+                    <div className="muted" style={{fontSize:10}}>{FRANJAS[fr].sub}</div>
+                  </td>
+                  {diasDelMes.map(f=>{
+                    const t=(porDia[f]||[]).find(x=>franjaDe(x.desde)===fr);
+                    const dow=new Date(f+"T12:00:00").getDay(); const finde=(dow===0||dow===6);
+                    const hl=sobre&&sobre.f===f&&sobre.fr===fr;
+                    return (
+                      <td key={f}
+                          onDragOver={e=>{e.preventDefault(); if(!hl) setSobre({f,fr});}}
+                          onDragLeave={()=>hl&&setSobre(null)}
+                          onDrop={e=>{e.preventDefault(); soltar(f,fr);}}
+                          style={{minWidth:ANCHO,width:ANCHO,height:52,padding:3,verticalAlign:"middle",
+                                  borderTop:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
+                                  background:hl?"rgba(37,99,235,.18)":(finde?"var(--sf2)":"transparent")}}>
+                        {t && (
+                          <div draggable
+                               onDragStart={()=>setDrag({fecha:f,franja:fr,empleado:t.empleado})}
+                               onDragEnd={()=>{setDrag(null);setSobre(null);}}
+                               title={"Arrastra para mover o intercambiar · "+t.empleado+" "+hhmmCorto(t.desde)+"–"+hhmmCorto(t.hasta)}
+                               style={{background:colorDe(t.empleado)+"22",color:colorDe(t.empleado),
+                                       border:"1px solid "+colorDe(t.empleado)+"55",borderRadius:8,
+                                       padding:"5px 6px",cursor:"grab",textAlign:"center",lineHeight:1.25,
+                                       opacity:(drag&&drag.fecha===f&&drag.franja===fr)?0.35:1,userSelect:"none"}}>
+                            <div style={{fontWeight:800,fontSize:12,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.empleado}</div>
+                            <div style={{fontSize:10,opacity:.85,fontWeight:600}}>
+                              {hhmmCorto(t.desde)}–{hhmmCorto(t.hasta)}{Number(t.horas)===12?" · 12h":""}
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              {/* fila de descansos, como la franja rosada del Excel */}
+              <tr>
+                <td style={{position:"sticky",left:0,zIndex:2,background:"var(--sf)",padding:"6px 8px",
+                            borderTop:"1px solid var(--bd)",borderRight:"1px solid var(--bd)",
+                            fontWeight:800,fontSize:12,color:"var(--td)"}}>DESCANSA</td>
+                {diasDelMes.map(f=>{
+                  const trabajan=new Set((porDia[f]||[]).map(x=>x.empleado));
+                  const d=listaEmp.filter(n=>!trabajan.has(n));
+                  return (
+                    <td key={f} style={{minWidth:ANCHO,width:ANCHO,padding:3,textAlign:"center",
+                                        borderTop:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
+                                        background:d.length?"rgba(239,68,68,.10)":"transparent"}}>
+                      {d.map(n=><div key={n} style={{fontSize:11,fontWeight:800,color:colorDe(n)}}>{n}</div>)}
+                    </td>
+                  );
+                })}
+              </tr>
+              {/* horas cubiertas por día */}
+              <tr>
+                <td style={{position:"sticky",left:0,zIndex:2,background:"var(--sf)",padding:"6px 8px",
+                            borderTop:"1px solid var(--bd)",borderRight:"1px solid var(--bd)",
+                            fontWeight:800,fontSize:12,color:"var(--td)"}}>HORAS</td>
+                {diasDelMes.map(f=>{
+                  const hs=(porDia[f]||[]).reduce((a,t)=>a+(Number(t.horas)||0),0);
+                  return <td key={f} style={{minWidth:ANCHO,padding:"4px 3px",textAlign:"center",fontSize:11,fontWeight:700,
+                              borderTop:"1px solid var(--bd)",borderLeft:"1px solid var(--bd)",
+                              color:hs>=24?"var(--green)":hs?"var(--tb)":"var(--td)"}}>{hs?Math.round(hs)+"h":"—"}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      );})()}
+
+      {sede && cfg && <div className="muted" style={{fontSize:12,marginTop:10}}>
+        🖱️ <b>Arrastra un bloque</b> a otra franja o a otro día para cambiar el turno: si la celda destino está ocupada, los dos se <b>intercambian</b>. Toca la <b>fecha</b> del encabezado para editar ese día a mano (horarios, quitar a alguien, motivo). Los días marcados <b style={{color:"var(--amber)"}}>cambio</b> ya no siguen el ciclo.
+      </div>}
+
+      {/* ---- editar un día ---- */}
+      {edDia && (
+        <div className="modal-bg" onClick={()=>!busy&&setEdDia(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">✎ {DIA_CORTO[new Date(edDia.fecha+"T12:00:00").getDay()]} {edDia.fecha}</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+              Lo que guardes aquí manda sobre el ciclo <b>solo para este día</b>.
+            </div>
+            {edDia.franjas.map((f,i)=>(
+              <div key={i} style={{border:"1px solid var(--bd)",borderRadius:10,padding:8,marginBottom:8}}>
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                  <select className="select" style={{margin:0,flex:1}} value={f.empleado} onChange={e=>setFranja(i,{empleado:e.target.value})}>
+                    <option value="">— Elige empleado —</option>
+                    {listaEmp.map(n=><option key={n} value={n}>{n}</option>)}
+                    {(emps||[]).filter(e=>e.activo!==false && !listaEmp.includes(e.nombre)).map(e=>
+                      <option key={e.id} value={e.nombre}>{e.nombre} (de otra sede)</option>)}
+                  </select>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>delFranja(i)}>✕</button>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+                  <div style={{flex:"1 1 90px"}}><label className="label" style={{fontSize:11}}>Entra</label>
+                    <input className="input" style={{margin:0}} type="time" value={f.desde} onChange={e=>setFranja(i,{desde:e.target.value})}/></div>
+                  <div style={{flex:"1 1 90px"}}><label className="label" style={{fontSize:11}}>Sale</label>
+                    <input className="input" style={{margin:0}} type="time" value={f.hasta} onChange={e=>setFranja(i,{hasta:e.target.value})}/></div>
+                  <div style={{flex:"0 0 60px",paddingBottom:8,fontWeight:700}}>{f.horas}h</div>
+                </div>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addFranja}>＋ Agregar turno</button>
+            <label className="label" style={{marginTop:10}}>Motivo del cambio</label>
+            <input className="input" value={edDia.motivo} onChange={e=>setEdDia(d=>({...d,motivo:e.target.value}))} placeholder="Vacaciones, incapacidad, cambio de turno…"/>
+            <div className="modal-actions">
+              {edDia.esExc && <button className="btn btn-ghost" disabled={busy} onClick={volverAlCiclo}>↺ Volver al ciclo</button>}
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEdDia(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarDia}>{busy?"Guardando…":"Guardar día"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- configuración del ciclo ---- */}
+      {verCfg && cfgEd && (
+        <div className="modal-bg" onClick={()=>!busy&&setVerCfg(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">⚙️ Ciclo de turnos</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+              Los turnos guardan la <b>posición</b> en la rotación, no el nombre. Si entra alguien nuevo, cambias el nombre aquí y todo el calendario se actualiza solo.
+            </div>
+            <label className="label">Sede</label>
+            <select className="select" value={cfgEd.sede} onChange={e=>setCfgEd(c=>({...c,sede:e.target.value}))} disabled={!!cfg&&cfgEd.sede===sede}>
+              {sedesPropias.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+            </select>
+
+            <label className="label">Empleados en la rotación (en orden)</label>
+            {(cfgEd.empleados||[]).map((n,i)=>(
+              <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                <span className="pill" style={{background:COLOR_EMP[i%COLOR_EMP.length]+"22",color:COLOR_EMP[i%COLOR_EMP.length],fontWeight:800,flexShrink:0}}>{i+1}</span>
+                <select className="select" style={{margin:0,flex:1}} value={n}
+                  onChange={e=>setCfgEd(c=>({...c,empleados:c.empleados.map((x,j)=>j===i?e.target.value:x)}))}>
+                  <option value="">— Elige empleado —</option>
+                  {(emps||[]).filter(e=>e.activo!==false).map(e=><option key={e.id} value={e.nombre}>{e.nombre}</option>)}
+                  {n && !(emps||[]).some(e=>e.nombre===n) && <option value={n}>{n} (no está en Empleados)</option>}
+                </select>
+                <button className="btn btn-ghost btn-sm" onClick={()=>setCfgEd(c=>({...c,empleados:c.empleados.filter((_,j)=>j!==i)}))}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={()=>setCfgEd(c=>({...c,empleados:[...(c.empleados||[]),""]}))}>＋ Empleado</button>
+
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:10}}>
+              <div style={{flex:"1 1 130px"}}><label className="label">Días del ciclo</label>
+                <select className="select" value={cfgEd.ciclo_dias} onChange={e=>setCfgEd(c=>({...c,ciclo_dias:Number(e.target.value)}))}>
+                  <option value={14}>14 días (2 personas)</option>
+                  <option value={21}>21 días (3 personas)</option>
+                  <option value={28}>28 días (4 personas)</option>
+                </select></div>
+              <div style={{flex:"1 1 130px"}}><label className="label">Primer día del ciclo</label>
+                <input className="input" type="date" value={cfgEd.inicio} onChange={e=>setCfgEd(c=>({...c,inicio:e.target.value}))}/></div>
+            </div>
+
+            <div className="card" style={{marginTop:10,fontSize:12}}>
+              <b>Plantilla:</b> {(cfgEd.plantilla||[]).length} día(s) definidos.{" "}
+              {(cfgEd.plantilla||[]).length===0
+                ? <span className="muted">Vacía — se carga con <b>turnos_seed.sql</b> desde tu Excel.</span>
+                : <span className="muted">Para reacomodar la rotación completa cambia el orden de los empleados; para un día suelto usa el ✎ del cuadro.</span>}
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setVerCfg(false)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarCfg}>{busy?"Guardando…":"Guardar ciclo"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- reporte de horas ---- */}
+      {rango && (
+        <div className="modal-bg" onClick={()=>!busy&&setRango(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:620}}>
+            <div className="modal-t">⏱️ Horas por empleado</div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 120px"}}><label className="label">Desde</label>
+                <input className="input" type="date" value={rango.desde} onChange={e=>setRango(r=>({...r,desde:e.target.value}))}/></div>
+              <div style={{flex:"1 1 120px"}}><label className="label">Hasta</label>
+                <input className="input" type="date" value={rango.hasta} onChange={e=>setRango(r=>({...r,hasta:e.target.value}))}/></div>
+              <div style={{flex:"1 1 150px"}}><label className="label">Sede</label>
+                <select className="select" value={rango.sede} onChange={e=>setRango(r=>({...r,sede:e.target.value}))}>
+                  <option value="">Todas</option>
+                  {cfgs.map(c=><option key={c.sede} value={c.sede}>{c.sede}</option>)}
+                </select></div>
+            </div>
+            <button className="btn btn-amber btn-sm" disabled={busy} onClick={calcularHoras}>{busy?"Calculando…":"Calcular"}</button>
+
+            {horas!==null && (
+              <div style={{marginTop:12}}>
+                {horas.length===0 ? <div className="empty">Sin turnos en ese rango.</div> : (
+                  <div className="card" style={{padding:0,overflowX:"auto"}}>
+                    <table className="tbl">
+                      <thead><tr><th>Sede</th><th>Empleado</th><th style={{textAlign:"right"}}>Días</th><th style={{textAlign:"right"}}>Horas</th><th style={{textAlign:"right"}}>Prom/sem</th></tr></thead>
+                      <tbody>
+                        {(()=>{ const d1=new Date(rango.desde+"T12:00:00"), d2=new Date(rango.hasta+"T12:00:00");
+                          const sem=Math.max(1,((d2-d1)/86400000+1)/7);
+                          return horas.map((h,i)=>(
+                            <tr key={i}>
+                              <td className="muted">{h.sede}</td>
+                              <td className="row-name">{h.empleado}</td>
+                              <td style={{textAlign:"right"}}>{h.dias}</td>
+                              <td style={{textAlign:"right",fontWeight:700}}>{Math.round(h.horas)}h</td>
+                              <td style={{textAlign:"right"}}>{(h.horas/sem).toFixed(1)}h</td>
+                            </tr>
+                          )); })()}
+                      </tbody>
+                      <tfoot><tr style={{borderTop:"2px solid var(--bd2)"}}>
+                        <td colSpan="3" style={{fontWeight:800}}>TOTAL</td>
+                        <td style={{textAlign:"right",fontWeight:900}}>{Math.round(horas.reduce((a,h)=>a+Number(h.horas||0),0))}h</td><td></td>
+                      </tr></tfoot>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setRango(null)}>Cerrar</button>
             </div>
           </div>
         </div>

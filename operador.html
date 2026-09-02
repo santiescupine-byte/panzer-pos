@@ -469,6 +469,15 @@ const db = {
     if(error) return [];
     return data||[];
   },
+  // ---- MI META DEL MES (solo la fila del asesor que pregunta) ----
+  async miMeta(empleado, anio, mes){
+    if(DEMO_MODE) return {sede:'Demo',meta_accesorios:1333333,venta_accesorios:900000,
+      meta_detailing:1666667,venta_detailing:1400000,meta_total:3000000,venta_total:2300000,
+      cumplimiento:0.7667,cumpl_sede:0.88,pct_comision:4,comision:0,cumple:false,evalua:true};
+    const { data, error } = await sb.rpc('mi_meta',{p_empleado:empleado,p_anio:anio,p_mes:mes});
+    if(error) return null;
+    return (data&&data[0])||null;
+  },
   async marcarMiTarea(id, hecha){
     if(DEMO_MODE) return;
     const row=hecha?{estado:'hecha',completado_at:new Date().toISOString()}:{estado:'pendiente',completado_at:null};
@@ -635,6 +644,10 @@ function App(){
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
+  const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"
+  const [miMeta,setMiMeta]=useState(null);                 // fila de rendimiento del asesor
+  const cargarMiMeta=(nombre)=>{ if(!nombre) return; const d=new Date();
+    db.miMeta(nombre,d.getFullYear(),d.getMonth()+1).then(setMiMeta).catch(()=>setMiMeta(null)); };
   const [showTareas,setShowTareas]=useState(false);        // sheet "mis tareas"
   const [tareasPend,setTareasPend]=useState(0);            // # tareas pendientes de este operador
   const [tareasVenc,setTareasVenc]=useState(0);            // # de esas que están vencidas
@@ -680,6 +693,7 @@ function App(){
       db.getDescuentos().then(setDescuentos).catch(()=>{});
       db.transferenciasEnTransito(sedeSel).then(a=>setPendTransito(a.length)).catch(()=>{});
       db.misTareas(sedeSel,nombre).then(aplicarTareas).catch(()=>{});
+      cargarMiMeta(nombre);
       // El chequeo de inventario es OBLIGATORIO solo para CAJEROS. Supervisor/admin/otros entran directo.
       if(rolArg && rolArg!=='cajero'){ setChequeoHecho(true); }
       else {
@@ -787,6 +801,7 @@ function App(){
       setVentasTurno(prev=>[...prev,{total:totalCart, count:countCart, pago, tokens:montoTokens, productos:montoProductos, membresias:montoMembresias, descuento:descTotal, recibo:res&&res.recibo, ts:Date.now()}]);
       setCart([]); setShowCart(false); setDescTicket(null);
       showToast("Venta registrada "+fmt(totalCart),"ok");
+      if(montoProductos>0) cargarMiMeta(operador);   // su avance de meta se mueve con esta venta
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -925,6 +940,21 @@ function App(){
         </div>
       )}
 
+      {/* Cómo va con su meta del mes */}
+      {miMeta && miMeta.evalua!==false && Number(miMeta.meta_total)>0 && (()=>{
+        const M=metaCalc(miMeta);
+        return (
+        <div onClick={()=>setShowMeta(true)}
+             style={{background:M.bg,color:M.color,fontSize:13,fontWeight:700,padding:"8px 14px",
+                     display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                     borderBottom:"1px solid "+M.color+"44"}}>
+          <span>🎯</span>
+          <span style={{flex:1}}>{M.frase}</span>
+          <span style={{fontWeight:900}}>{M.pct}%</span>
+          <button className="header-x" onClick={e=>{e.stopPropagation();setShowMeta(true);}}>Ver</button>
+        </div>
+      );})()}
+
       {/* Menú lateral de acciones */}
       {menuOpen && (
         <div className="drawer-bg" onClick={()=>setMenuOpen(false)}>
@@ -932,6 +962,7 @@ function App(){
             <div className="card-t" style={{marginBottom:6}}>Menú</div>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
+            {miMeta && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMeta(true);}}>🎯 Mi meta del mes</button>}
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowTareas(true);}}>📋 Mis tareas{tareasPend>0?(" ("+tareasPend+")"):""}</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecibos(true);}}>🧾 Mis recibos</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMaq(true);}}>🔧 Máquinas</button>
@@ -1002,6 +1033,10 @@ function App(){
       {/* Sheet "mis últimos recibos" */}
       {showTareas && (
         <TareasSheet sede={sede} operador={operador} showToast={showToast} onClose={()=>{setShowTareas(false);refrescarTareas();}}/>
+      )}
+
+      {showMeta && miMeta && (
+        <MetaSheet mm={miMeta} operador={operador} onClose={()=>{setShowMeta(false);cargarMiMeta(operador);}}/>
       )}
 
       {showRecibos && (
@@ -1524,6 +1559,109 @@ function MaquinasSheet({sede,operador,showToast,onClose}){
 // El cajero consulta sus últimos 5 recibos por si cometió un error.
 // Solo lectura — no puede editar ni anular (eso es del back office).
 // ============================================================
+// ============================================================
+// MI META — cómo va el asesor contra su meta del mes.
+//   Lo importante no es el % pelado sino compararlo con lo ESPERADO a la
+//   fecha: un 45% el día 15 va perfecto, pero el día 28 va muy mal.
+// ============================================================
+function metaCalc(mm){
+  const hoy=new Date();
+  const dias=new Date(hoy.getFullYear(),hoy.getMonth()+1,0).getDate();
+  const dia=hoy.getDate();
+  const restan=Math.max(1,dias-dia+1);
+  const meta=Number(mm.meta_total)||0, venta=Number(mm.venta_total)||0;
+  const pct=meta>0?venta/meta:0;
+  const esperadoPct=dia/dias;
+  const esperadoVal=meta*esperadoPct;
+  const faltaHoy=Math.max(0,esperadoVal-venta);     // para ponerse al día
+  const faltaMes=Math.max(0,meta-venta);            // para cerrar la meta
+  const porDia=faltaMes/restan;
+  const dif=pct-esperadoPct;
+  let estado,color,bg,frase;
+  if(pct>=1){ estado='cumplida'; color="#16a34a"; bg="rgba(22,163,74,.14)";
+    frase="¡Meta cumplida! Llevas "+fmt(venta)+" de "+fmt(meta); }
+  else if(dif>=0.05){ estado='adelante'; color="#16a34a"; bg="rgba(22,163,74,.14)";
+    frase="Vas adelantado: llevas "+Math.round(pct*100)+"% y a hoy bastaba "+Math.round(esperadoPct*100)+"%"; }
+  else if(dif>=-0.05){ estado='aldia'; color="#2563eb"; bg="rgba(37,99,235,.14)";
+    frase="Vas al día. Te faltan "+fmt(faltaMes)+" para la meta"; }
+  else { estado='atras'; color="#dc2626"; bg="rgba(220,38,38,.14)";
+    frase="Vas atrasado: te faltan "+fmt(faltaHoy)+" para ponerte al día"; }
+  return {estado,color,bg,frase,pct:Math.round(pct*100),esperadoPct:Math.round(esperadoPct*100),
+          meta,venta,faltaHoy,faltaMes,porDia,dia,dias,restan};
+}
+
+function MetaSheet({mm,operador,onClose}){
+  const M=metaCalc(mm);
+  const CV=v=>v>=1?"#16a34a":v>=0.85?"#d97706":"#dc2626";
+  const linea=(lbl,vt,mt)=>{ const p=Number(mt)>0?Number(vt)/Number(mt):0; return (
+    <div style={{marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+        <span style={{fontWeight:700}}>{lbl}</span>
+        <span><b style={{color:CV(p)}}>{Math.round(p*100)}%</b> <span style={{color:"var(--td)"}}>{fmt(vt)} de {fmt(mt)}</span></span>
+      </div>
+      <div style={{position:"relative",height:9,borderRadius:9,background:"var(--bd)",overflow:"hidden"}}>
+        <div style={{width:Math.min(100,p*100)+"%",height:"100%",background:CV(p)}}/>
+        <div style={{position:"absolute",left:M.esperadoPct+"%",top:-2,width:2,height:13,background:"var(--tb)",opacity:.6}}/>
+      </div>
+    </div>);};
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🎯 Mi meta del mes</div>
+        <div className="header-sub" style={{marginBottom:12}}>
+          {operador} · {mm.sede} · día {M.dia} de {M.dias}
+        </div>
+
+        <div style={{background:M.bg,border:"1px solid "+M.color+"55",borderRadius:14,padding:14,marginBottom:14}}>
+          <div style={{fontSize:34,fontWeight:900,color:M.color,lineHeight:1}}>{M.pct}%</div>
+          <div style={{fontSize:14,fontWeight:700,color:M.color,marginTop:4}}>{M.frase}</div>
+          <div style={{fontSize:12,color:"var(--td)",marginTop:6}}>
+            A hoy deberías ir en <b>{M.esperadoPct}%</b> · la marca en las barras es ese punto
+          </div>
+        </div>
+
+        {M.faltaMes>0 && (
+          <div className="card" style={{marginBottom:14,display:"flex",gap:14,flexWrap:"wrap"}}>
+            <div style={{flex:"1 1 130px"}}>
+              <div style={{fontSize:11,color:"var(--td)",fontWeight:700}}>TE FALTA PARA LA META</div>
+              <div style={{fontSize:19,fontWeight:900}}>{fmt(M.faltaMes)}</div>
+            </div>
+            <div style={{flex:"1 1 130px"}}>
+              <div style={{fontSize:11,color:"var(--td)",fontWeight:700}}>POR DÍA ({M.restan} restantes)</div>
+              <div style={{fontSize:19,fontWeight:900,color:"var(--amber)"}}>{fmt(M.porDia)}</div>
+            </div>
+          </div>
+        )}
+
+        {linea("Accesorios", mm.venta_accesorios, mm.meta_accesorios)}
+        {linea("Car Detailing", mm.venta_detailing, mm.meta_detailing)}
+        <div style={{borderTop:"1px solid var(--bd)",paddingTop:10,marginTop:4}}>
+          {linea("TOTAL", mm.venta_total, mm.meta_total)}
+        </div>
+
+        <div className="card" style={{marginTop:6,fontSize:13}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontWeight:700}}>Tu sede va en</span>
+            <b style={{color:CV(Number(mm.cumpl_sede))}}>{Math.round(Number(mm.cumpl_sede)*100)}%</b>
+          </div>
+          <div style={{color:"var(--td)",fontSize:12}}>
+            {Number(mm.pct_comision)>0
+              ? <span>La sede está en el escalón de <b>{mm.pct_comision}%</b> de comisión.</span>
+              : <span>La sede debe llegar al <b>85%</b> para que haya comisión.</span>}
+            {" "}Y tú necesitas tu <b>85%</b> para cobrar la tuya.
+          </div>
+          {Number(mm.comision)>0 && (
+            <div style={{marginTop:8,fontSize:15,fontWeight:900,color:"var(--green)"}}>
+              Comisión hasta hoy: {fmt(mm.comision)}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TareasSheet({sede,operador,showToast,onClose}){
   const [tareas,setTareas]=useState(null);
   const [abierto,setAbierto]=useState(null);   // id de la tarea con el checklist desplegado

@@ -772,6 +772,187 @@ const db = {
     if(DEMO_MODE) return;
     const {error}=await sb.from('pedidos_productos').update({estado,resuelto_por:quien||null,resuelto_at:new Date().toISOString()}).eq('id',id); if(error) throw error;
   },
+  // ---- CAMPAÑAS DE CORTESÍA ----
+  async listCampanas(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('campanas').select('*').order('created_at',{ascending:false});
+    if(error) return []; return data||[];
+  },
+  async saveCampana(c){
+    if(DEMO_MODE) return;
+    const row={codigo:(c.codigo||"").trim(), nombre:(c.nombre||"").trim(),
+      titulo:c.titulo||null, subtitulo:c.subtitulo||null, texto_regalo:c.texto_regalo||null,
+      sedes:c.sedes||[], modo_sede:c.modo_sede||'elige',
+      limite:c.limite===""||c.limite==null?null:Number(c.limite),
+      desde:c.desde||null, hasta:c.hasta||null, activa:c.activa!==false};
+    if(c.id){ const {error}=await sb.from('campanas').update(row).eq('id',c.id); if(error) throw error; }
+    else { const {error}=await sb.from('campanas').insert(row); if(error) throw error; }
+  },
+  async borrarCampana(id){
+    if(DEMO_MODE) return;
+    const {count}=await sb.from('cortesias').select('id',{count:'exact',head:true}).eq('campana_id',id);
+    if(count>0) throw new Error("Esa campaña ya tiene "+count+" registrado(s). Desactívala en vez de borrarla.");
+    const {error}=await sb.from('campanas').delete().eq('id',id); if(error) throw error;
+  },
+  // registrados de cada campaña, para el contador del panel
+  async conteoCampanas(){
+    if(DEMO_MODE) return {};
+    const {data}=await sb.from('cortesias').select('campana_id,estado').not('campana_id','is',null).limit(5000);
+    const g={}; (data||[]).forEach(x=>{ const k=x.campana_id;
+      g[k]=g[k]||{total:0,espera:0,canjeadas:0};
+      if(x.estado==='espera') g[k].espera++; else { g[k].total++; if(x.estado==='canjeada') g[k].canjeadas++; } });
+    return g;
+  },
+  // ---- CONCILIACIÓN DE MEMBRESÍAS (cobrado en POS vs cargado en membresías) ----
+  async conciliacionMembresias(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('conciliacion_membresias',{p_anio:anio,p_mes:mes});
+    if(error) throw error; return data||[];
+  },
+  async detalleMembresiasOperador(anio,mes,operador){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('detalle_membresias_operador',{p_anio:anio,p_mes:mes,p_operador:operador});
+    if(error) throw error; return data||[];
+  },
+  // ---- METAS Y COMISIONES ----
+  async listMetas(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('metas_sede').select('*').eq('anio',anio).eq('mes',mes);
+    if(error) return []; return data||[];
+  },
+  async saveMeta(m){
+    if(DEMO_MODE) return;
+    const row={sede:m.sede,anio:m.anio,mes:m.mes,meta_accesorios:Number(m.meta_accesorios)||0,
+      meta_detailing:Number(m.meta_detailing)||0,nota:m.nota||null,updated_at:new Date().toISOString()};
+    const {error}=await sb.from('metas_sede').upsert(row,{onConflict:'sede,anio,mes'}); if(error) throw error;
+  },
+  async listAsesoresMes(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('metas_asesores').select('*').eq('anio',anio).eq('mes',mes);
+    if(error) return []; return data||[];
+  },
+  // Reemplaza la lista de asesores de una sede en el mes, conservando los ajustes ya puestos
+  async setAsesores(sede,anio,mes,lista,ajustes,noEvalua){
+    if(DEMO_MODE) return;
+    const {error:e1}=await sb.from('metas_asesores').delete().eq('sede',sede).eq('anio',anio).eq('mes',mes);
+    if(e1) throw e1;
+    if(!lista.length) return;
+    const ne=new Set(noEvalua||[]);
+    const filas=lista.map(e=>({sede,anio,mes,empleado:e,
+      ajuste_accesorios:((ajustes||{})[e]||{}).acc||0,
+      ajuste_detailing:((ajustes||{})[e]||{}).det||0,
+      ajuste:(((ajustes||{})[e]||{}).acc||0)+(((ajustes||{})[e]||{}).det||0),
+      ajuste_nota:((ajustes||{})[e]||{}).nota||null,
+      evalua:!ne.has(e)}));
+    const {error}=await sb.from('metas_asesores').insert(filas); if(error) throw error;
+  },
+  async setAjusteAsesor(sede,anio,mes,empleado,acc,det,nota){
+    if(DEMO_MODE) return;
+    const a=Number(acc)||0, d=Number(det)||0;
+    const {error}=await sb.from('metas_asesores')
+      .update({ajuste_accesorios:a, ajuste_detailing:d, ajuste:a+d, ajuste_nota:nota||null})
+      .eq('sede',sede).eq('anio',anio).eq('mes',mes).eq('empleado',empleado);
+    if(error) throw error;
+  },
+  async rendimientoMes(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('rendimiento_mes',{p_anio:anio,p_mes:mes});
+    if(error) throw error; return data||[];
+  },
+  async membresiasMes(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('membresias_mes',{p_anio:anio,p_mes:mes});
+    if(error) throw error; return data||[];
+  },
+  async getComisionConfig(){
+    if(DEMO_MODE) return null;
+    const {data}=await sb.from('comision_config').select('*').eq('id',1).maybeSingle(); return data||null;
+  },
+  async saveComisionConfig(c){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('comision_config').update({
+      escala:c.escala, minimo_asesor:Number(c.minimo_asesor)||85,
+      bono_mejor_sede:Number(c.bono_mejor_sede)||0, bono_sede_se_reparte:c.bono_sede_se_reparte!==false,
+      bono_mejor_vendedor:Number(c.bono_mejor_vendedor)||0, bono_membresias:Number(c.bono_membresias)||0
+    }).eq('id',1); if(error) throw error;
+  },
+  async listEstados(anio,mes){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('comision_estados').select('*').eq('anio',anio).eq('mes',mes);
+    if(error) return []; return data||[];
+  },
+  async setEstado(empleado,anio,mes,estado,manual,nota){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('comision_estados').upsert({empleado,anio,mes,estado,
+      manual:!!manual,nota:nota||null,updated_at:new Date().toISOString()},{onConflict:'empleado,anio,mes'});
+    if(error) throw error;
+  },
+  async cerrarMesMetas(anio,mes,cerrado,quien){
+    if(DEMO_MODE) return;
+    const row=cerrado?{cerrado:true,cerrado_at:new Date().toISOString(),cerrado_por:quien||null}
+                     :{cerrado:false,cerrado_at:null,cerrado_por:null};
+    const {error}=await sb.from('metas_sede').update(row).eq('anio',anio).eq('mes',mes); if(error) throw error;
+  },
+  // ---- COMPRAS DE INSUMOS (proveedores + órdenes de compra) ----
+  async listProveedores(){
+    if(DEMO_MODE) return (DEMO.proveedores||[]).slice();
+    const {data,error}=await sb.from('proveedores').select('*').eq('activo',true).order('nombre');
+    if(error) return []; return data||[];
+  },
+  async saveProveedor(p){
+    if(DEMO_MODE){ DEMO.proveedores=DEMO.proveedores||[]; if(p.id) DEMO.proveedores=DEMO.proveedores.map(x=>x.id===p.id?{...x,...p}:x); else DEMO.proveedores.push({...p,id:uid()}); return; }
+    const row={nombre:(p.nombre||"").trim(), contacto:p.contacto||null, telefono:p.telefono||null,
+      email:p.email||null, nota:p.nota||null, activo:p.activo!==false};
+    if(p.id){ const {error}=await sb.from('proveedores').update(row).eq('id',p.id); if(error) throw error; }
+    else { const {error}=await sb.from('proveedores').insert(row); if(error) throw error; }
+  },
+  async borrarProveedor(id){
+    if(DEMO_MODE){ DEMO.proveedores=(DEMO.proveedores||[]).filter(x=>x.id!==id); return; }
+    const {error}=await sb.from('proveedores').update({activo:false}).eq('id',id); if(error) throw error;
+  },
+  // Insumos que están en o por debajo del mínimo, con el mejor precio conocido
+  async sugerenciaCompra(proveedorId, tipo){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('sugerencia_compra',{p_proveedor_id:proveedorId||null, p_tipo:tipo||null});
+    if(error) throw error; return data||[];
+  },
+  async listOrdenes(){
+    if(DEMO_MODE) return (DEMO.ordenes||[]).slice();
+    const {data,error}=await sb.from('ordenes_compra').select('*').order('fecha',{ascending:false}).order('created_at',{ascending:false}).limit(500);
+    if(error) return []; return data||[];
+  },
+  async getOrden(id){
+    if(DEMO_MODE) return {orden:null,items:[]};
+    const [o,it]=await Promise.all([
+      sb.from('ordenes_compra').select('*').eq('id',id).maybeSingle(),
+      sb.from('orden_items').select('*').eq('orden_id',id).order('orden')
+    ]);
+    return {orden:o.data||null, items:it.data||[]};
+  },
+  async guardarOrden(o){
+    if(DEMO_MODE) return null;
+    const {data,error}=await sb.rpc('guardar_orden_compra',{
+      p_id:o.id||null, p_proveedor_id:o.proveedor_id||null, p_estado:o.estado||'borrador',
+      p_fecha:o.fecha||null, p_nota:o.nota||null, p_creado_por:o.creado_por||null,
+      p_items:o.items||[]});
+    if(error) throw error; return data;
+  },
+  async recibirOrden(id, items, operador){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('recibir_orden_compra',{p_orden_id:id,p_items:items||[],p_operador:operador||null});
+    if(error) throw error; return data;
+  },
+  async anularOrden(id){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('ordenes_compra').update({estado:'anulada'}).eq('id',id); if(error) throw error;
+  },
+  // Borra la orden y sus líneas (cascade). Solo para las que no movieron inventario.
+  async borrarOrden(id){
+    if(DEMO_MODE) return;
+    const {data:o}=await sb.from('ordenes_compra').select('estado').eq('id',id).maybeSingle();
+    if(o && o.estado==='recibida') throw new Error("Esa orden ya fue recibida y movió el inventario: no se puede borrar.");
+    const {error}=await sb.from('ordenes_compra').delete().eq('id',id); if(error) throw error;
+  },
   // ---- TURNOS (cuadro cíclico por sede) ----
   async listTurnosConfig(){
     if(DEMO_MODE) return (DEMO.turnos||[]).slice();
@@ -1340,7 +1521,7 @@ function App(){
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
           ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1370,12 +1551,13 @@ function App(){
                 {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
                 {tab==="pedidos"    && <Pedidos showToast={showToast} quien={auth.nombre}/>}
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
-                {tab==="produccion" && <Produccion showToast={showToast}/>}
+                {tab==="produccion" && <Produccion showToast={showToast} quien={auth.nombre}/>}
                 {tab==="membresias" && <Membresias showToast={showToast} admin={auth.nombre}/>}
                 {tab==="mantenimiento" && <Mantenimiento showToast={showToast} quien={auth.nombre}/>}
                 {tab==="recaudo"    && <Recaudo showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
+                {tab==="metas"      && <Metas showToast={showToast} quien={auth.nombre}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
@@ -1833,6 +2015,1173 @@ function Empleados({showToast, quien}){
 }
 
 // ============================================================
+// CAMPAÑAS DE CORTESÍA
+//   Antes cada link era "apertura de sede X" con los textos fijos en el
+//   código. Ahora cada campaña tiene sus textos, sus sedes, su cupo y su
+//   vigencia, y el link sale de aquí.
+// ============================================================
+function Campanas({showToast, sedes}){
+  const [items,setItems]=useState(null);
+  const [conteo,setConteo]=useState({});
+  const [ed,setEd]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [conf,setConf]=useState(null);
+
+  const cargar=async()=>{
+    try{ const [c,n]=await Promise.all([db.listCampanas(), db.conteoCampanas()]);
+      setItems(c); setConteo(n); }
+    catch(e){ showToast(""+(e.message||e),"err"); setItems([]); }
+  };
+  useEffect(()=>{ cargar(); },[]);
+
+  const linkDe=c=>location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html?c='+encodeURIComponent(c.codigo);
+  const copiar=c=>{ try{ navigator.clipboard.writeText(linkDe(c)); showToast("Link copiado ✓","ok"); }catch(e){} };
+
+  const nueva=()=>setEd({codigo:"", nombre:"", titulo:"", subtitulo:"", texto_regalo:"",
+    sedes:[], modo_sede:'elige', limite:"", desde:"", hasta:"", activa:true});
+  const guardar=async()=>{
+    if(!(ed.nombre||"").trim()){ showToast("Ponle nombre a la campaña","err"); return; }
+    if(!(ed.codigo||"").trim()){ showToast("Falta el código del link","err"); return; }
+    if(!/^[a-z0-9-]+$/i.test(ed.codigo.trim())){ showToast("El código solo puede llevar letras, números y guiones","err"); return; }
+    if(!(ed.sedes||[]).length){ showToast("Elige al menos una sede","err"); return; }
+    setBusy(true);
+    try{ await db.saveCampana(ed); setEd(null); await cargar(); showToast("Campaña guardada ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e).replace(/.*duplicate key.*/i,"Ya existe una campaña con ese código"),"err"); }
+    finally{ setBusy(false); }
+  };
+  const borrar=c=>setConf({titulo:"Borrar "+c.nombre, peligro:true,
+    texto:"Se elimina la campaña. Si ya tiene registrados no se puede: desactívala en su lugar.",
+    textoBoton:"Borrar",
+    onOk:async()=>{ await db.borrarCampana(c.id); await cargar(); showToast("Campaña borrada ✓","ok"); }});
+
+  const estadoDe=c=>{
+    const n=conteo[c.id]||{total:0};
+    const hoy=fLocalDia(new Date());
+    if(!c.activa) return {lbl:"Inactiva", c:"var(--td)", bg:"var(--sf3)"};
+    if(c.desde && hoy<c.desde) return {lbl:"Programada", c:"var(--blue)", bg:"var(--blue-d)"};
+    if(c.hasta && hoy>c.hasta) return {lbl:"Terminada", c:"var(--td)", bg:"var(--sf3)"};
+    if(c.limite!=null && n.total>=c.limite) return {lbl:"Cupos agotados", c:"var(--red)", bg:"var(--red-d)"};
+    return {lbl:"Activa", c:"var(--green)", bg:"var(--green-d)"};
+  };
+
+  if(items===null) return <div className="empty">Cargando campañas…</div>;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="sec-title" style={{marginRight:"auto"}}>📣 Campañas <span className="muted">({items.length})</span></div>
+        <button className="btn btn-amber btn-sm" onClick={nueva}>＋ Nueva campaña</button>
+      </div>
+
+      {items.length===0 && (
+        <div className="card" style={{textAlign:"center",marginBottom:14}}>
+          <div style={{fontWeight:700,marginBottom:6}}>Todavía no hay campañas configuradas</div>
+          <div className="muted" style={{fontSize:13}}>
+            Crea una y te queda el link listo para pegar en Instagram: eliges los textos, las sedes,
+            el cupo y la vigencia. Las campañas viejas siguen apareciendo abajo con sus registrados.
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:12}}>
+        {items.map(c=>{ const n=conteo[c.id]||{total:0,espera:0,canjeadas:0}; const st=estadoDe(c);
+          const pct=c.limite?Math.min(100,Math.round(n.total/c.limite*100)):0; return (
+          <div key={c.id} className="card" style={{padding:"14px 16px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+              <b style={{fontSize:16,flex:1}}>{c.nombre}</b>
+              <span className="pill" style={{background:st.bg,color:st.c,fontWeight:800}}>{st.lbl}</span>
+            </div>
+            <div className="muted" style={{fontSize:12,marginBottom:8}}>
+              🏬 {(c.sedes||[]).map(s=>String(s).replace(/\s*\(franquicia\)/i,'')).join(' · ')||"—"}
+              {c.modo_sede==='todas'?" · vale en todas":" · el cliente elige una"}
+            </div>
+
+            {c.limite!=null ? (
+              <div style={{marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:700,marginBottom:3}}>
+                  <span>{n.total} de {c.limite} cupos</span>
+                  <span className="muted">{Math.max(0,c.limite-n.total)} libres</span>
+                </div>
+                <div style={{height:8,borderRadius:8,background:"var(--sf3)",overflow:"hidden"}}>
+                  <div style={{width:pct+"%",height:"100%",background:pct>=100?"var(--red)":pct>=80?"var(--amber)":"var(--green)"}}/>
+                </div>
+              </div>
+            ) : <div className="muted" style={{fontSize:12,marginBottom:8}}>{n.total} registrados · sin tope</div>}
+
+            <div style={{display:"flex",gap:12,fontSize:12,marginBottom:10,flexWrap:"wrap"}}>
+              <span>🎟️ <b>{n.total}</b> registrados</span>
+              <span style={{color:"var(--green)"}}>✅ <b>{n.canjeadas}</b> canjeadas</span>
+              {n.espera>0 && <span style={{color:"var(--amber)"}}>⏳ <b>{n.espera}</b> en espera</span>}
+            </div>
+            {(c.desde||c.hasta) && <div className="muted" style={{fontSize:11,marginBottom:8}}>
+              📅 {c.desde||"—"} → {c.hasta||"sin fin"}</div>}
+
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              <button className="btn btn-ghost btn-sm" onClick={()=>copiar(c)}>🔗 Copiar link</button>
+              <a className="btn btn-ghost btn-sm" href={linkDe(c)} target="_blank" rel="noopener">Abrir</a>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setEd({...c,
+                limite:c.limite==null?"":String(c.limite), desde:c.desde||"", hasta:c.hasta||"",
+                sedes:[...(c.sedes||[])]})}>Editar</button>
+              <button className="btn btn-danger btn-sm" onClick={()=>borrar(c)}>✕</button>
+            </div>
+          </div>
+        );})}
+      </div>
+
+      {/* ---------- editor ---------- */}
+      {ed && (
+        <div className="modal-bg" onClick={()=>!busy&&setEd(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:560}}>
+            <div className="modal-t">📣 {ed.id?"Editar campaña":"Nueva campaña"}</div>
+
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 200px"}}><label className="label">Nombre (para tu control)</label>
+                <input className="input" autoFocus value={ed.nombre} onChange={e=>setEd(d=>({...d,nombre:e.target.value}))}
+                  placeholder="Ej. Primeras 20 · Septiembre"/></div>
+              <div style={{flex:"1 1 150px"}}><label className="label">Código del link</label>
+                <input className="input" value={ed.codigo} onChange={e=>setEd(d=>({...d,codigo:e.target.value.replace(/\s+/g,'-').toLowerCase()}))}
+                  placeholder="primeras20"/></div>
+            </div>
+            {ed.codigo && <div className="muted" style={{fontSize:11,marginTop:-6,marginBottom:8,wordBreak:"break-all"}}>
+              Link: <b>…/cortesia.html?c={ed.codigo}</b></div>}
+
+            <div className="sec-title" style={{fontSize:13,margin:"8px 0 4px"}}>Lo que ve el cliente</div>
+            <label className="label">Título</label>
+            <input className="input" value={ed.titulo||""} onChange={e=>setEd(d=>({...d,titulo:e.target.value}))}
+              placeholder="¡Las primeras 20 personas se llevan un token gratis!"/>
+            <label className="label">Subtítulo</label>
+            <input className="input" value={ed.subtitulo||""} onChange={e=>setEd(d=>({...d,subtitulo:e.target.value}))}
+              placeholder="Regístrate y reclama tu lavada. Sin costo, sin trucos. 🚗✨"/>
+            <label className="label">Frase del regalo</label>
+            <input className="input" value={ed.texto_regalo||""} onChange={e=>setEd(d=>({...d,texto_regalo:e.target.value}))}
+              placeholder="1 token de cortesía — 1 lavada gratis"/>
+            <div className="muted" style={{fontSize:11,marginTop:-6,marginBottom:8}}>
+              Si los dejas vacíos se usan los textos de siempre.
+            </div>
+
+            <div className="sec-title" style={{fontSize:13,margin:"10px 0 4px"}}>Dónde se reclama</div>
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              <button className={"btn btn-sm "+(ed.modo_sede==='elige'?'btn-amber':'btn-ghost')}
+                onClick={()=>setEd(d=>({...d,modo_sede:'elige'}))}>El cliente elige una</button>
+              <button className={"btn btn-sm "+(ed.modo_sede==='todas'?'btn-amber':'btn-ghost')}
+                onClick={()=>setEd(d=>({...d,modo_sede:'todas'}))}>Vale en todas</button>
+            </div>
+            <div style={{maxHeight:150,overflowY:"auto",border:"1px solid var(--bd)",borderRadius:10,padding:8,marginBottom:10}}>
+              {(sedes||[]).map(s=>{ const on=(ed.sedes||[]).includes(s.nombre); return (
+                <label key={s.id} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 2px",cursor:"pointer"}}>
+                  <input type="checkbox" checked={on} onChange={()=>setEd(d=>({...d,
+                    sedes:on?d.sedes.filter(x=>x!==s.nombre):[...d.sedes,s.nombre]}))}/>
+                  <span style={{fontWeight:on?700:400}}>{s.nombre}</span>
+                </label>
+              );})}
+              {(sedes||[]).length===0 && <div className="muted" style={{fontSize:12}}>No hay sedes.</div>}
+            </div>
+
+            <div className="sec-title" style={{fontSize:13,margin:"6px 0 4px"}}>Cupo y vigencia</div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 120px"}}><label className="label">Límite de cupos</label>
+                <input className="input" type="number" value={ed.limite}
+                  onChange={e=>setEd(d=>({...d,limite:e.target.value}))} placeholder="20"/>
+                <div className="muted" style={{fontSize:11,marginTop:-4}}>Vacío = sin tope</div></div>
+              <div style={{flex:"1 1 120px"}}><label className="label">Desde</label>
+                <input className="input" type="date" value={ed.desde} onChange={e=>setEd(d=>({...d,desde:e.target.value}))}/></div>
+              <div style={{flex:"1 1 120px"}}><label className="label">Hasta</label>
+                <input className="input" type="date" value={ed.hasta} onChange={e=>setEd(d=>({...d,hasta:e.target.value}))}/></div>
+            </div>
+            <label className="check" style={{display:"flex",gap:8,alignItems:"center",marginTop:8}}>
+              <input type="checkbox" checked={ed.activa!==false} onChange={e=>setEd(d=>({...d,activa:e.target.checked}))}/>
+              <span className="muted">Campaña activa (si la apagas, el link deja de registrar)</span>
+            </label>
+
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEd(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardar}>{busy?"Guardando…":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {items.length>0 && <div className="muted" style={{fontSize:12,margin:"12px 0 4px"}}>
+        Abajo siguen las campañas viejas (las de links <code>?sede=…</code>) con sus registrados.
+      </div>}
+
+      {conf && (
+        <div className="modal-bg" onClick={()=>!busy&&setConf(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:400}}>
+            <div className="modal-t">⚠ {conf.titulo}</div>
+            <div className="muted" style={{fontSize:14,marginBottom:4}}>{conf.texto}</div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setConf(null)}>Cancelar</button>
+              <button className="btn btn-danger" disabled={busy} onClick={async()=>{ setBusy(true);
+                try{ await conf.onOk(); setConf(null); }catch(e){ showToast(""+(e.message||e),"err"); }
+                finally{ setBusy(false); } }}>{busy?"Un momento…":conf.textoBoton}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// CONCILIACIÓN DE MEMBRESÍAS
+//   Cruza lo COBRADO en el POS (productos "MEMBRESIA …") contra lo CARGADO
+//   en el sistema de membresías. Si sobran recargas, se dio saldo sin cobrar;
+//   si faltan, el cliente pagó y no le quedó el saldo.
+// ============================================================
+function ConciliacionMembresias({showToast}){
+  const [mes,setMes]=useState(()=>{ const d=new Date(); d.setMonth(d.getMonth()-1);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
+  const [datos,setDatos]=useState(null);
+  const [det,setDet]=useState(null);        // {operador, filas}
+  const [cargando,setCargando]=useState(false);
+  const [y,m]=mes.split('-').map(Number);
+
+  const cargar=async()=>{
+    setCargando(true);
+    try{ setDatos(await db.conciliacionMembresias(y,m)); }
+    catch(e){ showToast(""+(e.message||e),"err"); setDatos([]); }
+    finally{ setCargando(false); }
+  };
+  useEffect(()=>{ setDatos(null); cargar(); },[mes]);
+  const moverMes=n=>{ const d=new Date(y,m-1+n,1); setMes(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); };
+
+  const verDetalle=async(op)=>{
+    try{ setDet({operador:op, filas:await db.detalleMembresiasOperador(y,m,op)}); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  const filas=datos||[];
+  const tPos=filas.reduce((a,x)=>a+Number(x.pos_unidades||0),0);
+  const tVip=filas.reduce((a,x)=>a+Number(x.vip_recargas||0),0);
+  const sobran=filas.filter(x=>Number(x.diferencia)>0);
+  const faltan=filas.filter(x=>Number(x.diferencia)<0);
+
+  return (
+    <div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="sec-title" style={{marginRight:"auto"}}>Conciliación de membresías</div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(-1)}>←</button>
+          <b style={{minWidth:130,textAlign:"center"}}>{MES_NOM[m-1]} {y}</b>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(1)}>→</button>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={cargar}>↻</button>
+      </div>
+
+      <div className="card" style={{marginBottom:12,fontSize:13}}>
+        <span className="muted">Cruza lo <b>cobrado</b> en caja (productos “MEMBRESIA …”) contra lo <b>cargado</b> en el sistema de membresías.
+        Si <b style={{color:"var(--amber)"}}>sobran</b> recargas, se dio saldo sin cobrar. Si <b style={{color:"var(--red)"}}>faltan</b>,
+        el cliente pagó y no le quedó el saldo.</span>
+      </div>
+
+      {cargando || datos===null ? <div className="empty">Cargando…</div> : (<div>
+        <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Cobradas en caja</div>
+            <div style={{fontSize:24,fontWeight:800}}>{tPos}</div></div>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Cargadas en membresías</div>
+            <div style={{fontSize:24,fontWeight:800}}>{tVip}</div></div>
+          <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Diferencia</div>
+            <div style={{fontSize:24,fontWeight:800,color:(tVip-tPos)===0?"var(--green)":"var(--amber)"}}>
+              {(tVip-tPos)>0?"+":""}{tVip-tPos}</div></div>
+          <div className="card" style={{flex:"1 1 190px"}}><div className="muted">Personas descuadradas</div>
+            <div style={{fontSize:24,fontWeight:800,color:(sobran.length+faltan.length)?"var(--amber)":"var(--green)"}}>
+              {sobran.length+faltan.length}</div>
+            <div className="muted" style={{fontSize:12}}>{sobran.length} sobran · {faltan.length} faltan</div></div>
+        </div>
+
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Operador</th><th className="num">Cobradas</th><th className="num">$ cobrado</th>
+              <th className="num">Cargadas</th><th className="num">$ saldo</th><th className="num">Dif</th><th></th></tr></thead>
+            <tbody>
+              {filas.length===0 && <tr><td colSpan="7"><div className="empty">Sin movimientos en {MES_NOM[m-1]}.</div></td></tr>}
+              {filas.map(x=>{ const d=Number(x.diferencia);
+                const col=d===0?"var(--green)":(d>0?"var(--amber)":"var(--red)"); return (
+                <tr key={x.operador}>
+                  <td className="row-name">{x.operador}</td>
+                  <td className="num">{x.pos_unidades}</td>
+                  <td className="num muted">{fmt(x.pos_monto)}</td>
+                  <td className="num">{x.vip_recargas}</td>
+                  <td className="num muted">{fmt(x.vip_monto)}</td>
+                  <td className="num" style={{fontWeight:800,color:col}}>
+                    {d===0?"✓":((d>0?"+":"")+d)}</td>
+                  <td>{d!==0 && <button className="btn btn-ghost btn-sm" onClick={()=>verDetalle(x.operador)}>Ver</button>}</td>
+                </tr>
+              );})}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="muted" style={{fontSize:12,marginTop:10}}>
+          Las cargas hechas desde el back office (admin) salen sin venta asociada: eso es normal.
+          Lo que vale la pena revisar son las de los <b>cajeros</b>.
+          <br/>El <b>$ cobrado</b> es lo que pagó el cliente y el <b>$ saldo</b> es lo que se le cargó: son distintos a propósito
+          (Gold cuesta {fmt(60000)} y carga {fmt(90000)}).
+        </div>
+      </div>)}
+
+      {det && (
+        <div className="modal-bg" onClick={()=>setDet(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:640}}>
+            <div className="modal-t">🔍 {det.operador} — {MES_NOM[m-1]} {y}</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:10,fontSize:13}}>
+              Las dos listas en orden de fecha. Busca la que no tenga su pareja.
+            </div>
+            <div className="card" style={{padding:0,overflowX:"auto",maxHeight:380,overflowY:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Origen</th><th>Fecha</th><th>Concepto</th><th>Cliente / recibo</th><th className="num">Valor</th></tr></thead>
+                <tbody>
+                  {det.filas.length===0 && <tr><td colSpan="5"><div className="empty">Sin movimientos.</div></td></tr>}
+                  {det.filas.map((f,i)=>(
+                    <tr key={i}>
+                      <td><span className="pill" style={{background:f.origen==='POS'?"var(--green-d)":"var(--amber-d)",
+                        color:f.origen==='POS'?"var(--green)":"var(--amber)",fontWeight:800}}>{f.origen}</span></td>
+                      <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(f.fecha)} {fLocalHora(f.fecha)}</td>
+                      <td className="row-name">{f.concepto}</td>
+                      <td className="muted">{f.cliente||"—"}</td>
+                      <td className="num" style={{fontWeight:700}}>{fmt(f.valor)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// METAS Y COMISIONES — rendimiento de ventas por asesor
+//   Meta por sede y línea, repartida en partes iguales entre sus asesores.
+//   El % lo define el cumplimiento de la SEDE; el asesor cobra solo si él
+//   supera el mínimo (85%). Replica el Excel "Control ventas y metas".
+// ============================================================
+// Quita el apellido (la última palabra) y deja los nombres de pila:
+// "Luis Ferney Marin" -> "Luis Ferney", "Nicolas Moreno" -> "Nicolas".
+// No sirve tomar solo la 1ª palabra: a Luis Ferney y a Juan David se les
+// dice por el segundo nombre.
+const nombreCorto=n=>{ const p=String(n||"").trim().split(/\s+/).filter(Boolean);
+  return p.length>1 ? p.slice(0,-1).join(" ") : (p[0]||""); };
+
+const EST_INFO={
+  normal:      {lbl:"Al día",            c:"var(--green)", bg:"var(--green-d)"},
+  condicionado:{lbl:"Condicionado",      c:"var(--amber)", bg:"var(--amber-d)"},
+  retiro:      {lbl:"Proceso de retiro", c:"var(--red)",   bg:"var(--red-d)"},
+};
+
+function Metas({showToast, quien}){
+  const hoy=new Date();
+  const [mes,setMes]=useState(()=>{ const d=new Date(); d.setMonth(d.getMonth()-1);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [metas,setMetas]=useState(null);
+  const [ases,setAses]=useState([]);
+  const [rend,setRend]=useState(null);
+  const [memb,setMemb]=useState([]);
+  const [estados,setEstados]=useState([]);
+  const [prevEst,setPrevEst]=useState([]);      // estados del mes anterior
+  const [prevMetas,setPrevMetas]=useState([]);  // metas del mes anterior (para precargar)
+  const [prevAses,setPrevAses]=useState([]);    // asesores del mes anterior
+  const [rendPrev,setRendPrev]=useState([]);    // rendimiento del mes anterior: de ahí sale el estado de ESTE mes
+  const [cfg,setCfg]=useState(null);
+  const [cargando,setCargando]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [edSede,setEdSede]=useState(null);      // sede en edición (meta + asesores)
+  const [verCfg,setVerCfg]=useState(false);
+  const [cfgEd,setCfgEd]=useState(null);
+  const [edAj,setEdAj]=useState(null);          // ajuste de un asesor
+  const [verImg,setVerImg]=useState(null);   // {que: nombre de sede | '__general__'}
+  const [genImg,setGenImg]=useState(false);
+  const [incEstados,setIncEstados]=useState(true);   // incluir la tabla de estados en la imagen general
+
+  const [y,m]=mes.split('-').map(Number);
+  const propias=(sedes||[]).filter(s=>!s.es_bodega && !s.es_franquicia);
+
+  useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados(),db.getComisionConfig()])
+    .then(([s,e,c])=>{ setSedes(s); setEmps(e); setCfg(c); }).catch(()=>{}); },[]);
+
+  const cargar=async()=>{
+    setCargando(true);
+    try{
+      // mes anterior: sirve para el arrastre de estados y para precargar las metas
+      const pm=new Date(y,m-2,1), py=pm.getFullYear(), pmm=pm.getMonth()+1;
+      const [mt,as,rd,mb,es,pe,pmt,pas,rp]=await Promise.all([
+        db.listMetas(y,m), db.listAsesoresMes(y,m), db.rendimientoMes(y,m),
+        db.membresiasMes(y,m), db.listEstados(y,m),
+        db.listEstados(py,pmm), db.listMetas(py,pmm), db.listAsesoresMes(py,pmm),
+        db.rendimientoMes(py,pmm)]);
+      setMetas(mt); setAses(as); setRend(rd); setMemb(mb); setEstados(es); setPrevEst(pe);
+      setPrevMetas(pmt); setPrevAses(pas); setRendPrev(rp);
+    }catch(e){ showToast(""+(e.message||e),"err"); setMetas([]); setRend([]); }
+    finally{ setCargando(false); }
+  };
+  useEffect(()=>{ setRend(null); cargar(); },[mes]);
+
+  const moverMes=n=>{ const d=new Date(y,m-1+n,1); setMes(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); };
+  const metaDe=s=>(metas||[]).find(x=>x.sede===s)||null;
+  const asesDe=s=>(ases||[]).filter(x=>x.sede===s);
+  const cerrado=(metas||[]).some(x=>x.cerrado);
+  const estDe=n=>((estados||[]).find(x=>x.empleado.trim()===n.trim())||{}).estado||'normal';
+  const estPrev=n=>((prevEst||[]).find(x=>x.empleado.trim()===n.trim())||{}).estado||'normal';
+
+  // ---- por sede, a partir del cálculo ----
+  const porSede={}; (rend||[]).forEach(r=>{ (porSede[r.sede]=porSede[r.sede]||[]).push(r); });
+  const sedesConDatos=Object.keys(porSede).sort();
+  const totalComision=(rend||[]).reduce((a,r)=>a+Number(r.comision||0),0);
+  const cumplenN=(rend||[]).filter(r=>r.cumple).length;
+
+  // mejor sede y mejor vendedor
+  const rankSedes=sedesConDatos.map(s=>({sede:s, cs:Number((porSede[s][0]||{}).cumpl_sede||0)}))
+    .sort((a,b)=>b.cs-a.cs);
+  const mejorSede=rankSedes[0]||null;
+  const rankVend=(rend||[]).slice().sort((a,b)=>Number(b.cumplimiento)-Number(a.cumplimiento));
+  const mejorVend=rankVend[0]||null;
+  const mejorMemb=(memb||[])[0]||null;
+  const bonoSedeCU=(()=>{ if(!cfg||!mejorSede) return 0;
+    const n=(porSede[mejorSede.sede]||[]).length||1;
+    return cfg.bono_sede_se_reparte ? Math.round(Number(cfg.bono_mejor_sede)/n) : Number(cfg.bono_mejor_sede); })();
+
+  // ---- guardar meta + asesores de una sede ----
+  // Si la sede aún no tiene meta este mes, se precarga con la del mes anterior.
+  // No guarda nada hasta que le des Guardar: solo llena el formulario.
+  const abrirSede=s=>{
+    const mt=metaDe(s); const lista=asesDe(s);
+    const yaTiene=!!mt;
+    const pm=(prevMetas||[]).find(x=>x.sede===s);
+    const pl=(prevAses||[]).filter(x=>x.sede===s);
+    const base=yaTiene?mt:(pm||{});
+    const emp=yaTiene?lista:pl;
+    setEdSede({sede:s, meta_accesorios:String(Number(base.meta_accesorios)||0),
+      meta_detailing:String(Number(base.meta_detailing)||0),
+      empleados:emp.map(x=>x.empleado),
+      // los ajustes NO se heredan: son de un mes puntual
+      ajustes:yaTiene?Object.fromEntries(lista.map(x=>[x.empleado,
+        {acc:Number(x.ajuste_accesorios)||0,det:Number(x.ajuste_detailing)||0,nota:x.ajuste_nota||""}])):{},
+      noEvalua:yaTiene?lista.filter(x=>x.evalua===false).map(x=>x.empleado):[],
+      copiado:!yaTiene && !!(pm||pl.length)});
+  };
+  // Copiar de una todo el mes anterior
+  const mesAnteriorTxt=()=>{ const d=new Date(y,m-2,1); return MES_NOM[d.getMonth()]+" "+d.getFullYear(); };
+  const copiarMesAnterior=async()=>{
+    setBusy(true);
+    try{
+      let n=0;
+      for(const pm of (prevMetas||[])){
+        await db.saveMeta({sede:pm.sede,anio:y,mes:m,
+          meta_accesorios:pm.meta_accesorios, meta_detailing:pm.meta_detailing});
+        const lista=(prevAses||[]).filter(x=>x.sede===pm.sede).map(x=>x.empleado);
+        if(lista.length) await db.setAsesores(pm.sede,y,m,lista,{});   // sin heredar ajustes
+        n++;
+      }
+      await cargar();
+      showToast(n?("Copiadas "+n+" sede(s) de "+mesAnteriorTxt()+" ✓"):"El mes anterior no tiene metas","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+  const sugeridosDe=s=>(emps||[]).filter(e=>e.activo!==false && (e.sedes||[]).includes(s));
+  const guardarSede=async()=>{
+    setBusy(true);
+    try{
+      await db.saveMeta({sede:edSede.sede,anio:y,mes:m,
+        meta_accesorios:edSede.meta_accesorios, meta_detailing:edSede.meta_detailing});
+      await db.setAsesores(edSede.sede,y,m,edSede.empleados,edSede.ajustes,edSede.noEvalua);
+      setEdSede(null); await cargar(); showToast("Meta y asesores guardados ✓","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---- estados: se calculan del mes anterior y se pueden ajustar ----
+  // ---- ESTADOS ----
+  // El estado de un mes es FIJO durante todo el mes: sale de cómo le fue el
+  // MES ANTERIOR. Solo cambia al cerrar el mes, cuando se evalúa de nuevo.
+  //   cumplió el mes pasado            -> al día
+  //   no cumplió y venía al día        -> condicionado
+  //   no cumplió y venía condicionado  -> proceso de retiro
+  const cadena=(cumplioAntes, estadoAntes)=>{
+    if(cumplioAntes) return 'normal';
+    return (estadoAntes==='normal' || !estadoAntes) ? 'condicionado' : 'retiro';
+  };
+  // Estado que le corresponde a ESTE mes, según el mes anterior
+  const estadoBase=nombre=>{
+    const r=(rendPrev||[]).find(x=>x.empleado.trim()===nombre.trim());
+    if(!r) return 'normal';                       // sin datos del mes pasado: arranca al día
+    if(r.evalua===false) return estPrev(nombre);  // el mes pasado no se le evaluó: conserva el suyo
+    return cadena(r.cumple, estPrev(nombre));
+  };
+  const estadoDe=r=>{
+    const n=r.empleado.trim();
+    const g=(estados||[]).find(x=>x.empleado.trim()===n);
+    if(g && g.manual) return {estado:g.estado, origen:'manual'};
+    const calc=estadoBase(n);
+    return {estado:(g?g.estado:calc), origen:g?'guardado':'calculado'};
+  };
+  // Lo que le va a quedar el mes ENTRANTE si el mes cierra como va hoy
+  const estadoProximo=r=>{
+    if(r.evalua===false) return estadoDe(r).estado;
+    return cadena(r.cumple, estadoDe(r).estado);
+  };
+  const mesTerminado=(y<hoy.getFullYear()) || (y===hoy.getFullYear() && m<hoy.getMonth()+1);
+  // Se guarda el estado de ESTE mes en cuanto haya datos del anterior: ya es definitivo,
+  // no depende de cómo vaya el mes en curso.
+  useEffect(()=>{
+    if(!rend || !rend.length || !(rendPrev||[]).length || busy) return;
+    (async()=>{
+      const pend=rend.filter(r=>!(estados||[]).some(x=>x.empleado.trim()===r.empleado.trim()));
+      if(!pend.length) return;
+      try{
+        for(const r of pend) await db.setEstado(r.empleado.trim(),y,m,estadoBase(r.empleado),false,null);
+        setEstados(await db.listEstados(y,m));
+      }catch(e){ /* si falla, igual se ve calculado en pantalla */ }
+    })();
+  },[rend,rendPrev]);
+  const aplicarEstados=async()=>{
+    setBusy(true);
+    try{
+      let n=0;
+      for(const r of (rend||[])){
+        const act=(estados||[]).find(x=>x.empleado.trim()===r.empleado.trim());
+        if(act && act.manual) continue;              // el admin lo fijó a mano, no se toca
+        const sug=estadoSugerido(r);
+        if(!act || act.estado!==sug){ await db.setEstado(r.empleado.trim(),y,m,sug,false,null); n++; }
+      }
+      await cargar(); showToast(n?("Estados actualizados ("+n+") ✓"):"Los estados ya estaban al día","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+  const cambiarEstado=async(nombre,nuevo)=>{
+    try{ await db.setEstado(nombre,y,m,nuevo,true,"Ajustado por "+(quien||"admin")); await cargar();
+      showToast("Estado fijado a mano ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+
+  const guardarAjuste=async()=>{
+    setBusy(true);
+    try{ await db.setAjusteAsesor(edAj.sede,y,m,edAj.empleado,edAj.acc,edAj.det,edAj.nota);
+      setEdAj(null); await cargar(); showToast("Ajuste guardado ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  const guardarCfg=async()=>{
+    setBusy(true);
+    try{ await db.saveComisionConfig(cfgEd); setCfg(cfgEd); setVerCfg(false); await cargar();
+      showToast("Configuración guardada ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---- avance esperado a la fecha (la tabla "Control cumplimiento" del Excel) ----
+  // El mes avanza parejo: día 15 de 30 -> deberían ir en 50%. Sirve para el envío
+  // semanal, si no un 45% a mitad de mes parece malo cuando en realidad va bien.
+  const diasDelMes=new Date(y,m,0).getDate();
+  const esMesActual=(y===hoy.getFullYear() && m===hoy.getMonth()+1);
+  const diaCorte=esMesActual?hoy.getDate():diasDelMes;
+  const esperado=Math.min(1, diaCorte/diasDelMes);
+  const vsEsperado=v=>Number(v)-esperado;   // >0 va adelantado
+
+  const compartir=async()=>{
+    const node=document.getElementById('metas-img-card');
+    if(!node){ showToast("No se encontró el cuadro","err"); return; }
+    if(typeof html2canvas==='undefined'){ showToast("Generador de imagen no cargó","err"); return; }
+    setGenImg(true);
+    try{
+      const canvas=await html2canvas(node,{scale:2,backgroundColor:'#ffffff',useCORS:true});
+      const blob=await new Promise(r=>canvas.toBlob(r,'image/png'));
+      const fname=(verImg.que==='__general__'?'Ranking_':'Metas_'+verImg.que.replace(/[^a-z0-9]+/gi,'_')+'_')
+        +MES_NOM[m-1]+'_'+y+'.png';
+      const file=new File([blob],fname,{type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        await navigator.share({files:[file],
+          title:(verImg.que==='__general__'?'Ranking Panzer':'Metas '+verImg.que)+' — '+MES_NOM[m-1]+' '+y});
+      } else { const url=URL.createObjectURL(blob); const a=document.createElement('a');
+        a.href=url; a.download=fname; a.click(); URL.revokeObjectURL(url);
+        showToast("Imagen descargada","ok"); }
+    }catch(e){ if(e&&e.name!=='AbortError') showToast("No se pudo generar: "+(e.message||e),"err"); }
+    finally{ setGenImg(false); }
+  };
+
+  const pctTxt=v=>(Number(v)*100).toFixed(1)+"%";
+  const colorCumpl=v=>{ const p=Number(v)*100;
+    return p>=100?"var(--green)":p>=85?"var(--amber)":"var(--red)"; };
+
+  return (
+    <div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="sec-title" style={{marginRight:"auto"}}>Metas y comisiones</div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(-1)}>←</button>
+          <b style={{minWidth:130,textAlign:"center"}}>{MES_NOM[m-1]} {y}</b>
+          <button className="btn btn-ghost btn-sm" onClick={()=>moverMes(1)}>→</button>
+        </div>
+        {cerrado && <span className="pill" style={{background:"var(--green-d)",color:"var(--green)",fontWeight:800}}>🔒 Cerrado</span>}
+        {(rend||[]).length>0 && <button className="btn btn-sm" style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={()=>setVerImg({que:sedesConDatos[0]||'__general__'})}>📲 Compartir</button>}
+        <button className="btn btn-ghost btn-sm" onClick={()=>{setCfgEd({...cfg}); setVerCfg(true);}}>⚙️ Escala y bonos</button>
+      </div>
+
+      {/* ----- copiar del mes anterior cuando el mes está vacío ----- */}
+      {!cargando && metas!==null && metas.length===0 && (prevMetas||[]).length>0 && (
+        <div className="card" style={{marginBottom:12,background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",
+             display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:220}}>
+            <b style={{color:"var(--amber)"}}>{MES_NOM[m-1]} todavía no tiene metas.</b>{" "}
+            <span className="muted">Puedes copiar las de {mesAnteriorTxt()}: {(prevMetas||[]).length} sede(s),
+            meta total {fmt((prevMetas||[]).reduce((a,x)=>a+Number(x.meta_accesorios)+Number(x.meta_detailing),0))}.
+            Los ajustes puntuales no se copian.</span>
+          </div>
+          <button className="btn btn-amber btn-sm" disabled={busy} onClick={copiarMesAnterior}>
+            {busy?"Copiando…":"📋 Copiar de "+mesAnteriorTxt()}</button>
+        </div>
+      )}
+
+      {/* ----- metas por sede ----- */}
+      <div className="sec-title" style={{margin:"4px 0 8px",fontSize:14}}>Metas del mes <span className="muted">· toca una sede para editarla</span></div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:10,marginBottom:16}}>
+        {propias.map(s=>{ const mt=metaDe(s.nombre); const as=asesDe(s.nombre);
+          const fila=(porSede[s.nombre]||[])[0];
+          const cs=fila?Number(fila.cumpl_sede):null;
+          return (
+          <div key={s.id} className="card" style={{cursor:"pointer",padding:"12px 14px",
+                 borderLeft:"3px solid "+(cs===null?"var(--bd)":colorCumpl(cs))}}
+               onClick={()=>abrirSede(s.nombre)}>
+            <div style={{fontWeight:800}}>{s.nombre}</div>
+            {mt ? (<div>
+              <div className="muted" style={{fontSize:12,marginTop:2}}>
+                Meta {fmt(Number(mt.meta_accesorios)+Number(mt.meta_detailing))} · {as.length} asesor{as.length===1?"":"es"}
+              </div>
+              {cs!==null && (
+                <div style={{marginTop:6,display:"flex",alignItems:"center",gap:8}}>
+                  <b style={{fontSize:18,color:colorCumpl(cs)}}>{pctTxt(cs)}</b>
+                  <span className="pill" style={{background:"var(--sf3)",color:"var(--tb)",fontWeight:800}}>
+                    {fila.pct_comision}%</span>
+                </div>
+              )}
+            </div>) : <div className="muted" style={{fontSize:12,marginTop:4}}>Sin meta — toca para ponerla</div>}
+          </div>
+        );})}
+      </div>
+
+      {/* ----- resultado ----- */}
+      {cargando || rend===null ? <div className="empty">Calculando…</div>
+       : (rend||[]).length===0 ? <div className="empty">Aún no hay metas ni asesores para {MES_NOM[m-1]}. Empieza por poner la meta de una sede arriba.</div>
+       : (<div>
+        <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+          <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Comisión del mes</div>
+            <div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(totalComision)}</div></div>
+          <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Cumplen</div>
+            <div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{cumplenN} <span className="muted" style={{fontSize:14}}>de {(rend||[]).length}</span></div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">🏆 Mejor sede</div>
+            <div style={{fontSize:16,fontWeight:800}}>{mejorSede?mejorSede.sede:"—"}</div>
+            <div className="muted" style={{fontSize:12}}>{mejorSede?pctTxt(mejorSede.cs):""}{cfg&&mejorSede?(" · "+fmt(bonoSedeCU)+" c/u"):""}</div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">⭐ Mejor vendedor</div>
+            <div style={{fontSize:16,fontWeight:800}}>{mejorVend?nombreCorto(mejorVend.empleado):"—"}</div>
+            <div className="muted" style={{fontSize:12}}>{mejorVend?pctTxt(mejorVend.cumplimiento):""}{cfg?(" · "+fmt(cfg.bono_mejor_vendedor)):""}</div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">💳 Mejor en membresías</div>
+            <div style={{fontSize:16,fontWeight:800}}>{mejorMemb?nombreCorto(mejorMemb.operador):"—"}</div>
+            <div className="muted" style={{fontSize:12}}>{mejorMemb?fmt(mejorMemb.monto):""}{cfg?(" · "+fmt(cfg.bono_membresias)):""}</div></div>
+        </div>
+
+        <div className="muted" style={{fontSize:12,marginBottom:10,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <span>🔄 <b>El estado de {MES_NOM[m-1]} es fijo:</b> sale de cómo le fue en {mesAnteriorTxt()} y no se mueve durante el mes.
+            Debajo de cada uno dice en qué va a quedar si el mes cierra como va hoy.</span>
+          <span className="pill" style={{background:"var(--sf3)",color:"var(--tb)",fontWeight:700}}>
+            cumple → al día · falla → condicionado · falla otra vez → retiro</span>
+          <span>Puedes cambiar cualquiera a mano y ese ya no se recalcula.</span>
+        </div>
+
+        {sedesConDatos.map(s=>{
+          const filas=porSede[s]; const f0=filas[0];
+          return (
+          <div key={s} style={{marginBottom:18}}>
+            <div className="sec-title" style={{margin:"10px 0 6px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              {s}
+              <span style={{fontSize:14,fontWeight:800,color:colorCumpl(f0.cumpl_sede)}}>{pctTxt(f0.cumpl_sede)}</span>
+              <span className="pill" style={{background:Number(f0.pct_comision)>0?"var(--green-d)":"var(--red-d)",
+                color:Number(f0.pct_comision)>0?"var(--green)":"var(--red)",fontWeight:800}}>
+                comisión {f0.pct_comision}%</span>
+              {Number(f0.pct_comision)===0 && <span className="muted" style={{fontSize:12,fontWeight:400}}>la sede no llegó al 85%: nadie comisiona</span>}
+              {mejorSede&&mejorSede.sede===s && <span className="pill" style={{background:"var(--amber-d)",color:"var(--amber)",fontWeight:800}}>🏆 Mejor sede</span>}
+            </div>
+            <div className="card" style={{padding:0,overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr>
+                  <th>Asesor</th><th className="num">Meta</th>
+                  <th className="num">Accesorios</th><th className="num">Detailing</th>
+                  <th className="num">Venta</th><th className="num">Cumpl.</th>
+                  <th className="num">Comisión</th><th>Estado</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {filas.map(r=>{ const ed=estadoDe(r); const est=ed.estado; const ei=EST_INFO[est]||EST_INFO.normal;
+                    const aj=Number(r.ajuste)||0; return (
+                    <tr key={r.empleado} style={{opacity:r.evalua===false?0.6:1}}>
+                      <td className="row-name">{r.empleado}
+                        {r.evalua===false && <div><span className="pill" style={{background:"var(--sf3)",color:"var(--td)",fontSize:10,fontWeight:700}}>recién entró · no se evalúa</span></div>}
+                        {aj!==0 && <div className="muted" style={{fontSize:11,color:"var(--amber)"}}>ajuste {aj>0?"+":""}{fmt(aj)}{r.ajuste_nota?(" · "+r.ajuste_nota):""}</div>}</td>
+                      <td className="num muted">{fmt(r.meta_total)}</td>
+                      <td className="num muted">{fmt(r.venta_accesorios)}</td>
+                      <td className="num muted">{fmt(r.venta_detailing)}</td>
+                      <td className="num" style={{fontWeight:700}}>{fmt(r.venta_total)}</td>
+                      <td className="num" style={{fontWeight:800,color:colorCumpl(r.cumplimiento)}}>{pctTxt(r.cumplimiento)}</td>
+                      <td className="num" style={{fontWeight:800,color:Number(r.comision)>0?"var(--green)":"var(--td)"}}>
+                        {Number(r.comision)>0?fmt(r.comision):(r.cumple?"—":"NO CUMPLE")}</td>
+                      <td>
+                        <select className="select" style={{margin:0,padding:"4px 6px",fontSize:12,maxWidth:150,
+                          background:ei.bg,color:ei.c,fontWeight:700}}
+                          value={est} onChange={e=>cambiarEstado(r.empleado.trim(),e.target.value)}>
+                          {Object.entries(EST_INFO).map(([k,v])=><option key={k} value={k}>{v.lbl}</option>)}
+                        </select>
+                        {(()=>{ const prox=estadoProximo(r); const cambia=prox!==est;
+                          const pi=EST_INFO[prox]||EST_INFO.normal; return (
+                          <div className="muted" style={{fontSize:10,marginTop:2,lineHeight:1.4}}>
+                            {ed.origen==='manual' && <div>✋ fijado a mano</div>}
+                            {r.evalua===false
+                              ? <div>no se evalúa este mes</div>
+                              : cambia
+                                ? <div style={{color:pi.c,fontWeight:700}}>
+                                    {mesTerminado?"→ queda en ":"si cierra así → "}{pi.lbl}</div>
+                                : <div>{mesTerminado?"se mantiene":"va a mantenerse"}</div>}
+                          </div>
+                        );})()}
+                      </td>
+                      <td><button className="btn btn-ghost btn-sm" title="Ajuste manual"
+                        onClick={()=>setEdAj({sede:r.sede,empleado:r.empleado.trim(),
+                          acc:String(Number(r.ajuste_accesorios)||0), det:String(Number(r.ajuste_detailing)||0),
+                          nota:r.ajuste_nota||""})}>±</button></td>
+                    </tr>
+                  );})}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );})}
+
+        {/* ranking de membresías */}
+        {(memb||[]).length>0 && (
+          <div style={{marginTop:18}}>
+            <div className="sec-title" style={{margin:"0 0 6px",fontSize:14}}>💳 Ventas de membresías <span className="muted">· para el bono</span></div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {(memb||[]).slice(0,10).map((x,i)=>(
+                <span key={x.operador} className="pill" style={{background:i===0?"var(--amber-d)":"var(--sf3)",
+                  color:i===0?"var(--amber)":"var(--tb)",fontWeight:i===0?800:600}}>
+                  {i===0?"🏆 ":""}{nombreCorto(x.operador)} {fmt(x.monto)}</span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>)}
+
+      {/* ---------- editar meta y asesores ---------- */}
+      {edSede && (()=>{ const sug=sugeridosDe(edSede.sede);
+        const otros=(emps||[]).filter(e=>e.activo!==false && !sug.some(x=>x.id===e.id));
+        const total=(Number(edSede.meta_accesorios)||0)+(Number(edSede.meta_detailing)||0);
+        const n=edSede.empleados.length||1; return (
+        <div className="modal-bg" onClick={()=>!busy&&setEdSede(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:520}}>
+            <div className="modal-t">🎯 {edSede.sede} — {MES_NOM[m-1]} {y}</div>
+            {edSede.copiado && (
+              <div className="muted" style={{marginTop:-6,marginBottom:10,fontSize:13,
+                   background:"var(--amber-d)",color:"var(--amber)",padding:"7px 10px",borderRadius:8,fontWeight:600}}>
+                📋 Precargado con {mesAnteriorTxt()}. Ajusta lo que cambie y guarda.
+              </div>
+            )}
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 150px"}}><label className="label">Meta Accesorios</label>
+                <input className="input" type="number" value={edSede.meta_accesorios}
+                  onChange={e=>setEdSede(d=>({...d,meta_accesorios:e.target.value}))}/>
+                <div className="muted" style={{fontSize:11,marginTop:-4}}>Productos complementarios de lavado</div></div>
+              <div style={{flex:"1 1 150px"}}><label className="label">Meta Car Detailing</label>
+                <input className="input" type="number" value={edSede.meta_detailing}
+                  onChange={e=>setEdSede(d=>({...d,meta_detailing:e.target.value}))}/>
+                <div className="muted" style={{fontSize:11,marginTop:-4}}>Productos Panzer Carwash</div></div>
+            </div>
+            <div className="card" style={{marginBottom:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+              <span>Meta total de la sede</span><span style={{color:"var(--amber)"}}>{fmt(total)}</span>
+            </div>
+
+            <label className="label">Asesores del mes <span className="muted">· la meta se divide en partes iguales</span></label>
+            {sug.length===0 && otros.length===0 && <div className="muted" style={{fontSize:12}}>No hay empleados activos.</div>}
+            <div style={{maxHeight:210,overflowY:"auto",border:"1px solid var(--bd)",borderRadius:10,padding:8,marginBottom:8}}>
+              {[...sug,...otros].map(e=>{ const on=edSede.empleados.includes(e.nombre);
+                const propio=sug.some(x=>x.id===e.id);
+                const noEv=(edSede.noEvalua||[]).includes(e.nombre); return (
+                <div key={e.id} style={{padding:"5px 4px"}}>
+                  <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                    <input type="checkbox" checked={on} onChange={()=>setEdSede(d=>({...d,
+                      empleados:on?d.empleados.filter(x=>x!==e.nombre):[...d.empleados,e.nombre],
+                      noEvalua:on?(d.noEvalua||[]).filter(x=>x!==e.nombre):(d.noEvalua||[])}))}/>
+                    <span style={{fontWeight:on?700:400}}>{e.nombre}</span>
+                    {!propio && <span className="muted" style={{fontSize:11}}>(de otra sede)</span>}
+                  </label>
+                  {on && (
+                    <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",marginLeft:24,marginTop:2}}>
+                      <input type="checkbox" checked={noEv} onChange={()=>setEdSede(d=>({...d,
+                        noEvalua:noEv?(d.noEvalua||[]).filter(x=>x!==e.nombre):[...(d.noEvalua||[]),e.nombre]}))}/>
+                      <span className="muted" style={{fontSize:11.5}}>
+                        Recién entró: <b>no evaluar este mes</b> (no comisiona ni afecta el cumplimiento de la sede)</span>
+                    </label>
+                  )}
+                </div>
+              );})}
+            </div>
+            {edSede.empleados.length>0 && (()=>{ const ne=(edSede.noEvalua||[]).length; return (
+              <div className="card" style={{marginBottom:10,fontSize:13}}>
+                Meta individual: <b>{fmt(total/n)}</b>{" "}
+                <span className="muted">({fmt((Number(edSede.meta_accesorios)||0)/n)} accesorios + {fmt((Number(edSede.meta_detailing)||0)/n)} detailing)</span>
+                {ne>0 && <div className="muted" style={{fontSize:12,marginTop:4}}>
+                  La meta se divide entre los <b>{n}</b>, pero la sede se mide sobre <b>{fmt(total/n*(n-ne))}</b> ({n-ne} evaluado{n-ne===1?"":"s"}):
+                  el que recién entró no arrastra el cumplimiento de los demás.
+                </div>}
+              </div>
+            );})()}
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEdSede(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarSede}>{busy?"Guardando…":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      );})()}
+
+      {/* ---------- ajuste de un asesor ---------- */}
+      {edAj && (
+        <div className="modal-bg" onClick={()=>!busy&&setEdAj(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:420}}>
+            <div className="modal-t">± Ajuste — {edAj.empleado}</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:10,fontSize:13}}>
+              Suma o resta a su venta del mes. Úsalo cuando vendió con el usuario de otro, o por cualquier corrección puntual.
+            </div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 140px"}}><label className="label">Accesorios</label>
+                <input className="input" type="number" value={edAj.acc} onChange={e=>setEdAj(d=>({...d,acc:e.target.value}))}/>
+                <div className="muted" style={{fontSize:11,marginTop:-4}}>Complementarios de lavado</div></div>
+              <div style={{flex:"1 1 140px"}}><label className="label">Car Detailing</label>
+                <input className="input" type="number" value={edAj.det} onChange={e=>setEdAj(d=>({...d,det:e.target.value}))}/>
+                <div className="muted" style={{fontSize:11,marginTop:-4}}>Productos Panzer Carwash</div></div>
+            </div>
+            <div className="card" style={{marginBottom:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+              <span>Ajuste total</span>
+              <span style={{color:"var(--amber)"}}>{fmt((Number(edAj.acc)||0)+(Number(edAj.det)||0))}</span>
+            </div>
+            <div className="muted" style={{fontSize:12,marginTop:-4,marginBottom:6}}>
+              Va separado por línea para que los porcentajes de cada una queden bien. Pueden ser negativos.
+            </div>
+            <label className="label">Motivo</label>
+            <input className="input" value={edAj.nota} onChange={e=>setEdAj(d=>({...d,nota:e.target.value}))}
+              placeholder="Ej. Ventas hechas con el usuario de Dairon"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEdAj(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarAjuste}>{busy?"Guardando…":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- configuración ---------- */}
+      {verCfg && cfgEd && (
+        <div className="modal-bg" onClick={()=>!busy&&setVerCfg(false)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:480}}>
+            <div className="modal-t">⚙️ Escala y bonos</div>
+            <label className="label">Escala de comisión <span className="muted">· según el cumplimiento de la SEDE</span></label>
+            <div className="card" style={{padding:8,marginBottom:10}}>
+              {(cfgEd.escala||[]).map((e,i)=>(
+                <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                  <span className="muted" style={{fontSize:12,width:44}}>desde</span>
+                  <input className="input" style={{margin:0,maxWidth:80,textAlign:"right"}} type="number" value={e.desde}
+                    onChange={ev=>setCfgEd(c=>({...c,escala:c.escala.map((x,j)=>j===i?{...x,desde:Number(ev.target.value)}:x)}))}/>
+                  <span className="muted">%  →  paga</span>
+                  <input className="input" style={{margin:0,maxWidth:80,textAlign:"right"}} type="number" step="0.5" value={e.pct}
+                    onChange={ev=>setCfgEd(c=>({...c,escala:c.escala.map((x,j)=>j===i?{...x,pct:Number(ev.target.value)}:x)}))}/>
+                  <span className="muted">%</span>
+                </div>
+              ))}
+            </div>
+            <label className="label">Mínimo que debe cumplir el asesor para cobrar (%)</label>
+            <input className="input" type="number" value={cfgEd.minimo_asesor}
+              onChange={e=>setCfgEd(c=>({...c,minimo_asesor:e.target.value}))}/>
+
+            <label className="label">Bonos</label>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 140px"}}><label className="label" style={{fontSize:11}}>🏆 Mejor sede</label>
+                <input className="input" type="number" value={cfgEd.bono_mejor_sede}
+                  onChange={e=>setCfgEd(c=>({...c,bono_mejor_sede:e.target.value}))}/></div>
+              <div style={{flex:"1 1 140px"}}><label className="label" style={{fontSize:11}}>⭐ Mejor vendedor</label>
+                <input className="input" type="number" value={cfgEd.bono_mejor_vendedor}
+                  onChange={e=>setCfgEd(c=>({...c,bono_mejor_vendedor:e.target.value}))}/></div>
+              <div style={{flex:"1 1 140px"}}><label className="label" style={{fontSize:11}}>💳 Membresías</label>
+                <input className="input" type="number" value={cfgEd.bono_membresias}
+                  onChange={e=>setCfgEd(c=>({...c,bono_membresias:e.target.value}))}/></div>
+            </div>
+            <label className="check" style={{display:"flex",gap:8,alignItems:"center",marginTop:6}}>
+              <input type="checkbox" checked={cfgEd.bono_sede_se_reparte!==false}
+                onChange={e=>setCfgEd(c=>({...c,bono_sede_se_reparte:e.target.checked}))}/>
+              <span className="muted">El bono de mejor sede se reparte entre sus asesores</span>
+            </label>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setVerCfg(false)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarCfg}>{busy?"Guardando…":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- imagen para compartir ---------- */}
+      {/* Una imagen por SEDE (para su grupo, con su meta) y una GENERAL con los
+          rankings de bonos, que es la única que se comparte con todos. */}
+      {verImg && (()=>{
+        const gen=verImg.que==='__general__';
+        const filas=gen?[]:(porSede[verImg.que]||[]);
+        const f0=filas[0];
+        const CV=v=>Number(v)>=1?"#16a34a":Number(v)>=0.85?"#d97706":"#dc2626";
+        const barra=(v,ancho)=>(
+          <div style={{position:"relative",height:9,borderRadius:9,background:"#e2e8f0",width:ancho,overflow:"hidden"}}>
+            <div style={{width:Math.min(100,Number(v)*100)+"%",height:"100%",background:CV(v)}}/>
+            <div style={{position:"absolute",left:(esperado*100)+"%",top:-2,width:2,height:13,background:"#0f172a",opacity:.55}}/>
+          </div>);
+        return (
+        <div className="modal-bg" onClick={()=>!genImg&&setVerImg(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:600}}>
+            <div className="modal-t">📲 Compartir</div>
+            <label className="label">Qué compartir</label>
+            <select className="select" value={verImg.que} onChange={e=>setVerImg({que:e.target.value})}>
+              <optgroup label="Al grupo de cada sede">
+                {sedesConDatos.map(s=><option key={s} value={s}>🏬 {s}</option>)}
+              </optgroup>
+              <optgroup label="Para todos">
+                <option value="__general__">🏆 Ranking general y bonos</option>
+              </optgroup>
+            </select>
+            <div className="muted" style={{fontSize:12,marginBottom:8}}>
+              {esMesActual
+                ? <span>Van <b>{diaCorte} de {diasDelMes} días</b> del mes: a hoy deberían ir en <b>{(esperado*100).toFixed(0)}%</b>. La línea negra de las barras marca ese punto.</span>
+                : <span>Mes cerrado ({diasDelMes} días).</span>}
+            </div>
+            {gen && (
+              <label className="check" style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,cursor:"pointer"}}>
+                <input type="checkbox" checked={incEstados} onChange={e=>setIncEstados(e.target.checked)}/>
+                <span className="muted" style={{fontSize:12}}>
+                  Incluir la tabla de <b>estados</b> (condicionados y procesos de retiro).
+                  {" "}<span style={{color:"var(--amber)"}}>Ojo: es información delicada para un grupo abierto.</span>
+                </span>
+              </label>
+            )}
+
+            <div style={{overflow:"auto",maxHeight:400,border:"1px solid var(--bd)",borderRadius:10,background:"#fff"}}>
+              <div id="metas-img-card" style={{background:"#ffffff",padding:20,width:"fit-content",minWidth:480,
+                   fontFamily:"'Outfit',system-ui,sans-serif",color:"#0f172a"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+                  <div style={{background:"#2563eb",color:"#fff",borderRadius:10,padding:"7px 12px",
+                               fontSize:15,fontWeight:900,letterSpacing:1}}>PANZER</div>
+                  <div>
+                    <div style={{fontSize:19,fontWeight:900}}>
+                      {gen?"RANKING GENERAL":"METAS · "+verImg.que.toUpperCase()}</div>
+                    <div style={{fontSize:13,color:"#64748b",fontWeight:600}}>
+                      {MES_NOM[m-1]} {y}{esMesActual?(" · día "+diaCorte+" de "+diasDelMes+" · esperado "+(esperado*100).toFixed(0)+"%"):" · mes cerrado"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* ---- POR SEDE: abierto por línea, como en el Excel ---- */}
+                {!gen && f0 && (()=>{
+                  const n=filas.length;
+                  const sAcc=filas.reduce((a,r)=>a+Number(r.venta_accesorios),0);
+                  const sDet=filas.reduce((a,r)=>a+Number(r.venta_detailing),0);
+                  const mAcc=Number(f0.meta_accesorios)*n, mDet=Number(f0.meta_detailing)*n;
+                  const pAcc=mAcc>0?sAcc/mAcc:0, pDet=mDet>0?sDet/mDet:0;
+                  const TH=(t,extra)=>({padding:"5px 8px",border:"1px solid #e2e8f0",background:"#f8fafc",
+                    fontSize:10.5,fontWeight:800,color:"#475569",textAlign:t,...(extra||{})});
+                  const TD=(t,extra)=>({padding:"6px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:t,...(extra||{})});
+                  return (<div>
+                  {/* resumen de la sede, abierto por línea */}
+                  <div style={{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}}>
+                    <div style={{flex:"1 1 150px",padding:"8px 10px",background:"#f8fafc",borderRadius:10}}>
+                      <div style={{fontSize:10.5,color:"#64748b",fontWeight:800}}>LA SEDE VA EN</div>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:22,fontWeight:900,color:CV(f0.cumpl_sede)}}>{pctTxt(f0.cumpl_sede)}</span>
+                        {barra(f0.cumpl_sede,90)}
+                      </div>
+                      <div style={{fontSize:11,color:"#64748b"}}>{fmt(sAcc+sDet)} de {fmt(mAcc+mDet)}</div>
+                    </div>
+                    <div style={{flex:"1 1 140px",padding:"8px 10px",background:"#f8fafc",borderRadius:10}}>
+                      <div style={{fontSize:10.5,color:"#64748b",fontWeight:800}}>ACCESORIOS</div>
+                      <div style={{fontSize:17,fontWeight:900,color:CV(pAcc)}}>{pctTxt(pAcc)}</div>
+                      <div style={{fontSize:11,color:"#64748b"}}>{fmt(sAcc)} de {fmt(mAcc)}</div>
+                    </div>
+                    <div style={{flex:"1 1 140px",padding:"8px 10px",background:"#f8fafc",borderRadius:10}}>
+                      <div style={{fontSize:10.5,color:"#64748b",fontWeight:800}}>CAR DETAILING</div>
+                      <div style={{fontSize:17,fontWeight:900,color:CV(pDet)}}>{pctTxt(pDet)}</div>
+                      <div style={{fontSize:11,color:"#64748b"}}>{fmt(sDet)} de {fmt(mDet)}</div>
+                    </div>
+                  </div>
+
+                  <table style={{borderCollapse:"collapse",width:"100%"}}>
+                    <thead>
+                      <tr>
+                        <th style={TH("left")} rowSpan="2">Asesor</th>
+                        <th style={TH("center",{background:"#eff6ff"})} colSpan="3">ACCESORIOS</th>
+                        <th style={TH("center",{background:"#f0fdf4"})} colSpan="3">CAR DETAILING</th>
+                        <th style={TH("center",{background:"#fef9e7"})} colSpan="2">TOTAL</th>
+                      </tr>
+                      <tr>
+                        <th style={TH("right",{background:"#eff6ff"})}>Vendido</th>
+                        <th style={TH("right",{background:"#eff6ff"})}>Meta</th>
+                        <th style={TH("right",{background:"#eff6ff"})}>%</th>
+                        <th style={TH("right",{background:"#f0fdf4"})}>Vendido</th>
+                        <th style={TH("right",{background:"#f0fdf4"})}>Meta</th>
+                        <th style={TH("right",{background:"#f0fdf4"})}>%</th>
+                        <th style={TH("right",{background:"#fef9e7"})}>Vendido</th>
+                        <th style={TH("right",{background:"#fef9e7"})}>%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filas.map(r=>{
+                        const ca=Number(r.meta_accesorios)>0?Number(r.venta_accesorios)/Number(r.meta_accesorios):0;
+                        const cd=Number(r.meta_detailing)>0?Number(r.venta_detailing)/Number(r.meta_detailing):0;
+                        return (
+                        <tr key={r.empleado}>
+                          <td style={TD("left",{fontWeight:700,fontSize:12.5})}>{nombreCorto(r.empleado)}</td>
+                          <td style={TD("right")}>{fmt(r.venta_accesorios)}</td>
+                          <td style={TD("right",{color:"#94a3b8"})}>{fmt(r.meta_accesorios)}</td>
+                          <td style={TD("right",{fontWeight:900,color:CV(ca)})}>{pctTxt(ca)}</td>
+                          <td style={TD("right")}>{fmt(r.venta_detailing)}</td>
+                          <td style={TD("right",{color:"#94a3b8"})}>{fmt(r.meta_detailing)}</td>
+                          <td style={TD("right",{fontWeight:900,color:CV(cd)})}>{pctTxt(cd)}</td>
+                          <td style={TD("right",{fontWeight:800,background:"#fffdf5"})}>{fmt(r.venta_total)}</td>
+                          <td style={TD("right",{fontWeight:900,fontSize:13,color:CV(r.cumplimiento),background:"#fffdf5"})}>{pctTxt(r.cumplimiento)}</td>
+                        </tr>
+                      );})}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td style={TD("left",{fontWeight:900,background:"#f8fafc"})}>TOTAL SEDE</td>
+                        <td style={TD("right",{fontWeight:800,background:"#f8fafc"})}>{fmt(sAcc)}</td>
+                        <td style={TD("right",{color:"#94a3b8",background:"#f8fafc"})}>{fmt(mAcc)}</td>
+                        <td style={TD("right",{fontWeight:900,color:CV(pAcc),background:"#f8fafc"})}>{pctTxt(pAcc)}</td>
+                        <td style={TD("right",{fontWeight:800,background:"#f8fafc"})}>{fmt(sDet)}</td>
+                        <td style={TD("right",{color:"#94a3b8",background:"#f8fafc"})}>{fmt(mDet)}</td>
+                        <td style={TD("right",{fontWeight:900,color:CV(pDet),background:"#f8fafc"})}>{pctTxt(pDet)}</td>
+                        <td style={TD("right",{fontWeight:900,background:"#f8fafc"})}>{fmt(sAcc+sDet)}</td>
+                        <td style={TD("right",{fontWeight:900,fontSize:13,color:CV(f0.cumpl_sede),background:"#f8fafc"})}>{pctTxt(f0.cumpl_sede)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                  <div style={{marginTop:10,fontSize:11.5,color:"#475569"}}>
+                    {Number(f0.pct_comision)>0
+                      ? <span>✅ La sede está en el escalón de <b>{f0.pct_comision}%</b> de comisión.</span>
+                      : <span>⚠️ La sede debe llegar al <b>85%</b> para que haya comisión.</span>}
+                    {" "}Cada asesor necesita su <b>85%</b> para cobrar la suya.
+                    {" "}<span style={{color:"#64748b"}}>Accesorios = productos complementarios de lavado · Car Detailing = productos Panzer Carwash.</span>
+                  </div>
+                </div>);})()}
+
+                {/* ---- GENERAL: rankings de bonos ---- */}
+                {gen && (<div>
+                <div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:5}}>⭐ MEJOR VENDEDOR</div>
+                    <table style={{borderCollapse:"collapse"}}>
+                      <tbody>
+                        {rankVend.map((r,i)=>(
+                          <tr key={r.empleado} style={{background:i===0?"#fef9e7":"transparent"}}>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:800,color:"#94a3b8"}}>{i+1}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:i===0?900:700}}>
+                              {i===0?"🥇 ":""}{nombreCorto(r.empleado)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:11,color:"#64748b"}}>{r.sede}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:"right",
+                              fontWeight:900,color:CV(r.cumplimiento)}}>{pctTxt(r.cumplimiento)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:5}}>💳 MEMBRESÍAS</div>
+                    <table style={{borderCollapse:"collapse"}}>
+                      <tbody>
+                        {(memb||[]).slice(0,12).map((x,i)=>(
+                          <tr key={x.operador} style={{background:i===0?"#fef9e7":"transparent"}}>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:800,color:"#94a3b8"}}>{i+1}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:i===0?900:700}}>
+                              {i===0?"🥇 ":""}{nombreCorto(x.operador)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:"right",fontWeight:700}}>{fmt(x.monto)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:5}}>🏆 MEJOR SEDE</div>
+                    <table style={{borderCollapse:"collapse"}}>
+                      <tbody>
+                        {rankSedes.map((s,i)=>(
+                          <tr key={s.sede} style={{background:i===0?"#fef9e7":"transparent"}}>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:800,color:"#94a3b8"}}>{i+1}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:i===0?900:700}}>
+                              {i===0?"🥇 ":""}{s.sede}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:"right",
+                              fontWeight:900,color:CV(s.cs)}}>{pctTxt(s.cs)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {cfg && (
+                      <div style={{marginTop:8,fontSize:11,color:"#475569",lineHeight:1.6}}>
+                        <div>🏆 Mejor sede: <b>{fmt(cfg.bono_mejor_sede)}</b>{cfg.bono_sede_se_reparte?" (se reparte)":""}</div>
+                        <div>⭐ Mejor vendedor: <b>{fmt(cfg.bono_mejor_vendedor)}</b></div>
+                        <div>💳 Membresías: <b>{fmt(cfg.bono_membresias)}</b></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* estado actual de cada uno */}
+                {incEstados && (()=>{
+                  const marcados=(rend||[]).filter(r=>r.evalua!==false)
+                    .map(r=>({n:r.empleado, sede:r.sede, e:estadoDe(r).estado}))
+                    .filter(x=>x.e!=='normal')
+                    .sort((a,b)=>(a.e==='retiro'?0:1)-(b.e==='retiro'?0:1)||a.n.localeCompare(b.n));
+                  const COL={condicionado:{c:"#b45309",bg:"#fef3c7",lbl:"Condicionado"},
+                             retiro:{c:"#b91c1c",bg:"#fee2e2",lbl:"Proceso de retiro"}};
+                  return (
+                  <div style={{marginTop:16,paddingTop:12,borderTop:"2px solid #e2e8f0"}}>
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:6}}>📋 ESTADO ACTUAL · {MES_NOM[m-1].toUpperCase()}</div>
+                    {marcados.length===0
+                      ? <div style={{fontSize:12,color:"#16a34a",fontWeight:700}}>✅ Todo el equipo está al día.</div>
+                      : (<div>
+                        <table style={{borderCollapse:"collapse"}}>
+                          <tbody>
+                            {marcados.map(x=>{ const c=COL[x.e]; return (
+                              <tr key={x.n}>
+                                <td style={{padding:"5px 9px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:700}}>{nombreCorto(x.n)}</td>
+                                <td style={{padding:"5px 9px",border:"1px solid #e2e8f0",fontSize:11,color:"#64748b"}}>{x.sede}</td>
+                                <td style={{padding:"5px 9px",border:"1px solid #e2e8f0",fontSize:12,
+                                  fontWeight:900,color:c.c,background:c.bg}}>{c.lbl}</td>
+                              </tr>
+                            );})}
+                          </tbody>
+                        </table>
+                        <div style={{fontSize:11,color:"#64748b",marginTop:6,lineHeight:1.5}}>
+                          El estado se define al cerrar cada mes: quien no cumple su meta queda <b>condicionado</b>,
+                          y si vuelve a no cumplir pasa a <b>proceso de retiro</b>. Cumpliendo el mes se vuelve a estar al día.
+                        </div>
+                      </div>)}
+                  </div>
+                );})()}
+                </div>)}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={genImg} onClick={()=>setVerImg(null)}>Cerrar</button>
+              <button className="btn" disabled={genImg} style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}}
+                onClick={compartir}>{genImg?"Generando…":"📲 Compartir imagen"}</button>
+            </div>
+          </div>
+        </div>
+      );})()}
+    </div>
+  );
+}
+
+// ============================================================
 // TURNOS — cuadro cíclico por sede
 //   La plantilla guarda POSICIONES (0,1,2), no nombres: al cambiar la lista
 //   de empleados, todo el calendario futuro se actualiza solo.
@@ -2012,12 +3361,6 @@ function Turnos({showToast, quien, sedes, emps}){
   // ---- enviar la quincena por WhatsApp ----
   // Sin número: WhatsApp abre el selector de chat y eliges el grupo de la sede.
   const [wa,setWa]=useState(null);            // {q:1|2, texto}
-  // Quita el apellido (la última palabra) y deja los nombres de pila:
-  // "Luis Ferney Marin" -> "Luis Ferney", "Nicolas Moreno" -> "Nicolas".
-  // No sirve tomar solo la 1ª palabra: a Luis Ferney y a Juan David se les
-  // dice por el segundo nombre.
-  const nombreCorto=n=>{ const p=String(n||"").trim().split(/\s+/).filter(Boolean);
-    return p.length>1 ? p.slice(0,-1).join(" ") : (p[0]||""); };
   const hCorta=t=>{ const [h,mm]=hhmm(t).split(":").map(Number);
     const ap=h<12?"am":"pm"; const h12=h%12===0?12:h%12;
     return h12+(mm?(":"+String(mm).padStart(2,"0")):"")+ap; };
@@ -3304,7 +4647,7 @@ const convInsumo=u=>(u==='g'||u==='ml')?1000:1;
 // Ojo: acepta 0 como "desde" (se usa para formatear una duración suelta en ms).
 const fmtDur=(desde,hasta)=>{ if(desde==null||hasta==null||desde===''||hasta==='') return '—'; let ms=new Date(hasta)-new Date(desde); if(!isFinite(ms)) return '—'; if(ms<0) ms=0; const min=Math.floor(ms/60000); const d=Math.floor(min/1440), h=Math.floor((min%1440)/60), m=min%60; return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'; };
 
-function Produccion({showToast}){
+function Produccion({showToast, quien}){
   const [sub,setSub]=useState("insumos");
   const [clave,setClave]=useState(null);    // clave verificada (fórmulas desbloqueadas) o null
   const [existe,setExiste]=useState(true);
@@ -3314,7 +4657,7 @@ function Produccion({showToast}){
   return (
     <div>
       <div className="subnav">
-        {[["insumos","Insumos"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["producir","🧪 Producir granel"],["historial","Historial"]].map(([k,l])=>(
+        {[["insumos","Insumos"],["compras","🛒 Compras"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["producir","🧪 Producir granel"],["historial","Historial"]].map(([k,l])=>(
           <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
         ))}
       </div>
@@ -3326,6 +4669,7 @@ function Produccion({showToast}){
       </div>
 
       {sub==="insumos"   && <Insumos showToast={showToast}/>}
+      {sub==="compras"   && <Compras showToast={showToast} quien={quien}/>}
       {sub==="recetas"   && <Recetas showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
       {sub==="costeo"    && <Costeo showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
       {sub==="envasar"   && <Envasar showToast={showToast} clave={clave} onUnlock={onUnlock}/>}
@@ -3471,6 +4815,491 @@ function Insumos({showToast}){
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={()=>setCarga(null)}>Cancelar</button>
               <button className="btn btn-amber" disabled={!(Number(carga.cantidad)>0)} onClick={()=>cargar(carga)}>Cargar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// COMPRAS DE INSUMOS — proveedores y órdenes de compra
+//   La orden se arma por stock mínimo o a mano, se envía como imagen
+//   por WhatsApp, y al recibirla suma el stock y actualiza el costo.
+// ============================================================
+const OC_ESTADO={
+  borrador:{lbl:"Borrador", c:"var(--td)",  bg:"var(--sf3)"},
+  enviada :{lbl:"Enviada",  c:"var(--amber)",bg:"var(--amber-d)"},
+  recibida:{lbl:"Recibida", c:"var(--green)",bg:"var(--green-d)"},
+  anulada :{lbl:"Anulada",  c:"var(--red)",  bg:"var(--red-d)"},
+};
+
+function Compras({showToast, quien}){
+  const [vista,setVista]=useState('ordenes');     // 'ordenes' | 'proveedores'
+  const [ordenes,setOrdenes]=useState(null);
+  const [provs,setProvs]=useState([]);
+  const [insumos,setInsumos]=useState([]);
+  const [ed,setEd]=useState(null);                // orden en edición
+  const [ver,setVer]=useState(null);              // {orden, items} para ver/compartir
+  const [rec,setRec]=useState(null);              // {orden, items} en recepción
+  const [edProv,setEdProv]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [q,setQ]=useState("");                    // buscador de insumos al agregar
+  const [genImg,setGenImg]=useState(false);
+  // Confirmación propia: window.confirm() no funciona dentro del previsualizador
+  // (devuelve "cancelar" solo), así que el botón parecía no hacer nada.
+  const [conf,setConf]=useState(null);            // {titulo, texto, textoBoton, peligro, onOk}
+
+  const cargar=async()=>{
+    try{
+      const [o,p,i]=await Promise.all([db.listOrdenes(), db.listProveedores(), db.listInsumos()]);
+      setOrdenes(o); setProvs(p); setInsumos(i);
+    }catch(e){ showToast(""+(e.message||e),"err"); setOrdenes([]); }
+  };
+  useEffect(()=>{ cargar(); },[]);
+
+  const bajoMinimo=(insumos||[]).filter(i=>Number(i.stock_minimo)>0 && Number(i.stock)<=Number(i.stock_minimo));
+  const sinMinimo=(insumos||[]).filter(i=>!Number(i.stock_minimo)).length;
+
+  // ---------- armar / editar una orden ----------
+  const nuevaOrden=()=>setEd({id:null, proveedor_id:(provs[0]||{}).id||"", fecha:fLocalDia(new Date()),
+    nota:"", estado:'borrador', items:[]});
+  const abrirOrden=async(o)=>{
+    try{ const {orden,items}=await db.getOrden(o.id);
+      if(orden.estado==='recibida'||orden.estado==='anulada'){ setVer({orden,items}); return; }
+      setEd({id:orden.id, proveedor_id:orden.proveedor_id||"", fecha:orden.fecha, nota:orden.nota||"",
+        estado:orden.estado, items:items.map(x=>({key:uid(), insumo_id:x.insumo_id, nombre:x.nombre,
+          unidad:x.unidad, cantidad:String(Number(x.cantidad)), precio_unit:String(Number(x.precio_unit))}))});
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const verOrden=async(o)=>{ try{ setVer(await db.getOrden(o.id)); }catch(e){ showToast(""+(e.message||e),"err"); } };
+
+  const addLinea=(ins,cant,precio)=>setEd(d=>{
+    if(d.items.some(x=>x.insumo_id===ins.id)) return d;   // ya está
+    return {...d, items:[...d.items,{key:uid(), insumo_id:ins.id, nombre:ins.nombre, unidad:ins.unidad,
+      cantidad:String(cant==null?"":cant), precio_unit:String(precio==null?(Number(ins.costo)||0):precio)}]};
+  });
+  const setLinea=(k,patch)=>setEd(d=>({...d,items:d.items.map(x=>x.key===k?{...x,...patch}:x)}));
+  const delLinea=k=>setEd(d=>({...d,items:d.items.filter(x=>x.key!==k)}));
+  const sugerir=async(tipo)=>{
+    try{
+      const s=await db.sugerenciaCompra(ed.proveedor_id||null, tipo||null);
+      if(!s.length){ showToast(sinMinimo===insumos.length
+        ? "Ningún insumo tiene stock mínimo definido todavía"
+        : ("No hay "+(tipo==='quimico'?"químicos":tipo==='empaque'?"empaques":"insumos")+" bajo el mínimo"),"err"); return; }
+      setEd(d=>{
+        const ya=new Set(d.items.map(x=>x.insumo_id));
+        const nuevos=s.filter(x=>!ya.has(x.insumo_id)).map(x=>({key:uid(), insumo_id:x.insumo_id,
+          nombre:x.nombre, unidad:x.unidad, cantidad:String(Math.max(0,Number(x.sugerido)||0)),
+          precio_unit:String(Number(x.precio)||0)}));
+        return {...d, items:[...d.items,...nuevos]};
+      });
+      showToast(s.length+" insumo(s) bajo mínimo agregados","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const totalEd=(ed?ed.items:[]).reduce((a,x)=>a+(Number(x.cantidad)||0)*(Number(x.precio_unit)||0),0);
+  const guardar=async(estado)=>{
+    const items=ed.items.filter(x=>Number(x.cantidad)>0)
+      .map(x=>({insumo_id:x.insumo_id, nombre:x.nombre, unidad:x.unidad,
+        cantidad:Number(x.cantidad)||0, precio_unit:Number(x.precio_unit)||0}));
+    if(!items.length){ showToast("Agrega al menos un insumo con cantidad","err"); return; }
+    if(!ed.proveedor_id){ showToast("Elige el proveedor","err"); return; }
+    setBusy(true);
+    try{ await db.guardarOrden({...ed, estado, items, creado_por:quien});
+      setEd(null); await cargar(); showToast(estado==='enviada'?"Orden marcada como enviada ✓":"Orden guardada ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+
+  // ---------- recibir ----------
+  const abrirRecepcion=async(o)=>{
+    try{ const {orden,items}=await db.getOrden(o.id);
+      setRec({orden, items:items.map(x=>({...x, recibido:String(Number(x.cantidad)), precio_unit:String(Number(x.precio_unit))}))});
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+  };
+  const setRecLinea=(id,patch)=>setRec(r=>({...r,items:r.items.map(x=>x.id===id?{...x,...patch}:x)}));
+  const confirmarRecepcion=async()=>{
+    setBusy(true);
+    try{
+      const items=rec.items.map(x=>({item_id:x.id, recibido:Number(x.recibido)||0, precio_unit:Number(x.precio_unit)||0}));
+      const r=await db.recibirOrden(rec.orden.id, items, quien);
+      setRec(null); await cargar();
+      showToast("Recibida ✓ · "+(r&&r.insumos_actualizados||0)+" insumo(s) actualizados","ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+  const totalRec=(rec?rec.items:[]).reduce((a,x)=>a+(Number(x.recibido)||0)*(Number(x.precio_unit)||0),0);
+
+  const anular=(o)=>setConf({
+    titulo:"Anular orden "+o.numero,
+    texto:"Queda registrada como anulada, para que se vea que se pidió y no llegó. No toca el inventario.",
+    textoBoton:"Anular", peligro:false,
+    onOk:async()=>{ await db.anularOrden(o.id); await cargar(); showToast("Orden anulada ✓","ok"); }
+  });
+  // Borrado real: solo de órdenes que NUNCA movieron inventario.
+  const borrarOrden=(o)=>setConf({
+    titulo:"Borrar orden "+o.numero,
+    texto:"Se elimina por completo, con sus líneas. Úsalo para órdenes de prueba o mal creadas. Esto no se puede deshacer.",
+    textoBoton:"Borrar", peligro:true,
+    onOk:async()=>{ await db.borrarOrden(o.id); await cargar(); showToast("Orden borrada ✓","ok"); }
+  });
+
+  // ---------- proveedores ----------
+  const guardarProv=async()=>{
+    if(!(edProv.nombre||"").trim()){ showToast("Ponle nombre al proveedor","err"); return; }
+    setBusy(true);
+    try{ await db.saveProveedor(edProv); setEdProv(null); await cargar(); showToast("Proveedor guardado ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); }
+  };
+  const borrarProv=(p)=>setConf({
+    titulo:"Quitar proveedor",
+    texto:"\""+p.nombre+"\" deja de aparecer al crear órdenes. Las órdenes que ya tiene se conservan con su nombre.",
+    textoBoton:"Quitar", peligro:true,
+    onOk:async()=>{ await db.borrarProveedor(p.id); await cargar(); showToast("Proveedor quitado ✓","ok"); }
+  });
+
+  // ---------- imagen para WhatsApp ----------
+  const compartirOrden=async()=>{
+    const node=document.getElementById('oc-img-card');
+    if(!node){ showToast("No se encontró la orden","err"); return; }
+    if(typeof html2canvas==='undefined'){ showToast("Generador de imagen no cargó (revisa internet)","err"); return; }
+    setGenImg(true);
+    try{
+      const canvas=await html2canvas(node,{scale:2, backgroundColor:'#ffffff', useCORS:true});
+      const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+      const fname='Orden_'+(ver.orden.numero||'compra')+'.png';
+      const file=new File([blob],fname,{type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        await navigator.share({files:[file], title:'Orden de compra '+ver.orden.numero,
+          text:'Orden de compra '+ver.orden.numero+' — Panzer'});
+      } else {
+        const url=URL.createObjectURL(blob); const a=document.createElement('a');
+        a.href=url; a.download=fname; a.click(); URL.revokeObjectURL(url);
+        showToast("Imagen descargada — adjúntala en WhatsApp","ok");
+      }
+    }catch(e){ if(e&&e.name!=='AbortError') showToast("No se pudo generar la imagen: "+(e.message||e),"err"); }
+    finally{ setGenImg(false); }
+  };
+
+  if(ordenes===null) return <div className="empty">Cargando compras…</div>;
+
+  const pill=e=>{ const s=OC_ESTADO[e]||OC_ESTADO.borrador;
+    return <span className="pill" style={{background:s.bg,color:s.c,fontWeight:800}}>{s.lbl}</span>; };
+  const candidatos=(insumos||[]).filter(i=>{
+    if(!q.trim()) return false;
+    if(ed && ed.items.some(x=>x.insumo_id===i.id)) return false;
+    return i.nombre.toLowerCase().includes(q.trim().toLowerCase());
+  }).slice(0,8);
+
+  return (
+    <div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="sec-title" style={{marginRight:"auto"}}>Compras de insumos</div>
+        <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4}}>
+          <button className={"btn btn-sm "+(vista==='ordenes'?'btn-amber':'btn-ghost')} onClick={()=>setVista('ordenes')}>🛒 Órdenes</button>
+          <button className={"btn btn-sm "+(vista==='proveedores'?'btn-amber':'btn-ghost')} onClick={()=>setVista('proveedores')}>🏭 Proveedores</button>
+        </div>
+        {vista==='ordenes'
+          ? <button className="btn btn-amber btn-sm" onClick={nuevaOrden} disabled={!provs.length}>＋ Nueva orden</button>
+          : <button className="btn btn-amber btn-sm" onClick={()=>setEdProv({nombre:"",contacto:"",telefono:"",email:"",nota:"",activo:true})}>＋ Proveedor</button>}
+      </div>
+
+      {!provs.length && (
+        <div className="card" style={{marginBottom:12,background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)"}}>
+          <b style={{color:"var(--amber)"}}>Primero crea un proveedor.</b>{" "}
+          <span className="muted">Una orden de compra necesita a quién pedírsela. Ve a 🏭 Proveedores → ＋ Proveedor.</span>
+        </div>
+      )}
+
+      {vista==='ordenes' && (<div>
+        <div className="cards" style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+          <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Órdenes</div><div style={{fontSize:24,fontWeight:800}}>{ordenes.length}</div></div>
+          <div className="card" style={{flex:"1 1 150px"}}><div className="muted">Pendientes por recibir</div>
+            <div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{ordenes.filter(o=>o.estado==='enviada').length}</div></div>
+          <div className="card" style={{flex:"1 1 150px"}}><div className="muted">⚠ Bajo mínimo</div>
+            <div style={{fontSize:24,fontWeight:800,color:bajoMinimo.length?"var(--red)":"var(--green)"}}>{bajoMinimo.length}</div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Comprado (recibido)</div>
+            <div style={{fontSize:24,fontWeight:800}}>{fmt(ordenes.filter(o=>o.estado==='recibida').reduce((a,o)=>a+(Number(o.total)||0),0))}</div></div>
+        </div>
+
+        {sinMinimo>0 && (
+          <div className="muted" style={{fontSize:12,marginBottom:10}}>
+            💡 <b>{sinMinimo} de {insumos.length} insumos no tienen stock mínimo.</b> Sin mínimo, el sistema no puede sugerirte qué reponer.
+            Ponlo en <b>Insumos → Editar → Stock mínimo</b> y el botón “⚠ Sugerir bajo mínimo” arma la orden sola.
+          </div>
+        )}
+
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Orden</th><th>Fecha</th><th>Proveedor</th><th>Estado</th><th className="num">Total</th><th></th></tr></thead>
+            <tbody>
+              {ordenes.length===0 && <tr><td colSpan="6"><div className="empty">Sin órdenes todavía. Crea la primera con ＋ Nueva orden.</div></td></tr>}
+              {ordenes.map(o=>(
+                <tr key={o.id}>
+                  <td className="row-name">{o.numero}</td>
+                  <td className="muted">{o.fecha}</td>
+                  <td>{o.proveedor_nombre||"—"}</td>
+                  <td>{pill(o.estado)}{o.estado==='recibida'&&o.recibida_at?<div className="muted" style={{fontSize:11}}>{fLocalDia(o.recibida_at)}</div>:null}</td>
+                  <td className="num" style={{fontWeight:700}}>{fmt(o.total)}</td>
+                  <td><div className="actions">
+                    <button className="btn btn-ghost btn-sm" onClick={()=>verOrden(o)}>Ver</button>
+                    {(o.estado==='borrador'||o.estado==='enviada') && <button className="btn btn-ghost btn-sm" onClick={()=>abrirOrden(o)}>Editar</button>}
+                    {o.estado==='enviada' && <button className="btn btn-amber btn-sm" onClick={()=>abrirRecepcion(o)}>📥 Recibir</button>}
+                    {o.estado!=='recibida'&&o.estado!=='anulada' && <button className="btn btn-ghost btn-sm" onClick={()=>anular(o)} title="Se pidió pero no llegó">⊘ Anular</button>}
+                    {o.estado!=='recibida' && <button className="btn btn-danger btn-sm" onClick={()=>borrarOrden(o)} title="Borrar por completo">✕</button>}
+                  </div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>)}
+
+      {vista==='proveedores' && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Proveedor</th><th>Contacto</th><th>Teléfono</th><th>Nota</th><th></th></tr></thead>
+            <tbody>
+              {provs.length===0 && <tr><td colSpan="5"><div className="empty">Sin proveedores. Crea el primero.</div></td></tr>}
+              {provs.map(p=>(
+                <tr key={p.id}>
+                  <td className="row-name">{p.nombre}</td>
+                  <td className="muted">{p.contacto||"—"}</td>
+                  <td>{p.telefono
+                    ? <a href={"https://wa.me/57"+String(p.telefono).replace(/\D/g,'')} target="_blank" rel="noopener" style={{color:"var(--green)"}}>{p.telefono}</a>
+                    : <span className="muted">—</span>}</td>
+                  <td className="muted">{p.nota||"—"}</td>
+                  <td><div className="actions">
+                    <button className="btn btn-ghost btn-sm" onClick={()=>setEdProv({...p})}>Editar</button>
+                    <button className="btn btn-danger btn-sm" onClick={()=>borrarProv(p)}>✕</button>
+                  </div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ---------- editor de orden ---------- */}
+      {ed && (
+        <div className="modal-bg" onClick={()=>!busy&&setEd(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:720}}>
+            <div className="modal-t">🛒 {ed.id?"Editar orden":"Nueva orden de compra"}</div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 200px"}}><label className="label">Proveedor</label>
+                <select className="select" value={ed.proveedor_id} onChange={e=>setEd(d=>({...d,proveedor_id:e.target.value}))}>
+                  <option value="">— Elige proveedor —</option>
+                  {provs.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+                </select></div>
+              <div style={{flex:"1 1 130px"}}><label className="label">Fecha</label>
+                <input className="input" type="date" value={ed.fecha} onChange={e=>setEd(d=>({...d,fecha:e.target.value}))}/></div>
+            </div>
+
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"center"}}>
+              <span className="muted" style={{fontSize:12,fontWeight:700}}>⚠ Sugerir bajo mínimo:</span>
+              <button className="btn btn-ghost btn-sm" onClick={()=>sugerir('quimico')}>🧪 Químicos</button>
+              <button className="btn btn-ghost btn-sm" onClick={()=>sugerir('empaque')}>📦 Empaque</button>
+              <button className="btn btn-ghost btn-sm" onClick={()=>sugerir(null)}>Todo</button>
+              {ed.items.length>0 && <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={()=>setEd(d=>({...d,items:[]}))}>Vaciar</button>}
+            </div>
+
+            <label className="label">Agregar insumo</label>
+            <input className="input" value={q} onChange={e=>setQ(e.target.value)} placeholder="Escribe para buscar…"/>
+            {candidatos.length>0 && (
+              <div className="card" style={{padding:6,marginBottom:10}}>
+                {candidatos.map(i=>(
+                  <div key={i.id} onClick={()=>{addLinea(i); setQ("");}}
+                       style={{padding:"6px 8px",cursor:"pointer",borderRadius:8,display:"flex",gap:8,alignItems:"center"}}
+                       onMouseEnter={e=>e.currentTarget.style.background="var(--sf3)"}
+                       onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                    <b style={{flex:1}}>{i.nombre}</b>
+                    <span className="muted" style={{fontSize:12}}>stock {Number(i.stock)} {i.unidad}</span>
+                    <span className="muted" style={{fontSize:12}}>{fmt(i.costo)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {ed.items.length===0
+              ? <div className="empty" style={{padding:"18px 0"}}>Sin líneas. Usa “⚠ Sugerir bajo mínimo” o busca un insumo arriba.</div>
+              : (<div style={{overflowX:"auto"}}>
+                <table className="tbl">
+                  <thead><tr><th>Insumo</th><th className="num">Cantidad</th><th className="num">Precio/u</th><th className="num">Subtotal</th><th></th></tr></thead>
+                  <tbody>
+                    {ed.items.map(x=>(
+                      <tr key={x.key}>
+                        <td className="row-name">{x.nombre}<div className="muted" style={{fontSize:11}}>{x.unidad}</div></td>
+                        <td className="num"><input className="input" style={{margin:0,maxWidth:100,textAlign:"right"}} type="number" value={x.cantidad}
+                          onChange={e=>setLinea(x.key,{cantidad:e.target.value})}/></td>
+                        <td className="num"><input className="input" style={{margin:0,maxWidth:120,textAlign:"right"}} type="number" value={x.precio_unit}
+                          onChange={e=>setLinea(x.key,{precio_unit:e.target.value})}/></td>
+                        <td className="num" style={{fontWeight:700}}>{fmt((Number(x.cantidad)||0)*(Number(x.precio_unit)||0))}</td>
+                        <td><button className="btn btn-ghost btn-sm" onClick={()=>delLinea(x.key)}>✕</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot><tr style={{borderTop:"2px solid var(--bd2)"}}>
+                    <td colSpan="3" style={{fontWeight:800}}>TOTAL</td>
+                    <td className="num" style={{fontWeight:900,color:"var(--amber)"}}>{fmt(totalEd)}</td><td></td>
+                  </tr></tfoot>
+                </table>
+              </div>)}
+
+            <label className="label" style={{marginTop:10}}>Nota para el proveedor (opcional)</label>
+            <input className="input" value={ed.nota} onChange={e=>setEd(d=>({...d,nota:e.target.value}))} placeholder="Entrega, forma de pago…"/>
+
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEd(null)}>Cancelar</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>guardar('borrador')}>Guardar borrador</button>
+              <button className="btn btn-amber" disabled={busy} onClick={()=>guardar('enviada')}>{busy?"Guardando…":"✅ Marcar enviada"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- ver orden + imagen para WhatsApp ---------- */}
+      {ver && ver.orden && (
+        <div className="modal-bg" onClick={()=>!genImg&&setVer(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:620}}>
+            <div className="modal-t">🛒 Orden {ver.orden.numero}</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:10,fontSize:13}}>Así le llega la imagen al proveedor:</div>
+            <div style={{overflow:"auto",maxHeight:420,border:"1px solid var(--bd)",borderRadius:10,background:"#fff"}}>
+              {/* Colores fijos: la imagen debe verse igual sin importar el tema */}
+              <div id="oc-img-card" style={{background:"#ffffff",padding:22,width:"fit-content",minWidth:480,
+                   fontFamily:"'Outfit',system-ui,sans-serif",color:"#0f172a"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+                  <div style={{background:"#2563eb",color:"#fff",borderRadius:10,padding:"7px 12px",
+                               fontSize:15,fontWeight:900,letterSpacing:1}}>PANZER</div>
+                  <div>
+                    <div style={{fontSize:19,fontWeight:900,letterSpacing:-.3}}>ORDEN DE COMPRA {ver.orden.numero}</div>
+                    <div style={{fontSize:13,color:"#64748b",fontWeight:600}}>
+                      {ver.orden.proveedor_nombre||"—"} · {ver.orden.fecha}
+                      {ver.orden.estado==='recibida' && <span style={{color:"#16a34a",fontWeight:800}}> · RECIBIDA</span>}
+                      {ver.orden.estado==='anulada' && <span style={{color:"#dc2626",fontWeight:800}}> · ANULADA</span>}
+                    </div>
+                  </div>
+                </div>
+                <table style={{borderCollapse:"collapse",width:"100%"}}>
+                  <thead><tr>
+                    {["Insumo","Cantidad","Precio/u","Subtotal"].map((h,i)=>(
+                      <th key={h} style={{padding:"7px 10px",border:"1px solid #e2e8f0",background:"#f8fafc",
+                        fontSize:12,fontWeight:800,color:"#475569",textAlign:i?"right":"left"}}>{h}</th>))}
+                  </tr></thead>
+                  <tbody>
+                    {/* En una orden ya recibida se muestra lo que REALMENTE llegó:
+                        si no, las líneas no suman el total y la imagen queda incoherente. */}
+                    {ver.items.map(x=>{ const recibida=ver.orden.estado==='recibida' && x.recibido!=null;
+                      const cant=recibida?Number(x.recibido):Number(x.cantidad);
+                      const menos=recibida && Number(x.recibido)!==Number(x.cantidad); return (
+                      <tr key={x.id}>
+                        <td style={{padding:"7px 10px",border:"1px solid #e2e8f0",fontSize:13,fontWeight:700}}>{x.nombre}</td>
+                        <td style={{padding:"7px 10px",border:"1px solid #e2e8f0",fontSize:13,textAlign:"right",whiteSpace:"nowrap"}}>
+                          {cant} {x.unidad||""}
+                          {menos && <div style={{fontSize:10,color:"#b45309",fontWeight:700}}>pedido: {Number(x.cantidad)}</div>}</td>
+                        <td style={{padding:"7px 10px",border:"1px solid #e2e8f0",fontSize:13,textAlign:"right"}}>{fmt(x.precio_unit)}</td>
+                        <td style={{padding:"7px 10px",border:"1px solid #e2e8f0",fontSize:13,textAlign:"right",fontWeight:700}}>
+                          {fmt(cant*Number(x.precio_unit))}</td>
+                      </tr>
+                    );})}
+                  </tbody>
+                  <tfoot><tr>
+                    <td colSpan="3" style={{padding:"9px 10px",border:"1px solid #e2e8f0",background:"#f8fafc",
+                      fontSize:13,fontWeight:900,textAlign:"right"}}>TOTAL</td>
+                    <td style={{padding:"9px 10px",border:"1px solid #e2e8f0",background:"#f8fafc",
+                      fontSize:15,fontWeight:900,textAlign:"right",color:"#2563eb"}}>{fmt(ver.orden.total)}</td>
+                  </tr></tfoot>
+                </table>
+                {ver.orden.nota && <div style={{marginTop:12,fontSize:13,color:"#475569"}}><b>Nota:</b> {ver.orden.nota}</div>}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={genImg} onClick={()=>setVer(null)}>Cerrar</button>
+              {ver.orden.estado==='enviada' && <button className="btn btn-ghost" onClick={()=>{const o=ver.orden; setVer(null); abrirRecepcion(o);}}>📥 Recibir</button>}
+              <button className="btn" disabled={genImg} style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={compartirOrden}>
+                {genImg?"Generando…":"📲 Compartir imagen"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- recepción ---------- */}
+      {rec && (
+        <div className="modal-bg" onClick={()=>!busy&&setRec(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:660}}>
+            <div className="modal-t">📥 Recibir orden {rec.orden.numero}</div>
+            <div className="muted" style={{marginTop:-6,marginBottom:12,fontSize:13}}>
+              Ajusta lo que <b>realmente llegó</b> y lo que <b>realmente pagaste</b>. Al confirmar se suma al stock y se actualiza el costo de cada insumo.
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Insumo</th><th className="num">Pedido</th><th className="num">Recibido</th><th className="num">Precio/u</th><th className="num">Subtotal</th></tr></thead>
+                <tbody>
+                  {rec.items.map(x=>{ const dif=Number(x.recibido)!==Number(x.cantidad); return (
+                    <tr key={x.id}>
+                      <td className="row-name">{x.nombre}<div className="muted" style={{fontSize:11}}>{x.unidad}</div></td>
+                      <td className="num muted">{Number(x.cantidad)}</td>
+                      <td className="num"><input className="input" style={{margin:0,maxWidth:100,textAlign:"right",
+                        borderColor:dif?"var(--amber)":undefined}} type="number" value={x.recibido}
+                        onChange={e=>setRecLinea(x.id,{recibido:e.target.value})}/></td>
+                      <td className="num"><input className="input" style={{margin:0,maxWidth:120,textAlign:"right"}} type="number" value={x.precio_unit}
+                        onChange={e=>setRecLinea(x.id,{precio_unit:e.target.value})}/></td>
+                      <td className="num" style={{fontWeight:700}}>{fmt((Number(x.recibido)||0)*(Number(x.precio_unit)||0))}</td>
+                    </tr>
+                  );})}
+                </tbody>
+                <tfoot><tr style={{borderTop:"2px solid var(--bd2)"}}>
+                  <td colSpan="4" style={{fontWeight:800}}>TOTAL RECIBIDO</td>
+                  <td className="num" style={{fontWeight:900,color:"var(--amber)"}}>{fmt(totalRec)}</td>
+                </tr></tfoot>
+              </table>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setRec(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={confirmarRecepcion}>{busy?"Recibiendo…":"✅ Confirmar y sumar al stock"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- confirmación (no se usa window.confirm: el previsualizador lo bloquea) ---------- */}
+      {conf && (
+        <div className="modal-bg" onClick={()=>!busy&&setConf(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:400}}>
+            <div className="modal-t">{conf.peligro?"⚠ ":""}{conf.titulo}</div>
+            <div className="muted" style={{fontSize:14,marginBottom:4}}>{conf.texto}</div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setConf(null)}>Cancelar</button>
+              <button className={"btn "+(conf.peligro?"btn-danger":"btn-amber")} disabled={busy}
+                onClick={async()=>{ setBusy(true);
+                  try{ await conf.onOk(); setConf(null); }
+                  catch(e){ showToast(""+(e.message||e),"err"); }
+                  finally{ setBusy(false); } }}>
+                {busy?"Un momento…":conf.textoBoton}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- proveedor ---------- */}
+      {edProv && (
+        <div className="modal-bg" onClick={()=>!busy&&setEdProv(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:420}}>
+            <div className="modal-t">🏭 {edProv.id?"Editar proveedor":"Nuevo proveedor"}</div>
+            <label className="label">Nombre</label>
+            <input className="input" autoFocus value={edProv.nombre} onChange={e=>setEdProv(p=>({...p,nombre:e.target.value}))} placeholder="Ej. Químicos del Valle"/>
+            <label className="label">Contacto</label>
+            <input className="input" value={edProv.contacto||""} onChange={e=>setEdProv(p=>({...p,contacto:e.target.value}))} placeholder="Nombre del vendedor"/>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 140px"}}><label className="label">WhatsApp</label>
+                <input className="input" value={edProv.telefono||""} onChange={e=>setEdProv(p=>({...p,telefono:e.target.value}))} placeholder="3001234567"/></div>
+              <div style={{flex:"1 1 160px"}}><label className="label">Correo</label>
+                <input className="input" value={edProv.email||""} onChange={e=>setEdProv(p=>({...p,email:e.target.value}))}/></div>
+            </div>
+            <label className="label">Nota</label>
+            <input className="input" value={edProv.nota||""} onChange={e=>setEdProv(p=>({...p,nota:e.target.value}))} placeholder="Días de entrega, forma de pago…"/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setEdProv(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy} onClick={guardarProv}>{busy?"Guardando…":"Guardar"}</button>
             </div>
           </div>
         </div>
@@ -7140,6 +8969,7 @@ function Membresias({showToast, admin}){
           <button className={"btn btn-sm "+(vista==='movimientos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('movimientos')}>📍 Por sede</button>
           <button className={"btn btn-sm "+(vista==='origen'?'btn-amber':'btn-ghost')} onClick={()=>setVista('origen')}>🗺️ Origen</button>
           <button className={"btn btn-sm "+(vista==='cortesias'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cortesias')}>🎟️ Cortesías</button>
+          <button className={"btn btn-sm "+(vista==='concilia'?'btn-amber':'btn-ghost')} onClick={()=>setVista('concilia')}>🔍 Conciliación</button>
         </div>
       </div>
 
@@ -7357,39 +9187,11 @@ function Membresias({showToast, admin}){
       )}
 
       {/* ===== CORTESÍAS DE APERTURA ===== */}
+      {vista==='concilia' && <ConciliacionMembresias showToast={showToast}/>}
+
       {vista==='cortesias' && (
         <div>
-          <div className="card" style={{marginBottom:14}}>
-            <div className="card-t">🔗 Genera el link para tu pauta</div>
-            <div className="muted" style={{marginBottom:10,fontSize:12}}>Elige la sede de la apertura y (opcional) un nombre de campaña. Ese link va en tu publicación de Instagram; quien se registre recibe 1 lavada de cortesía canjeable solo en esa sede.</div>
-            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-              <div className="fld"><label className="label">Sede de apertura</label>
-                <select className="select" style={{margin:0,minWidth:180}} value={cortSedeGen} onChange={e=>setCortSedeGen(e.target.value)}>
-                  <option value="">— Elige sede —</option>
-                  {sedesList.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
-                </select></div>
-              <div className="fld"><label className="label">También vale en (opcional)</label>
-                <select className="select" style={{margin:0,minWidth:180}} value={cortSede2} onChange={e=>setCortSede2(e.target.value)}>
-                  <option value="">— Solo una sede —</option>
-                  {sedesList.filter(s=>s.nombre!==cortSedeGen).map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}
-                </select></div>
-              <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Campaña (opcional)</label>
-                <input className="input" style={{margin:0}} value={cortCampana} onChange={e=>setCortCampana(e.target.value)} placeholder="ej. apertura-bello-julio"/></div>
-            </div>
-            {cortSedeGen && (()=>{
-              const sedeParam=cortSedeGen+(cortSede2?('|'+cortSede2):'');
-              const url=linkCortesia(sedeParam, cortCampana.trim());
-              return (
-                <div style={{marginTop:12}}>
-                  <div className="muted" style={{fontSize:12,marginBottom:4}}>Tu link:</div>
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                    <input className="input" style={{margin:0,flex:1,minWidth:220}} readOnly value={url} onFocus={e=>e.target.select()}/>
-                    <button className="btn btn-amber btn-sm" onClick={()=>copiarLink(url)}>Copiar</button>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
+          <Campanas showToast={showToast} sedes={sedesList}/>
 
           {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
             const sedeTxt=s=>String(s||'—').replace(/\|/g,' o ');   // "A|B" -> "A o B"

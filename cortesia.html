@@ -33,6 +33,11 @@
   .drow .k{color:#93a1b8;} .drow .v{font-weight:800;}
   .fine{color:#6b7a92;font-size:12px;text-align:center;margin-top:14px;line-height:1.5;}
   .hidden{display:none;}
+  select{width:100%;background:#161e2e;border:1px solid #2a3a58;border-radius:12px;padding:14px;color:#fff;font-size:16px;outline:none;margin-bottom:14px;}
+  .cupos{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);color:#f59e0b;
+    border-radius:12px;padding:10px 12px;font-size:14px;font-weight:800;text-align:center;margin-bottom:14px;}
+  .cupos.pocos{background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.4);color:#fca5a5;}
+  .btn-wa{background:#25D366;text-decoration:none;display:block;text-align:center;margin-top:10px;}
 </style>
 </head>
 <body>
@@ -41,17 +46,29 @@
 
     <!-- FORMULARIO -->
     <div class="card" id="form">
-      <span class="badge">🎁 CORTESÍA DE APERTURA</span>
-      <h1>¡Estrena la nueva sede <span class="sede" id="sedeName">Panzer</span>!</h1>
-      <p class="sub">Regístrate y llévate una <b>lavada de cortesía</b> para que pruebes nuestro sistema. Sin costo, sin trucos. 🚗✨</p>
-      <div class="gift"><span class="em">🪙</span><div>1 <b>token de cortesía</b> — 1 lavada gratis para estrenar la sede.</div></div>
+      <span class="badge" id="badge">🎁 CORTESÍA</span>
+      <h1 id="titulo">¡Estrena la nueva sede <span class="sede" id="sedeName">Panzer</span>!</h1>
+      <p class="sub" id="subtitulo">Regístrate y llévate una <b>lavada de cortesía</b> para que pruebes nuestro sistema. Sin costo, sin trucos. 🚗✨</p>
+      <div class="gift"><span class="em">🪙</span><div id="regalo">1 <b>token de cortesía</b> — 1 lavada gratis para estrenar la sede.</div></div>
+      <div id="cupos" class="cupos hidden"></div>
       <div class="err" id="err"></div>
+      <div id="sedePick" class="hidden">
+        <label>¿En qué sede vas a reclamarla?</label>
+        <select id="sedeSel"></select>
+      </div>
       <label>Tu nombre</label>
       <input id="nombre" type="text" placeholder="Nombre y apellido" autocomplete="name">
       <label>Tu WhatsApp</label>
       <input id="telefono" type="tel" inputmode="numeric" placeholder="Ej: 3001234567" autocomplete="tel">
       <button class="btn" id="btn" onclick="registrar()">Quiero mi cortesía 🎁</button>
-      <p class="fine">Al registrarte aceptas recibir información de Panzer Carwash. Una cortesía por persona.</p>
+      <p class="fine">Al registrarte aceptas recibir información de Panzer Carwash. Una por persona.</p>
+    </div>
+
+    <!-- CUPOS AGOTADOS -->
+    <div class="card hidden" id="agotado">
+      <div class="ok-em">😔</div>
+      <div class="ok-t">Se agotaron los cupos</div>
+      <p class="ok-s" id="agotadoSub">Llegaste unos minutos tarde. Guardamos tus datos y te avisamos apenas salga la próxima.</p>
     </div>
 
     <!-- ÉXITO -->
@@ -69,7 +86,8 @@
         <div class="drow"><span class="k">Sede</span><span class="v" id="okSede">—</span></div>
         <div class="drow"><span class="k">Válida hasta</span><span class="v" id="okVence">—</span></div>
       </div>
-      <p class="fine">📲 <b>Guarda este QR con un pantallazo.</b> Preséntalo en la máquina o en caja de la sede <b id="okSede2">—</b> para reclamar tu lavada gratis.</p>
+      <a class="btn btn-wa" id="btnWa" href="#" target="_blank" rel="noopener">📲 Enviármelo a mi WhatsApp</a>
+      <p class="fine">📲 <b>Guarda este QR con un pantallazo</b> o mándatelo por WhatsApp. Preséntalo en la máquina o en caja de <b id="okSede2">—</b> para reclamar tu lavada gratis.</p>
     </div>
   </div>
 
@@ -80,8 +98,11 @@
   const qs=new URLSearchParams(location.search);
   const SEDE=(qs.get('sede')||'').trim();
   const CAMPANA=(qs.get('campana')||qs.get('campaña')||'').trim();
+  const CODIGO=(qs.get('c')||'').trim();          // campaña configurada en el admin
+  const VER=(qs.get('ver')||'').trim();           // ver un QR ya creado (link de WhatsApp)
   const $=id=>document.getElementById(id);
   const sedeTxt=s=>String(s||'').replace(/\s*\(franquicia\)\s*/gi,'').replace(/\|/g,' o ').trim();  // "A (franquicia)|B" -> "A o B"
+  let CAMP=null;                                   // config de la campaña, si viene por código
   $('sedeName').textContent = SEDE ? sedeTxt(SEDE) : 'Panzer';
 
   // Mismo formato de QR que lee el sistema/las máquinas: JSON {id,nombre,membresia} vía api.qrserver.com
@@ -92,8 +113,54 @@
     if(n.length===12 && n.startsWith('57')) n=n.slice(2);
     if(n.length===13 && n.startsWith('057')) n=n.slice(3);
     return n; };
-  const claveLocal=()=>'panzer_cort_'+SEDE+'_'+CAMPANA;
+  const claveLocal=()=>'panzer_cort_'+(CODIGO||(SEDE+'_'+CAMPANA));
   const yaRegistrado=()=>{ try{ return JSON.parse(localStorage.getItem(claveLocal())||'null'); }catch(e){ return null; } };
+
+  // ---- carga la campaña configurada en el admin (si el link trae ?c=codigo) ----
+  async function cargarCampana(){
+    const { data, error } = await sb.rpc('campana_publica',{ p_codigo:CODIGO });
+    if(error || !data || !data.ok){
+      $('err').textContent='Este enlace no es válido. Pide el link correcto.';
+      $('btn').disabled=true; return;
+    }
+    CAMP=data;
+    if(data.titulo)       $('titulo').textContent=data.titulo;
+    if(data.subtitulo)    $('subtitulo').textContent=data.subtitulo;
+    if(data.texto_regalo) $('regalo').textContent=data.texto_regalo;
+    if(data.nombre)       $('badge').textContent='🎁 '+data.nombre.toUpperCase();
+    const sedes=data.sedes||[];
+    // Con una sola sede no se muestra el selector: se elige sola.
+    if(data.modo_sede==='elige' && sedes.length){
+      $('sedeSel').innerHTML=(sedes.length>1?'<option value="">— Elige la sede —</option>':'')+
+        sedes.map(s=>'<option value="'+s.replace(/"/g,'&quot;')+'">'+sedeTxt(s)+'</option>').join('');
+      $('sedeSel').value=sedes.length===1?sedes[0]:'';
+      if(sedes.length>1) $('sedePick').classList.remove('hidden');
+    }
+    // Ojo: si la campaña trae título propio, el <h1> se reescribe y el span
+    // #sedeName deja de existir. Por eso se consulta con guarda.
+    const sn=$('sedeName');
+    if(sn) sn.textContent = sedes.length ? sedeTxt(sedes.join('|')) : 'Panzer';
+    // cupos
+    if(data.limite!=null){
+      const r=data.restantes;
+      $('cupos').classList.remove('hidden');
+      $('cupos').textContent = r>0 ? ('¡Quedan '+r+' de '+data.limite+' cupos!') : 'Cupos agotados';
+      if(r<=Math.max(3,Math.round(data.limite*0.2))) $('cupos').classList.add('pocos');
+    }
+    // estados que impiden registrarse
+    if(data.estado!=='abierta'){
+      const msg={cerrada:'Esta promoción ya no está activa.',
+                 no_empieza:'Esta promoción todavía no empieza.',
+                 vencida:'Esta promoción ya terminó.',
+                 agotada:''}[data.estado];
+      if(data.estado==='agotada'){
+        // se deja registrar: queda en lista de espera
+        $('btn').textContent='Anotarme en la lista de espera';
+      } else {
+        $('err').textContent=msg; $('btn').disabled=true;
+      }
+    }
+  }
 
   async function registrar(){
     const nombre=$('nombre').value.trim();
@@ -101,21 +168,32 @@
     $('err').textContent='';
     if(nombre.length<3){ $('err').textContent='Escribe tu nombre completo.'; return; }
     if(!(tel.length===10 && tel.startsWith('3'))){ $('err').textContent='Escribe un celular válido de 10 dígitos que empiece por 3.'; return; }
-    if(!SEDE){ $('err').textContent='Falta la sede en el enlace. Pide el link correcto.'; return; }
+    const sedeElegida = (CAMP && CAMP.modo_sede==='elige') ? $('sedeSel').value : '';
+    if(CAMP && CAMP.modo_sede==='elige' && !sedeElegida){ $('err').textContent='Elige la sede donde vas a reclamarla.'; return; }
+    if(!CAMP && !SEDE){ $('err').textContent='Falta la sede en el enlace. Pide el link correcto.'; return; }
     // ya se registró desde este celular en esta campaña
     const prev=yaRegistrado();
     if(prev && prev.id){ mostrarOk(prev, prev.nombre||nombre, true); return; }
+    const txtBtn=$('btn').textContent;
     $('btn').disabled=true; $('btn').textContent='Registrando…';
     try{
-      const { data, error } = await sb.rpc('cortesia_crear',{ p_nombre:nombre, p_telefono:tel, p_sede:SEDE, p_campana:CAMPANA||null });
+      const { data, error } = CAMP
+        ? await sb.rpc('cortesia_crear_campana',{ p_codigo:CODIGO, p_nombre:nombre, p_telefono:tel, p_sede:sedeElegida||null })
+        : await sb.rpc('cortesia_crear',{ p_nombre:nombre, p_telefono:tel, p_sede:SEDE, p_campana:CAMPANA||null });
       if(error) throw error;
-      if(!data || !data.ok){ $('err').textContent=(data&&data.error)||'No se pudo registrar. Intenta de nuevo.'; $('btn').disabled=false; $('btn').textContent='Quiero mi cortesía 🎁'; return; }
-      const reg={id:data.id_vip, nombre:nombre, sede:data.sede||SEDE, vence:data.vence, existe:data.existe};
+      if(!data || !data.ok){ $('err').textContent=(data&&data.error)||'No se pudo registrar. Intenta de nuevo.'; $('btn').disabled=false; $('btn').textContent=txtBtn; return; }
+      if(data.agotada){   // llegó tarde: queda como lead
+        $('form').classList.add('hidden');
+        $('agotadoSub').textContent='Llegaste unos minutos tarde, '+nombre.split(' ')[0]+
+          '. Ya guardamos tus datos y te avisamos apenas salga la próxima promoción.';
+        $('agotado').classList.remove('hidden'); window.scrollTo(0,0); return;
+      }
+      const reg={id:data.id_vip, nombre:nombre, tel:tel, sede:data.sede||sedeElegida||SEDE, vence:data.vence, existe:data.existe};
       try{ localStorage.setItem(claveLocal(), JSON.stringify(reg)); }catch(e){}
       mostrarOk(reg, nombre, data.existe===true);
     }catch(e){
       $('err').textContent='Error de conexión. Revisa tu internet e intenta de nuevo.';
-      $('btn').disabled=false; $('btn').textContent='Quiero mi cortesía 🎁';
+      $('btn').disabled=false; $('btn').textContent=txtBtn;
     }
   }
 
@@ -128,14 +206,39 @@
     $('okSede2').textContent = sedeTxt(reg.sede||SEDE);
     $('okVence').textContent = reg.vence||'—';
     $('qrImg').src = qrImgSrc(reg.id, nombre||reg.nombre);
+    // Link para que se lo mande a su propio WhatsApp y le quede guardado en el chat
+    const link=location.origin+location.pathname+'?ver='+encodeURIComponent(reg.id);
+    const msg='🎁 *Mi cortesía Panzer Carwash*\n\n'+
+      'Código: *'+reg.id+'*\n'+
+      'Válida en: '+sedeTxt(reg.sede||SEDE)+'\n'+
+      (reg.vence?('Hasta el '+reg.vence+'\n'):'')+
+      '\nAbre este enlace para mostrar tu QR:\n'+link;
+    const wa=reg.tel ? ('https://wa.me/57'+reg.tel+'?text=') : 'https://wa.me/?text=';
+    $('btnWa').href = wa+encodeURIComponent(msg);
     $('form').classList.add('hidden');
     $('ok').classList.remove('hidden');
     window.scrollTo(0,0);
   }
 
+  // ---- modo "ver": abre el QR de una cortesía ya creada (link de WhatsApp) ----
+  async function verCortesia(){
+    try{
+      const { data } = await sb.rpc('cortesia_ver',{ p_id:VER });
+      if(!data || !data.ok){ $('err').textContent='No encontramos esa cortesía.'; return; }
+      mostrarOk({id:data.id_vip, nombre:data.nombre, sede:data.sede, vence:data.vence}, data.nombre, true);
+      if(data.estado==='canjeada'){ $('okTitle').textContent='Ya fue redimida'; $('okSub').textContent='Esta cortesía ya se usó.'; }
+      else if(data.vencida){ $('okTitle').textContent='Cortesía vencida'; $('okSub').textContent='Se venció el '+data.vence+'.'; }
+    }catch(e){ $('err').textContent='Error de conexión.'; }
+  }
+
   $('telefono').addEventListener('keydown',e=>{ if(e.key==='Enter') registrar(); });
-  // Si ya se registró desde este celular en esta campaña, se le muestra su QR (no puede sacar otra)
-  (function(){ const p=yaRegistrado(); if(p && p.id) mostrarOk(p, p.nombre, true); })();
+
+  (async function(){
+    if(VER){ $('form').classList.add('hidden'); await verCortesia(); return; }
+    if(CODIGO) await cargarCampana();
+    // Si ya se registró desde este celular en esta campaña, se le muestra su QR (no puede sacar otra)
+    const p=yaRegistrado(); if(p && p.id) mostrarOk(p, p.nombre, true);
+  })();
 </script>
 </body>
 </html>

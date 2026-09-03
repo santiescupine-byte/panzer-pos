@@ -1147,9 +1147,14 @@ const db = {
     const {error:e3}=await sb.from('sedes').update({fr_amort_acumulado:Number(p.liq.amort_acumulado)||0}).eq('nombre',p.liq.sede); if(e3) throw e3;
   },
   // ---- EMPLEADOS ----
-  async listEmpleados(){
-    if(DEMO_MODE) return DEMO.empleados.map(e=>({...e,sedes:[...e.sedes]}));
-    const {data:emps,error}=await sb.from('empleados').select('*').order('nombre');
+  // Por defecto NO devuelve archivados: así desaparecen solos de turnos,
+  // tareas, metas, liquidaciones y filtros. Solo Empleados pide verlos.
+  async listEmpleados(opts){
+    const conArchivados=!!(opts&&opts.archivados);
+    if(DEMO_MODE) return DEMO.empleados.filter(e=>conArchivados||!e.archivado).map(e=>({...e,sedes:[...e.sedes]}));
+    let q=sb.from('empleados').select('*').order('nombre');
+    if(!conArchivados) q=q.eq('archivado',false);
+    const {data:emps,error}=await q;
     if(error) throw error;
     const {data:rel}=await sb.from('empleado_sedes').select('empleado_id,sedes(nombre)');
     const bySede={}; (rel||[]).forEach(r=>{ (bySede[r.empleado_id]=bySede[r.empleado_id]||[]).push(r.sedes.nombre); });
@@ -1173,6 +1178,13 @@ const db = {
   async deleteEmpleado(id){
     if(DEMO_MODE){ DEMO.empleados=DEMO.empleados.filter(x=>x.id!==id); return; }
     const {error}=await sb.from('empleados').delete().eq('id',id); if(error) throw error;
+  },
+  // Archivar = esconderlo sin borrar nada. Se le quita el PIN y queda inactivo.
+  // Restaurar lo trae de vuelta, pero sigue inactivo hasta que lo edites.
+  async archivarEmpleado(id, archivar){
+    if(DEMO_MODE){ DEMO.empleados=DEMO.empleados.map(x=>x.id===id?{...x,archivado:!!archivar,activo:false,pin:archivar?null:x.pin}:x); return; }
+    const row=archivar?{archivado:true,archivado_en:new Date().toISOString(),activo:false,pin:null}:{archivado:false,archivado_en:null};
+    const {error}=await sb.from('empleados').update(row).eq('id',id); if(error) throw error;
   },
   // ---- PRODUCTOS ----
   async listProductos(){
@@ -1935,16 +1947,29 @@ function Empleados({showToast, quien}){
   const [emps,setEmps]=useState(null);
   const [sedes,setSedes]=useState([]);
   const [editing,setEditing]=useState(null);
-  const load=async()=>{ try{ const [e,s]=await Promise.all([db.listEmpleados(),db.listSedes()]); setEmps(e); setSedes(s); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const [verArch,setVerArch]=useState(false);   // mostrar los archivados
+  const [conf,setConf]=useState(null);          // {titulo, texto, ok, run}
+  const load=async()=>{ try{ const [e,s]=await Promise.all([db.listEmpleados({archivados:true}),db.listSedes()]); setEmps(e); setSedes(s); }catch(e){ showToast(""+(e.message||e),"err"); } };
   useEffect(()=>{ load(); },[]);
   const guardar=async(e)=>{ try{ await db.saveEmpleado(e,sedes); setEditing(null); await load(); showToast("Empleado guardado"); }catch(er){ showToast(""+(er.message||er),"err"); } };
-  const eliminar=async(e)=>{ if(!window.confirm("¿Eliminar a "+e.nombre+"?")) return; try{ await db.deleteEmpleado(e.id); await load(); showToast("Empleado eliminado"); }catch(er){ showToast(""+(er.message||er),"err"); } };
+  const eliminar=(e)=>setConf({titulo:"¿Eliminar a "+e.nombre+"?", texto:"Se borra de la lista de empleados. Si solo quieres dejar de verlo, mejor usa Archivar.", ok:"Eliminar", danger:true,
+    run:async()=>{ try{ await db.deleteEmpleado(e.id); await load(); showToast("Empleado eliminado"); }catch(er){ showToast(""+(er.message||er),"err"); } }});
+  const archivar=(e)=>setConf({titulo:"¿Archivar a "+e.nombre+"?", texto:"Desaparece de la lista, de turnos, tareas y metas, y se le quita el PIN. Sus ventas y su historial quedan intactos. Lo puedes restaurar cuando quieras desde \"Ver archivados\".", ok:"Archivar",
+    run:async()=>{ try{ await db.archivarEmpleado(e.id,true); await load(); showToast(e.nombre+" archivado"); }catch(er){ showToast(""+(er.message||er),"err"); } }});
+  const restaurar=async(e)=>{ try{ await db.archivarEmpleado(e.id,false); await load(); showToast(e.nombre+" restaurado. Sigue inactivo: edítalo para activarlo y ponerle PIN."); }catch(er){ showToast(""+(er.message||er),"err"); } };
   if(!emps) return <div className="empty">Cargando…</div>;
+  const activos=emps.filter(e=>!e.archivado), archivados=emps.filter(e=>e.archivado);
+  const visibles=verArch?archivados:activos;
   const toggleSede=(nombre)=>setEditing(prev=>({...prev,sedes:prev.sedes.includes(nombre)?prev.sedes.filter(x=>x!==nombre):[...prev.sedes,nombre]}));
   return (
     <div>
       <div className="toolbar">
-        <div className="sec-title" style={{marginRight:"auto"}}>Empleados <span className="muted">({emps.length})</span></div>
+        <div className="sec-title" style={{marginRight:"auto"}}>Empleados <span className="muted">({activos.length})</span></div>
+        {vista==='lista' && archivados.length>0 && (
+          <button className={"btn btn-sm "+(verArch?'btn-amber':'btn-ghost')} onClick={()=>setVerArch(v=>!v)}>
+            📦 {verArch?'Volver a la lista':'Ver archivados ('+archivados.length+')'}
+          </button>
+        )}
         <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4,marginRight:8}}>
           <button className={"btn btn-sm "+(vista==='lista'?'btn-amber':'btn-ghost')} onClick={()=>setVista('lista')}>👥 Lista</button>
           <button className={"btn btn-sm "+(vista==='turnos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('turnos')}>🗓️ Turnos</button>
@@ -1952,22 +1977,29 @@ function Empleados({showToast, quien}){
         {vista==='lista' && <button className="btn btn-amber" onClick={()=>setEditing({nombre:"",rol:"cajero",activo:true,pin:"",sedes:[]})}>+ Nuevo empleado</button>}
       </div>
 
-      {vista==='turnos' && <Turnos showToast={showToast} quien={quien} sedes={sedes} emps={emps}/>}
+      {vista==='turnos' && <Turnos showToast={showToast} quien={quien} sedes={sedes} emps={activos}/>}
 
       {vista==='lista' && (<div>
+      {verArch && <div className="muted" style={{margin:"0 0 10px",fontSize:13}}>📦 Empleados archivados. No aparecen en turnos, tareas ni metas, pero su historial de ventas sigue completo. <b>Restaurar</b> los trae de vuelta (inactivos, sin PIN).</div>}
       <div className="card" style={{padding:0}}>
         <table className="tbl">
           <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Sedes asignadas</th><th>Estado</th><th></th></tr></thead>
           <tbody>
-            {emps.map(e=>(
+            {visibles.length===0 && <tr><td colSpan={6} className="muted" style={{textAlign:"center",padding:18}}>{verArch?"No hay archivados":"No hay empleados"}</td></tr>}
+            {visibles.map(e=>(
               <tr key={e.id} className={e.activo?"":"inactive"}>
                 <td className="row-name">{e.nombre}</td>
                 <td className="muted">{e.rol}</td>
                 <td>{e.pin?<span className="pill pill-prod">••••</span>:<span className="pill pill-off">Sin PIN</span>}</td>
                 <td>{e.sedes.length?e.sedes.map(s=><span key={s} className="chip">{s}</span>):<span className="muted">—</span>}</td>
-                <td>{e.activo?<span className="pill pill-prod">Activo</span>:<span className="pill pill-off">Inactivo</span>}</td>
+                <td>{e.archivado?<span className="pill pill-off">📦 Archivado{e.archivado_en?' · '+String(e.archivado_en).slice(0,10):''}</span>:e.activo?<span className="pill pill-prod">Activo</span>:<span className="pill pill-off">Inactivo</span>}</td>
                 <td><div className="actions">
-                  <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...e,sedes:[...e.sedes]})}>Editar</button>
+                  {e.archivado
+                    ? <button className="btn btn-ghost btn-sm" onClick={()=>restaurar(e)}>↩ Restaurar</button>
+                    : <>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>setEditing({...e,sedes:[...e.sedes]})}>Editar</button>
+                        <button className="btn btn-ghost btn-sm" title="Esconderlo sin borrar su historial" onClick={()=>archivar(e)}>📦 Archivar</button>
+                      </>}
                   <button className="btn btn-danger btn-sm" onClick={()=>eliminar(e)}>✕</button>
                 </div></td>
               </tr>
@@ -1976,6 +2008,19 @@ function Empleados({showToast, quien}){
         </table>
       </div>
       </div>)}
+
+      {conf && (
+        <div className="modal-bg" onClick={()=>setConf(null)}>
+          <div className="modal" style={{maxWidth:420}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{conf.titulo}</div>
+            <div className="muted" style={{fontSize:13,lineHeight:1.5}}>{conf.texto}</div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={()=>setConf(null)}>Cancelar</button>
+              <button className={"btn "+(conf.danger?'btn-danger':'btn-amber')} onClick={async()=>{ const r=conf.run; setConf(null); await r(); }}>{conf.ok}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <div className="modal-bg" onClick={()=>setEditing(null)}>

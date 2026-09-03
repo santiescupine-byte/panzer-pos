@@ -878,7 +878,8 @@ const db = {
     const {error}=await sb.from('comision_config').update({
       escala:c.escala, minimo_asesor:Number(c.minimo_asesor)||85,
       bono_mejor_sede:Number(c.bono_mejor_sede)||0, bono_sede_se_reparte:c.bono_sede_se_reparte!==false,
-      bono_mejor_vendedor:Number(c.bono_mejor_vendedor)||0, bono_membresias:Number(c.bono_membresias)||0
+      bono_mejor_vendedor:Number(c.bono_mejor_vendedor)||0, bono_membresias:Number(c.bono_membresias)||0,
+      bono_mejor_anio:Number(c.bono_mejor_anio)||0
     }).eq('id',1); if(error) throw error;
   },
   async listEstados(anio,mes){
@@ -2544,8 +2545,11 @@ function Metas({showToast, quien}){
   const [genImg,setGenImg]=useState(false);
   const [incEstados,setIncEstados]=useState(true);   // incluir la tabla de estados en la imagen general
   const [verRanking,setVerRanking]=useState(false);  // modal del ranking anual
+  const [rankAnio,setRankAnio]=useState(null);       // ranking anual (cajeros activos) para la imagen general
+  const [incAnual,setIncAnual]=useState(true);       // incluir la tabla del año en la imagen general
 
   const [y,m]=mes.split('-').map(Number);
+  useEffect(()=>{ setRankAnio(null); db.rankingAnual(y).then(r=>setRankAnio((r||[]).filter(x=>(!x.rol||x.rol==='cajero') && x.activo))).catch(()=>setRankAnio([])); },[y]);
   const propias=(sedes||[]).filter(s=>!s.es_bodega && !s.es_franquicia);
 
   useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados(),db.getComisionConfig()])
@@ -3056,7 +3060,11 @@ function Metas({showToast, quien}){
               <div style={{flex:"1 1 140px"}}><label className="label" style={{fontSize:11}}>💳 Membresías</label>
                 <input className="input" type="number" value={cfgEd.bono_membresias}
                   onChange={e=>setCfgEd(c=>({...c,bono_membresias:e.target.value}))}/></div>
+              <div style={{flex:"1 1 140px"}}><label className="label" style={{fontSize:11}}>🏅 Mejor vendedor del año</label>
+                <input className="input" type="number" value={cfgEd.bono_mejor_anio||""} placeholder="0"
+                  onChange={e=>setCfgEd(c=>({...c,bono_mejor_anio:e.target.value}))}/></div>
             </div>
+            <div className="muted" style={{fontSize:11,marginTop:4}}>El bono del año se paga una vez, al cerrar diciembre, al cajero activo con más ventas del año (ranking anual). Los otros tres son mensuales.</div>
             <label className="check" style={{display:"flex",gap:8,alignItems:"center",marginTop:6}}>
               <input type="checkbox" checked={cfgEd.bono_sede_se_reparte!==false}
                 onChange={e=>setCfgEd(c=>({...c,bono_sede_se_reparte:e.target.checked}))}/>
@@ -3108,6 +3116,12 @@ function Metas({showToast, quien}){
                   Incluir la tabla de <b>estados</b> (condicionados y procesos de retiro).
                   {" "}<span style={{color:"var(--amber)"}}>Ojo: es información delicada para un grupo abierto.</span>
                 </span>
+              </label>
+            )}
+            {gen && (
+              <label className="check" style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,cursor:"pointer"}}>
+                <input type="checkbox" checked={incAnual} onChange={e=>setIncAnual(e.target.checked)}/>
+                <span className="muted" style={{fontSize:12}}>Incluir el <b>ranking del año {y}</b> y el bono al mejor vendedor del año.</span>
               </label>
             )}
 
@@ -3278,6 +3292,43 @@ function Metas({showToast, quien}){
                     )}
                   </div>
                 </div>
+
+                {/* ranking del año: cajeros activos, ventas reales, mismas categorías */}
+                {incAnual && (rankAnio||[]).length>0 && (()=>{
+                  const top=(rankAnio||[]).slice(0,10);
+                  const bono=cfg?Number(cfg.bono_mejor_anio)||0:0;
+                  const ultimoMes = m;
+                  return (
+                  <div style={{marginTop:16,paddingTop:12,borderTop:"2px solid #e2e8f0"}}>
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:2}}>🏅 RANKING DEL AÑO {y}</div>
+                    <div style={{fontSize:10.5,color:"#64748b",marginBottom:6}}>Ventas reales de accesorios + car detailing, enero a {MES_NOM[ultimoMes-1].toLowerCase()}.{bono>0?<span> Bono al mejor del año: <b style={{color:"#0f172a"}}>{fmt(bono)}</b>, se paga al cerrar diciembre.</span>:null}</div>
+                    <table style={{borderCollapse:"collapse"}}>
+                      <thead><tr>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8"}}>#</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"left"}}>ASESOR</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"left"}}>SEDE</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>ACCESORIOS</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>DETAILING</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>TOTAL AÑO</th>
+                        <th style={{padding:"4px 8px",border:"1px solid #e2e8f0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>MESES</th>
+                      </tr></thead>
+                      <tbody>
+                        {top.map((r,i)=>(
+                          <tr key={r.operador} style={{background:i===0?"#fef9e7":"transparent"}}>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:800,color:"#94a3b8"}}>{i+1}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,fontWeight:i===0?900:700}}>
+                              {i===0?"🥇 ":i===1?"🥈 ":i===2?"🥉 ":""}{nombreCorto(r.operador)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:11,color:"#64748b"}}>{r.sedes}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:11,textAlign:"right"}}>{fmt(r.accesorios)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:11,textAlign:"right"}}>{fmt(r.detailing)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:"right",fontWeight:900}}>{fmt(r.total)}</td>
+                            <td style={{padding:"5px 8px",border:"1px solid #e2e8f0",fontSize:11,textAlign:"right",color:"#64748b"}}>{r.meses}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );})()}
 
                 {/* estado actual de cada uno */}
                 {incEstados && (()=>{

@@ -864,6 +864,11 @@ const db = {
     const {data,error}=await sb.rpc('membresias_mes',{p_anio:anio,p_mes:mes});
     if(error) throw error; return data||[];
   },
+  async rankingAnual(anio){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('ranking_anual',{p_anio:anio});
+    if(error) throw error; return data||[];
+  },
   async getComisionConfig(){
     if(DEMO_MODE) return null;
     const {data}=await sb.from('comision_config').select('*').eq('id',1).maybeSingle(); return data||null;
@@ -1166,7 +1171,7 @@ const db = {
       else { DEMO.empleados.push({...e,id:uid()}); }
       return;
     }
-    const row={nombre:e.nombre,rol:e.rol,activo:e.activo,pin:e.pin||null};
+    const row={nombre:e.nombre,rol:e.rol,activo:e.activo,pin:e.pin||null,fecha_ingreso:e.fecha_ingreso||null};
     let empId=e.id;
     if(empId){ const {error}=await sb.from('empleados').update(row).eq('id',empId); if(error) throw error; }
     else { const {data,error}=await sb.from('empleados').insert(row).select('id').single(); if(error) throw error; empId=data.id; }
@@ -2043,6 +2048,9 @@ function Empleados({showToast, quien}){
               value={editing.pin||""}
               onChange={e=>setEditing({...editing,pin:e.target.value.replace(/[^0-9]/g,"").slice(0,4)})}/>
             <div className="muted" style={{marginTop:-6,marginBottom:12}}>Con este PIN el empleado entra al POS. Déjalo vacío si aún no lo asignas.</div>
+            <label className="label">Fecha de ingreso <span className="muted">(opcional)</span></label>
+            <input className="input" type="date" value={editing.fecha_ingreso?String(editing.fecha_ingreso).slice(0,10):""} onChange={e=>setEditing({...editing,fecha_ingreso:e.target.value||null})}/>
+            <div className="muted" style={{marginTop:-6,marginBottom:12}}>El ranking anual solo le cuenta ventas desde este día. Útil si en Loyverse había ventas viejas con su mismo nombre.</div>
             <label className="label">Sedes asignadas</label>
             <div className="multi">
               {sedes.map(s=><div key={s.id} className={"multi-opt"+(editing.sedes.includes(s.nombre)?" on":"")} onClick={()=>toggleSede(s.nombre)}>{s.nombre}</div>)}
@@ -2420,6 +2428,96 @@ const EST_INFO={
   retiro:      {lbl:"Proceso de retiro", c:"var(--red)",   bg:"var(--red-d)"},
 };
 
+// ============================================================
+// RANKING ANUAL — quién más ha vendido en el año (ventas reales del POS,
+// mismas categorías de las metas). Solo lectura.
+// ============================================================
+function RankingAnual({anio, onClose, showToast}){
+  const [y,setY]=useState(anio);
+  const [rows,setRows]=useState(null);
+  const [soloActivos,setSoloActivos]=useState(true);
+  const [orden,setOrden]=useState('total');   // 'total' | 'promedio'
+  const [abierto,setAbierto]=useState(null);  // operador con el detalle por mes desplegado
+  const hoy=new Date();
+  const ultimoMes = y===hoy.getFullYear() ? hoy.getMonth()+1 : 12;
+
+  useEffect(()=>{ setRows(null); db.rankingAnual(y).then(setRows).catch(e=>{ showToast(""+(e.message||e),"err"); setRows([]); }); },[y]);
+
+  // solo cajeros (asesores). Los nombres viejos sin ficha de empleado se tratan como cajeros.
+  const lista=(rows||[]).filter(r=>(!r.rol || r.rol==='cajero') && (!soloActivos || r.activo))
+    .map(r=>({...r, total:Number(r.total), accesorios:Number(r.accesorios), detailing:Number(r.detailing),
+              prom: r.meses>0 ? Number(r.total)/r.meses : 0}))
+    .sort((a,b)=> orden==='promedio' ? b.prom-a.prom : b.total-a.total);
+  const max=lista.length?Math.max(...lista.map(r=>orden==='promedio'?r.prom:r.total)):0;
+  const totalAcc=lista.reduce((a,r)=>a+r.accesorios,0), totalDet=lista.reduce((a,r)=>a+r.detailing,0);
+  const medalla=i=>i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+".";
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" style={{maxWidth:860,width:"96vw"}} onClick={e=>e.stopPropagation()}>
+        <div className="toolbar" style={{gap:8,flexWrap:"wrap",marginBottom:8}}>
+          <div className="modal-t" style={{margin:0,marginRight:"auto"}}>🏆 Ranking anual</div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <button className="btn btn-ghost btn-sm" onClick={()=>setY(y-1)}>←</button>
+            <b style={{minWidth:50,textAlign:"center"}}>{y}</b>
+            <button className="btn btn-ghost btn-sm" disabled={y>=hoy.getFullYear()} onClick={()=>setY(y+1)}>→</button>
+          </div>
+          <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
+            <button className={"btn btn-sm "+(orden==='total'?'btn-amber':'btn-ghost')} onClick={()=>setOrden('total')}>Total del año</button>
+            <button className={"btn btn-sm "+(orden==='promedio'?'btn-amber':'btn-ghost')} onClick={()=>setOrden('promedio')}>Promedio mensual</button>
+          </div>
+          <label className="check" style={{margin:0}}><input type="checkbox" checked={soloActivos} onChange={e=>setSoloActivos(e.target.checked)}/> Solo activos</label>
+        </div>
+        <div className="muted" style={{fontSize:12,marginBottom:10}}>
+          Solo cajeros. Ventas reales registradas en el POS de enero a {MES_NOM[ultimoMes-1]} {y}: <b>Productos complementarios</b> + <b>Productos Panzer</b>, sin anuladas y con descuentos restados. Sin ajustes manuales. Si el empleado tiene fecha de ingreso, solo se le cuenta desde ese día.
+          {orden==='promedio' && <span> El promedio divide por los meses en que el asesor vendió, para comparar parejo a quien entró después.</span>}
+        </div>
+
+        {rows===null && <div className="empty">Calculando…</div>}
+        {rows!==null && lista.length===0 && <div className="empty">No hay ventas en {y}{soloActivos?" de empleados activos":""}.</div>}
+        {rows!==null && lista.length>0 && (
+          <div style={{overflowX:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th style={{width:36}}>#</th><th>Asesor</th><th>Sedes</th><th className="num">Complementarios</th><th className="num">Panzer</th><th className="num">Total</th><th className="num">Meses</th><th className="num">Prom/mes</th><th style={{width:120}}></th></tr></thead>
+              <tbody>
+                {lista.map((r,i)=>{ const v=orden==='promedio'?r.prom:r.total; const pct=max?Math.round(v/max*100):0;
+                  const pm=r.por_mes||{}; const open=abierto===r.operador;
+                  return (<React.Fragment key={r.operador}>
+                  <tr style={{cursor:"pointer",opacity:r.activo?1:.55}} onClick={()=>setAbierto(open?null:r.operador)}>
+                    <td style={{fontWeight:800,fontSize:i<3?18:13}}>{medalla(i)}</td>
+                    <td className="row-name">{r.operador}{!r.activo && <span className="pill pill-off" style={{marginLeft:6}}>ya no está</span>}
+                      {r.fecha_ingreso && <div className="muted" style={{fontSize:10,fontWeight:400}}>cuenta desde {String(r.fecha_ingreso).slice(0,10)}</div>}</td>
+                    <td className="muted" style={{fontSize:12}}>{r.sedes}</td>
+                    <td className="num">{fmt(r.accesorios)}</td>
+                    <td className="num">{fmt(r.detailing)}</td>
+                    <td className="num" style={{fontWeight:800}}>{fmt(r.total)}</td>
+                    <td className="num muted">{r.meses}</td>
+                    <td className="num">{fmt(Math.round(r.prom))}</td>
+                    <td><div style={{height:8,background:"var(--sf2)",borderRadius:4,overflow:"hidden"}}><div style={{width:pct+"%",height:"100%",background:i<3?"var(--amber)":"var(--bd)"}}/></div></td>
+                  </tr>
+                  {open && (<tr><td colSpan={9} style={{background:"var(--sf2)",padding:"8px 12px"}}>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(110px,1fr))",gap:6}}>
+                      {Array.from({length:ultimoMes},(_,k)=>k+1).map(mm=>{ const d=pm[String(mm)]; return (
+                        <div key={mm} style={{padding:"6px 8px",borderRadius:8,background:"var(--sf)",border:"1px solid var(--bd)",opacity:d?1:.4}}>
+                          <div className="muted" style={{fontSize:11,fontWeight:700}}>{MES_NOM[mm-1].slice(0,3)}</div>
+                          <div style={{fontWeight:800,fontSize:13}}>{d?fmt(Number(d.tot)):"—"}</div>
+                          {d && <div className="muted" style={{fontSize:10}}>{fmt(Number(d.acc))} · {fmt(Number(d.det))}</div>}
+                        </div>); })}
+                    </div>
+                  </td></tr>)}
+                  </React.Fragment>); })}
+              </tbody>
+              <tfoot><tr style={{fontWeight:800}}><td></td><td>Total</td><td></td><td className="num">{fmt(totalAcc)}</td><td className="num">{fmt(totalDet)}</td><td className="num">{fmt(totalAcc+totalDet)}</td><td colSpan={3}></td></tr></tfoot>
+            </table>
+          </div>
+        )}
+        <div className="muted" style={{fontSize:11,marginTop:8}}>Toca un asesor para ver su mes a mes (complementarios · Panzer).</div>
+        <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>Cerrar</button></div>
+      </div>
+    </div>
+  );
+}
+
 function Metas({showToast, quien}){
   const hoy=new Date();
   const [mes,setMes]=useState(()=>{ const d=new Date(); d.setMonth(d.getMonth()-1);
@@ -2445,6 +2543,7 @@ function Metas({showToast, quien}){
   const [verImg,setVerImg]=useState(null);   // {que: nombre de sede | '__general__'}
   const [genImg,setGenImg]=useState(false);
   const [incEstados,setIncEstados]=useState(true);   // incluir la tabla de estados en la imagen general
+  const [verRanking,setVerRanking]=useState(false);  // modal del ranking anual
 
   const [y,m]=mes.split('-').map(Number);
   const propias=(sedes||[]).filter(s=>!s.es_bodega && !s.es_franquicia);
@@ -2662,8 +2761,10 @@ function Metas({showToast, quien}){
         </div>
         {cerrado && <span className="pill" style={{background:"var(--green-d)",color:"var(--green)",fontWeight:800}}>🔒 Cerrado</span>}
         {(rend||[]).length>0 && <button className="btn btn-sm" style={{background:"#25D366",color:"#fff",border:"none",fontWeight:700}} onClick={()=>setVerImg({que:sedesConDatos[0]||'__general__'})}>📲 Compartir</button>}
+        <button className="btn btn-ghost btn-sm" onClick={()=>setVerRanking(true)}>🏆 Ranking anual</button>
         <button className="btn btn-ghost btn-sm" onClick={()=>{setCfgEd({...cfg}); setVerCfg(true);}}>⚙️ Escala y bonos</button>
       </div>
+      {verRanking && <RankingAnual anio={y} onClose={()=>setVerRanking(false)} showToast={showToast}/>}
 
       {/* ----- copiar del mes anterior cuando el mes está vacío ----- */}
       {!cargando && metas!==null && metas.length===0 && (prevMetas||[]).length>0 && (

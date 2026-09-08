@@ -1,0 +1,15 @@
+# El repo es PÚBLICO (GitHub Pages). Solo se suben los archivos de la app.
+# Los .sql, los json de respaldo, tools/ y .claude/ se quedan en el PC:
+# tienen PINs, datos de empleados y respaldos que no deben ser públicos.
+*
+!.gitignore
+!admin.html
+!operador.html
+!cortesia.html
+!index.html
+!sw.js
+!catalogo_demo.js
+!manifest-admin.json
+!manifest-operador.json
+!icon-192.png
+!icon-512.png

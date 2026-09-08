@@ -4525,6 +4525,60 @@ function rangoPreset(preset){
   return {desde:isoDay(hoy),hasta:isoDay(hoy)};
 }
 
+// Periodo ANTERIOR para comparar (como lo hacía Loyverse):
+//   · Este mes   → los mismos días del mes pasado (1 al N)
+//   · Mes pasado → el mes anterior completo
+//   · lo demás   → el periodo inmediatamente anterior, de la misma duración
+function rangoAnterior(preset, desde, hasta){
+  const pd=s=>{ const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); };
+  const MESC=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  const a=pd(desde), b=pd(hasta);
+  if(preset==='mes'){
+    const pa=new Date(a.getFullYear(),a.getMonth()-1,1);
+    const finMes=new Date(a.getFullYear(),a.getMonth(),0).getDate();      // días que tuvo el mes pasado
+    const pb=new Date(pa.getFullYear(),pa.getMonth(),Math.min(b.getDate(),finMes));
+    return {desde:isoDay(pa),hasta:isoDay(pb),label:"vs 1–"+pb.getDate()+" "+MESC[pb.getMonth()]};
+  }
+  if(preset==='mes_pasado'){
+    const pa=new Date(a.getFullYear(),a.getMonth()-1,1), pb=new Date(a.getFullYear(),a.getMonth(),0);
+    return {desde:isoDay(pa),hasta:isoDay(pb),label:"vs "+MESC[pa.getMonth()]};
+  }
+  const dias=Math.round((b-a)/86400000)+1;
+  const pb=new Date(a); pb.setDate(pb.getDate()-1);
+  const pa=new Date(pb); pa.setDate(pa.getDate()-(dias-1));
+  const label = preset==='hoy' ? "vs ayer" : preset==='ayer' ? "vs antier" : preset==='semana' ? "vs semana pasada"
+    : "vs "+(dias===1 ? pa.getDate()+" "+MESC[pa.getMonth()] : pa.getDate()+" "+MESC[pa.getMonth()]+" – "+pb.getDate()+" "+MESC[pb.getMonth()]);
+  return {desde:isoDay(pa),hasta:isoDay(pb),label};
+}
+
+// Totales del resumen a partir de la lista de ventas (misma fórmula que ReporteVista)
+function resumenVentas(ventas){
+  const bruto=ventas.reduce((s,v)=>s+v.bruto,0);
+  const descuentos=ventas.reduce((s,v)=>s+v.descuento,0);
+  const netas=bruto-descuentos;
+  const costo=ventas.reduce((s,v)=>s+v.items.reduce((a,i)=>a+i.costo*i.cantidad,0),0);
+  return {bruto,descuentos,netas,beneficio:netas-costo,n:ventas.length};
+}
+
+// El numerito de abajo de cada tarjeta: ▲ 12,5% vs 1–8 ago ($X)
+function Delta({actual, anterior, label, invertir, conteo}){
+  if(anterior==null) return null;
+  const act=Number(actual)||0, ant=Number(anterior)||0;
+  if(!ant && !act) return <div className="muted" style={{fontSize:11,marginTop:4}}>{label}: sin datos</div>;
+  const pct = ant ? (act-ant)/Math.abs(ant)*100 : null;
+  const sube = act>=ant;
+  const bueno = invertir ? !sube : sube;                 // en descuentos, subir es malo
+  const col = act===ant ? "var(--td)" : bueno ? "var(--green)" : "var(--red)";
+  const txt = pct===null ? "nuevo" : (act===ant ? "= " : (sube?"▲ ":"▼ "))+Math.abs(pct).toLocaleString("es-CO",{maximumFractionDigits:1})+"%";
+  return (
+    <div style={{fontSize:11,marginTop:4,display:"flex",gap:6,alignItems:"baseline",flexWrap:"wrap"}}>
+      <b style={{color:col}}>{txt}</b>
+      <span className="muted">{label}</span>
+      <span className="muted" style={{opacity:.8}}>({conteo?ant:fmt(ant)})</span>
+    </div>
+  );
+}
+
 function Informes({showToast}){
   const [sedes,setSedes]=useState([]);
   const [emps,setEmps]=useState([]);
@@ -4542,10 +4596,16 @@ function Informes({showToast}){
   useEffect(()=>{ (async()=>{ try{ const [s,e]=await Promise.all([db.listSedes(),db.listEmpleados()]); setSedes(s); setEmps(e); }catch(err){}
     try{ setOpsHist(await db.listOperadoresVentas()); }catch(err){} })(); },[]);
 
+  const [comparar,setComparar]=useState(null);   // {label, ...resumen del periodo anterior}
   const cargar=async()=>{
-    setVentas(null);
+    setVentas(null); setComparar(null);
     try{ setVentas(await db.getVentas({desde,hasta,sede,operador,tipoPago})); }
     catch(e){ showToast(""+(e.message||e),"err"); setVentas([]); }
+    // periodo anterior, con los mismos filtros, para el "cuánto subí / bajé" de las tarjetas
+    try{ if(desde && hasta){ const r=rangoAnterior(preset,desde,hasta);
+      const pv=await db.getVentas({desde:r.desde,hasta:r.hasta,sede,operador,tipoPago});
+      setComparar({label:r.label, ...resumenVentas(pv)}); } }
+    catch(e){}
   };
   useEffect(()=>{ cargar(); },[desde,hasta,sede,operador,tipoPago]);
 
@@ -4608,12 +4668,12 @@ function Informes({showToast}){
         ))}
       </div>
 
-      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar}/>}
+      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar} comparar={comparar}/>}
     </div>
   );
 }
 
-function ReporteVista({sub,ventas,showToast,recargar}){
+function ReporteVista({sub,ventas,showToast,recargar,comparar}){
   const [detalle,setDetalle]=useState(null);   // recibo abierto en el panel de detalle
   const [borrando,setBorrando]=useState(false);
   if(!ventas.length) return <div className="empty">No hay ventas en el periodo/filtros seleccionados.</div>;
@@ -4639,11 +4699,13 @@ function ReporteVista({sub,ventas,showToast,recargar}){
     return (
       <div>
         <div className="kpis">
-          <div className="kpi"><div className="kpi-label">Ventas brutas</div><div className="kpi-value">{fmt(bruto)}</div></div>
-          <div className="kpi"><div className="kpi-label">Descuentos</div><div className="kpi-value red">-{fmt(descuentos)}</div></div>
-          <div className="kpi"><div className="kpi-label">Ventas netas</div><div className="kpi-value green">{fmt(netas)}</div></div>
-          <div className="kpi"><div className="kpi-label">Beneficio bruto</div><div className="kpi-value amber">{fmt(beneficio)}</div></div>
-          <div className="kpi"><div className="kpi-label">Nº de ventas</div><div className="kpi-value">{ventas.length}</div></div>
+          {(()=>{ const c=comparar||{}; const L=c.label; return (<React.Fragment>
+          <div className="kpi"><div className="kpi-label">Ventas brutas</div><div className="kpi-value">{fmt(bruto)}</div><Delta actual={bruto} anterior={comparar?c.bruto:null} label={L}/></div>
+          <div className="kpi"><div className="kpi-label">Descuentos</div><div className="kpi-value red">-{fmt(descuentos)}</div><Delta actual={descuentos} anterior={comparar?c.descuentos:null} label={L} invertir/></div>
+          <div className="kpi"><div className="kpi-label">Ventas netas</div><div className="kpi-value green">{fmt(netas)}</div><Delta actual={netas} anterior={comparar?c.netas:null} label={L}/></div>
+          <div className="kpi"><div className="kpi-label">Beneficio bruto</div><div className="kpi-value amber">{fmt(beneficio)}</div><Delta actual={beneficio} anterior={comparar?c.beneficio:null} label={L}/></div>
+          <div className="kpi"><div className="kpi-label">Nº de ventas</div><div className="kpi-value">{ventas.length}</div><Delta actual={ventas.length} anterior={comparar?c.n:null} label={L} conteo/></div>
+          </React.Fragment>); })()}
         </div>
         <div className="chart-wrap">
           <div className="label" style={{marginBottom:14}}>Ventas brutas por día</div>
@@ -8146,21 +8208,31 @@ function Recaudo({showToast, quien, rol}){
             {pendVista.length>0 && (pendSede||pendDesde||pendHasta) && <button className="btn btn-danger btn-sm" style={{marginLeft:"auto"}} onClick={borrarTodasPend}>🗑 Borrar las {pendVista.length} mostradas</button>}
           </div>
           {pendList && pendVista.length>0 && (()=>{
+            // valor = venta total del turno (incluye QR). Efectivo esperado = valor − QR − devoluciones.
+            const efDe=l=>(Number(l.valor)||0)-(Number(l.qr)||0)-(Number(l.devoluciones)||0);
             const total=pendVista.reduce((a,l)=>a+(Number(l.valor)||0),0);
-            const bySede={}; pendVista.forEach(l=>{ bySede[l.sede]=(bySede[l.sede]||0)+(Number(l.valor)||0); });
-            const sedesRows=Object.entries(bySede).sort((a,b)=>b[1]-a[1]);
+            const totalQr=pendVista.reduce((a,l)=>a+(Number(l.qr)||0),0);
+            const totalDev=pendVista.reduce((a,l)=>a+(Number(l.devoluciones)||0),0);
+            const totalEf=pendVista.reduce((a,l)=>a+efDe(l),0);
+            const bySede={}; pendVista.forEach(l=>{ const b=bySede[l.sede]=bySede[l.sede]||{n:0,valor:0,qr:0,dev:0,ef:0};
+              b.n++; b.valor+=Number(l.valor)||0; b.qr+=Number(l.qr)||0; b.dev+=Number(l.devoluciones)||0; b.ef+=efDe(l); });
+            const sedesRows=Object.entries(bySede).sort((a,b)=>b[1].valor-a[1].valor);
             const rango=(pendDesde||pendHasta)?(" · "+(pendDesde||"…")+" a "+(pendHasta||"…")):"";
             return (
               <div>
                 <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
-                  <div className="card" style={{flex:"1 1 180px"}}><div className="muted">Liquidaciones pendientes</div><div style={{fontSize:24,fontWeight:800}}>{pendVista.length}</div></div>
-                  <div className="card" style={{flex:"1 1 220px"}}><div className="muted">Suma total pendiente{pendSede?(" · "+pendSede):""}{rango}</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(total)}</div></div>
+                  <div className="card" style={{flex:"1 1 160px"}}><div className="muted">Liquidaciones pendientes</div><div style={{fontSize:24,fontWeight:800}}>{pendVista.length}</div></div>
+                  <div className="card" style={{flex:"1 1 220px"}}><div className="muted">Venta total pendiente{pendSede?(" · "+pendSede):""}{rango}</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(total)}</div>
+                    <div className="muted" style={{fontSize:11}}>incluye QR {fmt(totalQr)}{totalDev>0?(" · devoluciones "+fmt(totalDev)):""}</div></div>
+                  <div className="card" style={{flex:"1 1 220px"}}><div className="muted">💵 Efectivo esperado</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{fmt(totalEf)}</div>
+                    <div className="muted" style={{fontSize:11}}>venta − QR − devoluciones</div></div>
                 </div>
                 {!pendSede && sedesRows.length>1 && (
                   <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
                     <table className="tbl">
-                      <thead><tr><th>Sede</th><th className="num">Pendientes</th><th className="num">Suma</th></tr></thead>
-                      <tbody>{sedesRows.map(([s,v])=>(<tr key={s}><td className="row-name">{s}</td><td className="num">{pendVista.filter(l=>l.sede===s).length}</td><td className="num">{fmt(v)}</td></tr>))}</tbody>
+                      <thead><tr><th>Sede</th><th className="num">Pendientes</th><th className="num">Venta total</th><th className="num">QR</th><th className="num">Devoluciones</th><th className="num">💵 Efectivo</th></tr></thead>
+                      <tbody>{sedesRows.map(([s,b])=>(<tr key={s}><td className="row-name">{s}</td><td className="num">{b.n}</td><td className="num">{fmt(b.valor)}</td><td className="num muted">{fmt(b.qr)}</td><td className="num muted">{b.dev>0?fmt(b.dev):"—"}</td><td className="num" style={{fontWeight:800,color:"var(--green)"}}>{fmt(b.ef)}</td></tr>))}</tbody>
+                      <tfoot><tr style={{fontWeight:800}}><td>Total</td><td className="num">{pendVista.length}</td><td className="num">{fmt(total)}</td><td className="num">{fmt(totalQr)}</td><td className="num">{totalDev>0?fmt(totalDev):"—"}</td><td className="num" style={{color:"var(--green)"}}>{fmt(totalEf)}</td></tr></tfoot>
                     </table>
                   </div>
                 )}

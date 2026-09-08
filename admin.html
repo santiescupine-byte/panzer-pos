@@ -173,6 +173,7 @@ const DEMO_MODE = !(SUPABASE_URL && SUPABASE_ANON_KEY);
 const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const fmt = n => "$"+Math.round(Number(n)||0).toLocaleString("es-CO");
+const VALOR_TOKEN = 6000;   // precio de un token, para valorar tokens perdidos/faltantes en Recaudo
 // Fecha/hora en zona LOCAL (Colombia) a partir de un timestamp UTC de Supabase
 const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
@@ -7827,7 +7828,7 @@ function Recaudo({showToast, quien, rol}){
                 <b>Rectificación:</b> escribe en <b>Contado físico</b> los tokens que de verdad tiene cada operador en la mano. Si no lo llenas, se toma el esperado.
                 {opsRect.length>0 && (
                   <span> · Rectificados {opsRect.length}/{controlTokens.length}
-                    {perdidosOps>0 && <b style={{color:"var(--red)"}}> · perdidos {perdidosOps} (≈ {fmt(perdidosOps*5000)})</b>}
+                    {perdidosOps>0 && <b style={{color:"var(--red)"}}> · perdidos {perdidosOps} (≈ {fmt(perdidosOps*VALOR_TOKEN)})</b>}
                     {sobrantesOps>0 && <b style={{color:"var(--amber)"}}> · sobrantes {sobrantesOps}</b>}
                     {perdidosOps===0 && sobrantesOps===0 && <b style={{color:"var(--green)"}}> · todos cuadran ✓</b>}
                   </span>)}
@@ -7842,7 +7843,7 @@ function Recaudo({showToast, quien, rol}){
                 </div>
                 <div style={{flex:"1 1 200px",fontSize:13}}>
                   Esperado en la base: <b>{totSaldoEsp}</b>
-                  {difBaseSede!=null && <span> · Diferencia: <b style={{color:difBaseSede<0?"var(--red)":difBaseSede>0?"var(--amber)":"var(--green)"}}>{difBaseSede===0?"✓ 0":(difBaseSede>0?"+":"")+difBaseSede}</b>{difBaseSede<0 && <span className="muted"> (≈ {fmt(-difBaseSede*5000)} perdidos)</span>}</span>}
+                  {difBaseSede!=null && <span> · Diferencia: <b style={{color:difBaseSede<0?"var(--red)":difBaseSede>0?"var(--amber)":"var(--green)"}}>{difBaseSede===0?"✓ 0":(difBaseSede>0?"+":"")+difBaseSede}</b>{difBaseSede<0 && <span className="muted"> (≈ {fmt(-difBaseSede*VALOR_TOKEN)} perdidos)</span>}</span>}
                 </div>
               </div>
             )}
@@ -7860,8 +7861,8 @@ function Recaudo({showToast, quien, rol}){
               <span>Tokens disponibles (base)</span><span style={{color:"var(--amber)"}}>{tokensDisponibles}</span>
             </div>
             <div className="muted" style={{fontSize:12,marginTop:-4}}>= {tokensFis} máquinas {totSaldoReal>=0?"+ ":"− "}{Math.abs(totSaldoReal)} saldos{(opsRect.length>0||baseSedeContada!=null)?" (rectificados)":""} {ajusteNum>=0?"+ ":"− "}{Math.abs(ajusteNum)} ajuste</div>
-            {perdidosOps>0 && <div style={{marginTop:8,fontWeight:700,color:"var(--red)"}}>⚠ {perdidosOps} tokens perdidos en la rectificación{opsRect.filter(c=>c.diferencia<0).length?": "+opsRect.filter(c=>c.diferencia<0).map(c=>c.nombre+" ("+c.diferencia+")").join(", "):""}{difBaseSede!=null&&difBaseSede<0?" · base de sede ("+difBaseSede+")":""} · ≈ {fmt(perdidosOps*5000)}</div>}
-            {faltanteMaqTokens!==0 && <div style={{marginTop:8,fontWeight:700,color:faltanteMaqTokens>0?"var(--red)":"var(--amber)"}}>{faltanteMaqTokens>0?("⚠ Faltan "+faltanteMaqTokens+" tokens (contadores de máquina dicen más que lo contado físico) · ≈ "+fmt(faltanteMaqTokens*5000)):("Sobran "+Math.abs(faltanteMaqTokens)+" tokens físicos vs contadores")}</div>}
+            {perdidosOps>0 && <div style={{marginTop:8,fontWeight:700,color:"var(--red)"}}>⚠ {perdidosOps} tokens perdidos en la rectificación{opsRect.filter(c=>c.diferencia<0).length?": "+opsRect.filter(c=>c.diferencia<0).map(c=>c.nombre+" ("+c.diferencia+")").join(", "):""}{difBaseSede!=null&&difBaseSede<0?" · base de sede ("+difBaseSede+")":""} · ≈ {fmt(perdidosOps*VALOR_TOKEN)}</div>}
+            {faltanteMaqTokens!==0 && <div style={{marginTop:8,fontWeight:700,color:faltanteMaqTokens>0?"var(--red)":"var(--amber)"}}>{faltanteMaqTokens>0?("⚠ Faltan "+faltanteMaqTokens+" tokens (contadores de máquina dicen más que lo contado físico) · ≈ "+fmt(faltanteMaqTokens*VALOR_TOKEN)):("Sobran "+Math.abs(faltanteMaqTokens)+" tokens físicos vs contadores")}</div>}
             {opsNegativos.length>0 && <div style={{marginTop:6,color:"var(--red)",fontWeight:700}}>⚠ {opsNegativos.length} operador(es) con saldo negativo (vendieron más de lo que tenían): {opsNegativos.map(o=>o.nombre).join(", ")}</div>}
             {faltanteMaqTokens===0 && opsNegativos.length===0 && <div style={{marginTop:8,color:"var(--green)",fontWeight:700}}>✓ Tokens cuadran</div>}
           </div>
@@ -8485,7 +8486,7 @@ function Recaudo({showToast, quien, rol}){
         const rectif=(rep.rectificados||[]);
         const hayRect=rectif.length>0 || rep.baseSedeContada!=null;
         const perdRect=Number(rep.perdidosOps)||0, sobRect=Number(rep.sobrantesOps)||0;
-        if(perdRect>0) alertas.push(['danger','🚨 '+perdRect+' tokens perdidos en la rectificación (≈ '+fmt(perdRect*5000)+'): '
+        if(perdRect>0) alertas.push(['danger','🚨 '+perdRect+' tokens perdidos en la rectificación (≈ '+fmt(perdRect*VALOR_TOKEN)+'): '
           +rectif.filter(o=>Number(o.diferencia)<0).map(o=>o.nombre+' ('+o.diferencia+')').join(', ')
           +(rep.difBaseSede!=null&&Number(rep.difBaseSede)<0?' base de sede ('+rep.difBaseSede+')':'')]);
         if(sobRect>0) alertas.push(['warning','⚠️ '+sobRect+' tokens sobrantes en la rectificación: '

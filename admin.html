@@ -7350,16 +7350,31 @@ function Recaudo({showToast, quien, rol}){
     const membresia=sus.reduce((a,l)=>a+(Number(l.tokens_membresia)||0),0);
     const saldoAnterior= prevSede ? 0 : (Number(saldosPrevNorm[keyOp(op)])||0);
     const saldoEsperado= prevSede ? null : (saldoAnterior-vendidos-devTokens-membresia);
+    // RECTIFICACIÓN: lo que el tesorero contó físicamente en manos del operador.
+    // Si lo escribe, ese número manda (es la realidad) y la diferencia queda registrada.
+    const cRaw=(reparto.contado||{})[op];
+    const contado=(cRaw!=null && cRaw!=="" && !prevSede) ? (Number(cRaw)||0) : null;
+    const diferencia= contado!=null ? (contado-saldoEsperado) : null;
+    const saldoReal= contado!=null ? contado : saldoEsperado;
     return {nombre:op, historial:{saldo:saldoAnterior}, saldoAnterior, vendidos,
-            vendidosEsteC:vendidos, devTokens, devTokensEsteC:devTokens, membresia, membresiaEsteC:membresia, saldoEsperado};
+            vendidosEsteC:vendidos, devTokens, devTokensEsteC:devTokens, membresia, membresiaEsteC:membresia,
+            saldoEsperado, contado, diferencia, saldoReal};
   });
   const totVendidos=controlTokens.reduce((a,c)=>a+c.vendidos,0);
   const totDevTokens=controlTokens.reduce((a,c)=>a+c.devTokens,0);
   const totMembresia=controlTokens.reduce((a,c)=>a+c.membresia,0);
   const totSaldoAnt= prevSede ? (Number(baseSedeSaldo)||0) : controlTokens.reduce((a,c)=>a+c.saldoAnterior,0);
   const totSaldoEsp= prevSede ? (totSaldoAnt-totVendidos-totDevTokens-totMembresia) : controlTokens.reduce((a,c)=>a+(c.saldoEsperado||0),0);
+  // Rectificación a nivel SEDE (cuando la bolsa es compartida): base contada físicamente
+  const baseSedeContada=(prevSede && reparto.baseSedeContada!=null && reparto.baseSedeContada!=="") ? (Number(reparto.baseSedeContada)||0) : null;
+  const difBaseSede= baseSedeContada!=null ? (baseSedeContada-totSaldoEsp) : null;
+  // Saldo REAL de tokens en manos de la gente = contado donde lo hubo, esperado donde no
+  const totSaldoReal= prevSede ? (baseSedeContada!=null?baseSedeContada:totSaldoEsp) : controlTokens.reduce((a,c)=>a+(c.saldoReal||0),0);
+  const opsRect=controlTokens.filter(c=>c.contado!=null);
+  const perdidosOps=opsRect.reduce((a,c)=>a+Math.max(0,-c.diferencia),0)+(difBaseSede!=null?Math.max(0,-difBaseSede):0);
+  const sobrantesOps=opsRect.reduce((a,c)=>a+Math.max(0,c.diferencia),0)+(difBaseSede!=null?Math.max(0,difBaseSede):0);
   const ajusteNum=Number(reparto.ajusteTokens)||0;
-  const tokensDisponibles=tokensFis+totSaldoEsp+ajusteNum;            // base nueva = saldo + físicos + ajuste
+  const tokensDisponibles=tokensFis+totSaldoReal+ajusteNum;           // base nueva = saldo REAL + físicos + ajuste
   // FALTANTES reales (reemplazan el "tokens perdidos" roto del app viejo):
   const faltanteMaqTokens=sumTokenDia-tokensFis;                      // contadores de máquina vs físico contado
   const opsNegativos=controlTokens.filter(c=>c.saldoEsperado!=null && c.saldoEsperado<0);
@@ -7373,7 +7388,8 @@ function Recaudo({showToast, quien, rol}){
         ? ((reparto.baseTokensSede!=null && reparto.baseTokensSede!=="") ? (Number(reparto.baseTokensSede)||0) : tokensDisponibles)
         : null;
       // controlTokens con el saldo NUEVO asignado por operador (lo que arranca el próximo ciclo)
-      const ctSend = controlTokens.map(c=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0;
+      // El saldo por defecto para el próximo ciclo es el RECTIFICADO (lo contado), no el esperado.
+      const ctSend = controlTokens.map(c=>{ const def=c.saldoReal!=null?Math.max(0,c.saldoReal):0;
         const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?(Number(reparto.ops[c.nombre])||0):def;
         return {...c, nombre:(c.nombre||'').trim(), saldoNuevo:v}; });   // nombre limpio: evita filas duplicadas
       const repObj={ modoReparto:reparto.modo, ajusteTokens:ajusteNum, ajusteMotivo:reparto.ajusteMotivo||"",
@@ -7381,7 +7397,10 @@ function Recaudo({showToast, quien, rol}){
         baseConfigurada, baseEsperada, difBase, tokensTotalBase:tokensDisponibles, totalGastosDeSede:totalGastos,
         controlTokens:ctSend, tokensMaq:tokensFis, totalSaldoAnterior:totSaldoAnt, totalVendidosCiclo:totVendidos,
         totalDevTokensCiclo:totDevTokens, totalMembresiaCiclo:totMembresia, totalSaldoEsperado:totSaldoEsp, tokensPerdidos,
-        faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede };
+        faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede,
+        // rectificación física de saldos (operadores o base de sede)
+        totalSaldoReal:totSaldoReal, baseSedeContada, difBaseSede, perdidosOps, sobrantesOps,
+        rectificados:opsRect.map(c=>({nombre:c.nombre, esperado:c.saldoEsperado, contado:c.contado, diferencia:c.diferencia})) };
       const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
         total_recaudo:totalRecaudo, a_consignar:aConsignar, total_descuadre:totalDescuadre,
         total_gastos:totalGastos, tokens_perdidos:tokensPerdidos, tokens_fisicos:tokensFis,
@@ -7779,9 +7798,9 @@ function Recaudo({showToast, quien, rol}){
             </div>
             <div style={{overflowX:"auto"}}>
               <table className="tbl">
-                <thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev.</th><th className="num">Membresía</th><th className="num">Saldo esperado</th></tr></thead>
+                <thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev.</th><th className="num">Membresía</th><th className="num">Saldo esperado</th>{!prevSede && <th className="num">Contado físico</th>}{!prevSede && <th className="num">Diferencia</th>}</tr></thead>
                 <tbody>
-                  {controlTokens.length===0 && <tr><td colSpan="6"><div className="empty">Aún no hay operadores. Vuelve al paso <b>Liquidaciones</b> e importa o agrega las liquidaciones del turno — los operadores aparecerán aquí automáticamente con su saldo de tokens.</div></td></tr>}
+                  {controlTokens.length===0 && <tr><td colSpan="8"><div className="empty">Aún no hay operadores. Vuelve al paso <b>Liquidaciones</b> e importa o agrega las liquidaciones del turno — los operadores aparecerán aquí automáticamente con su saldo de tokens.</div></td></tr>}
                   {controlTokens.map(c=>(
                     <tr key={c.nombre}>
                       <td className="row-name">{c.nombre}</td>
@@ -7790,11 +7809,43 @@ function Recaudo({showToast, quien, rol}){
                       <td className="num">{c.devTokens}</td>
                       <td className="num">{c.membresia}</td>
                       <td className="num" style={{fontWeight:700,color:(c.saldoEsperado!=null&&c.saldoEsperado<0)?"var(--red)":"var(--t)"}}>{c.saldoEsperado==null?<span className="muted">base sede</span>:c.saldoEsperado}</td>
+                      {!prevSede && <td className="num">
+                        <input className="input" style={{margin:0,width:90,textAlign:"right"}} type="number" placeholder={String(c.saldoEsperado)}
+                          value={(reparto.contado||{})[c.nombre]!=null?(reparto.contado||{})[c.nombre]:""}
+                          onChange={e=>setReparto(r=>({...r,contado:{...(r.contado||{}),[c.nombre]:e.target.value}}))}/>
+                      </td>}
+                      {!prevSede && <td className="num" style={{fontWeight:800,color:c.diferencia==null?"var(--td)":c.diferencia<0?"var(--red)":c.diferencia>0?"var(--amber)":"var(--green)"}}>
+                        {c.diferencia==null?"—":c.diferencia===0?"✓ 0":(c.diferencia>0?"+":"")+c.diferencia}
+                      </td>}
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            {!prevSede && controlTokens.length>0 && (
+              <div className="muted" style={{fontSize:12,marginTop:6}}>
+                <b>Rectificación:</b> escribe en <b>Contado físico</b> los tokens que de verdad tiene cada operador en la mano. Si no lo llenas, se toma el esperado.
+                {opsRect.length>0 && (
+                  <span> · Rectificados {opsRect.length}/{controlTokens.length}
+                    {perdidosOps>0 && <b style={{color:"var(--red)"}}> · perdidos {perdidosOps} (≈ {fmt(perdidosOps*5000)})</b>}
+                    {sobrantesOps>0 && <b style={{color:"var(--amber)"}}> · sobrantes {sobrantesOps}</b>}
+                    {perdidosOps===0 && sobrantesOps===0 && <b style={{color:"var(--green)"}}> · todos cuadran ✓</b>}
+                  </span>)}
+              </div>
+            )}
+            {prevSede && (
+              <div style={{marginTop:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+                <div style={{flex:"1 1 200px"}}>
+                  <label className="label">Rectificación · tokens de la base contados físicamente</label>
+                  <input className="input" style={{margin:0}} type="number" placeholder={String(totSaldoEsp)} value={reparto.baseSedeContada!=null?reparto.baseSedeContada:""}
+                    onChange={e=>setReparto(r=>({...r,baseSedeContada:e.target.value}))}/>
+                </div>
+                <div style={{flex:"1 1 200px",fontSize:13}}>
+                  Esperado en la base: <b>{totSaldoEsp}</b>
+                  {difBaseSede!=null && <span> · Diferencia: <b style={{color:difBaseSede<0?"var(--red)":difBaseSede>0?"var(--amber)":"var(--green)"}}>{difBaseSede===0?"✓ 0":(difBaseSede>0?"+":"")+difBaseSede}</b>{difBaseSede<0 && <span className="muted"> (≈ {fmt(-difBaseSede*5000)} perdidos)</span>}</span>}
+                </div>
+              </div>
+            )}
             <div style={{marginTop:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
               <div style={{flex:"1 1 200px"}}>
                 <label className="label">Ajuste de tokens (+ ingresan / − salen a otra sede)</label>
@@ -7808,7 +7859,8 @@ function Recaudo({showToast, quien, rol}){
             <div className="card" style={{marginTop:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
               <span>Tokens disponibles (base)</span><span style={{color:"var(--amber)"}}>{tokensDisponibles}</span>
             </div>
-            <div className="muted" style={{fontSize:12,marginTop:-4}}>= {tokensFis} máquinas {totSaldoEsp>=0?"+ ":"− "}{Math.abs(totSaldoEsp)} saldos {ajusteNum>=0?"+ ":"− "}{Math.abs(ajusteNum)} ajuste</div>
+            <div className="muted" style={{fontSize:12,marginTop:-4}}>= {tokensFis} máquinas {totSaldoReal>=0?"+ ":"− "}{Math.abs(totSaldoReal)} saldos{(opsRect.length>0||baseSedeContada!=null)?" (rectificados)":""} {ajusteNum>=0?"+ ":"− "}{Math.abs(ajusteNum)} ajuste</div>
+            {perdidosOps>0 && <div style={{marginTop:8,fontWeight:700,color:"var(--red)"}}>⚠ {perdidosOps} tokens perdidos en la rectificación{opsRect.filter(c=>c.diferencia<0).length?": "+opsRect.filter(c=>c.diferencia<0).map(c=>c.nombre+" ("+c.diferencia+")").join(", "):""}{difBaseSede!=null&&difBaseSede<0?" · base de sede ("+difBaseSede+")":""} · ≈ {fmt(perdidosOps*5000)}</div>}
             {faltanteMaqTokens!==0 && <div style={{marginTop:8,fontWeight:700,color:faltanteMaqTokens>0?"var(--red)":"var(--amber)"}}>{faltanteMaqTokens>0?("⚠ Faltan "+faltanteMaqTokens+" tokens (contadores de máquina dicen más que lo contado físico) · ≈ "+fmt(faltanteMaqTokens*5000)):("Sobran "+Math.abs(faltanteMaqTokens)+" tokens físicos vs contadores")}</div>}
             {opsNegativos.length>0 && <div style={{marginTop:6,color:"var(--red)",fontWeight:700}}>⚠ {opsNegativos.length} operador(es) con saldo negativo (vendieron más de lo que tenían): {opsNegativos.map(o=>o.nombre).join(", ")}</div>}
             {faltanteMaqTokens===0 && opsNegativos.length===0 && <div style={{marginTop:8,color:"var(--green)",fontWeight:700}}>✓ Tokens cuadran</div>}
@@ -7824,14 +7876,14 @@ function Recaudo({showToast, quien, rol}){
               </div>
             ) : (
               <div>
-                <div className="muted" style={{fontSize:12,marginBottom:8}}>Cuántos tokens le dejas a cada operador para arrancar el próximo ciclo:</div>
-                {controlTokens.map(c=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0; const val=(reparto.ops&&reparto.ops[c.nombre]!=null)?reparto.ops[c.nombre]:String(def); return (
+                <div className="muted" style={{fontSize:12,marginBottom:8}}>Cuántos tokens le dejas a cada operador para arrancar el próximo ciclo (por defecto, lo que contó físicamente):</div>
+                {controlTokens.map(c=>{ const def=c.saldoReal!=null?Math.max(0,c.saldoReal):0; const val=(reparto.ops&&reparto.ops[c.nombre]!=null)?reparto.ops[c.nombre]:String(def); return (
                   <div key={c.nombre} style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-                    <span className="row-name" style={{flex:1}}>{c.nombre}</span>
+                    <span className="row-name" style={{flex:1}}>{c.nombre}{c.contado!=null && <span className="muted" style={{fontSize:11,marginLeft:6}}>contó {c.contado}</span>}</span>
                     <input className="input" style={{margin:0,width:120,textAlign:"right"}} type="number" value={val} onChange={e=>setReparto(r=>({...r,ops:{...(r.ops||{}),[c.nombre]:e.target.value}}))}/>
                   </div>
                 );})}
-                {(()=>{ const rep=controlTokens.reduce((a,c)=>{ const def=c.saldoEsperado!=null?Math.max(0,c.saldoEsperado):0; const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?Number(reparto.ops[c.nombre]):def; return a+(Number(v)||0); },0); const sin=tokensDisponibles-rep; return (
+                {(()=>{ const rep=controlTokens.reduce((a,c)=>{ const def=c.saldoReal!=null?Math.max(0,c.saldoReal):0; const v=(reparto.ops&&reparto.ops[c.nombre]!=null&&reparto.ops[c.nombre]!=="")?Number(reparto.ops[c.nombre]):def; return a+(Number(v)||0); },0); const sin=tokensDisponibles-rep; return (
                   <div className="card" style={{marginTop:8,display:"flex",justifyContent:"space-between",fontWeight:700}}><span>Disponibles {tokensDisponibles} · Repartidos {rep}</span><span style={{color:sin===0?"var(--green)":"var(--amber)"}}>Sin repartir: {sin}</span></div>
                 );})()}
               </div>
@@ -7843,7 +7895,7 @@ function Recaudo({showToast, quien, rol}){
         {paso==='resumen' && (
           <div className="card" style={{maxWidth:560}}>
             <div className="card-t">Resumen del ciclo</div>
-            {[['Liquidaciones',liqs.length],['Efectivo de liquidaciones',fmt(efLiquidaciones)],['Monedas de máquinas',fmt(monedasFis)],['Total recaudo',fmt(totalRecaudo)],['Gastos',fmt(totalGastos)],['A consignar',fmt(aConsignar)],['Descuadre efectivo',fmt(totalDescuadre)],['Base de tokens (nueva)',tokensDisponibles],['Faltante tokens máquina',faltanteMaqTokens],['Operadores con saldo negativo',opsNegativos.length]].map(([l,v])=>(
+            {[['Liquidaciones',liqs.length],['Efectivo de liquidaciones',fmt(efLiquidaciones)],['Monedas de máquinas',fmt(monedasFis)],['Total recaudo',fmt(totalRecaudo)],['Gastos',fmt(totalGastos)],['A consignar',fmt(aConsignar)],['Descuadre efectivo',fmt(totalDescuadre)],['Base de tokens (nueva)',tokensDisponibles],['Faltante tokens máquina',faltanteMaqTokens],['Tokens perdidos (rectificación)',perdidosOps],['Operadores con saldo negativo',opsNegativos.length]].map(([l,v])=>(
               <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid var(--bd)"}}><span className="muted">{l}</span><b>{v}</b></div>
             ))}
             <button className="btn btn-amber" style={{width:"100%",marginTop:14}} disabled={busy} onClick={cerrar}>{busy?"Cerrando…":"✅ Cerrar ciclo y guardar"}</button>
@@ -8429,6 +8481,16 @@ function Recaudo({showToast, quien, rol}){
         if(descEf!==0) alertas.push(['warning','⚠️ Descuadre de efectivo en liquidaciones: '+fmt(descEf)]);
         if(opsNeg.length) alertas.push(['danger','🚨 '+opsNeg.length+' operador(es) con saldo negativo (vendieron más de lo que tenían): '+opsNeg.map(o=>o.nombre+' ('+o.saldoEsperado+')').join(', ')]);
         if(ajuste!==0) alertas.push(['warning',(ajuste<0?'📤 Retiro':'📥 Ingreso')+' de tokens: '+(ajuste>0?'+':'')+ajuste+(rep.ajusteMotivo?(' — '+rep.ajusteMotivo):'')]);
+        // rectificación física de saldos (operadores o base de sede)
+        const rectif=(rep.rectificados||[]);
+        const hayRect=rectif.length>0 || rep.baseSedeContada!=null;
+        const perdRect=Number(rep.perdidosOps)||0, sobRect=Number(rep.sobrantesOps)||0;
+        if(perdRect>0) alertas.push(['danger','🚨 '+perdRect+' tokens perdidos en la rectificación (≈ '+fmt(perdRect*5000)+'): '
+          +rectif.filter(o=>Number(o.diferencia)<0).map(o=>o.nombre+' ('+o.diferencia+')').join(', ')
+          +(rep.difBaseSede!=null&&Number(rep.difBaseSede)<0?' base de sede ('+rep.difBaseSede+')':'')]);
+        if(sobRect>0) alertas.push(['warning','⚠️ '+sobRect+' tokens sobrantes en la rectificación: '
+          +rectif.filter(o=>Number(o.diferencia)>0).map(o=>o.nombre+' (+'+o.diferencia+')').join(', ')
+          +(rep.difBaseSede!=null&&Number(rep.difBaseSede)>0?' base de sede (+'+rep.difBaseSede+')':'')]);
         return (
         <div className="modal-bg" onClick={()=>setDetalle(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:800,maxHeight:"88vh",overflowY:"auto"}}>
@@ -8485,6 +8547,13 @@ function Recaudo({showToast, quien, rol}){
                       <span>= Saldo esperado{modoRep==='sede'?' (base sede)':''}</span>
                       <span style={{color:sEsp<0?"var(--red)":"var(--green)"}}>{sEsp}</span>
                     </div>
+                    {hayRect && rep.totalSaldoReal!=null && (()=>{ const real=Number(rep.totalSaldoReal)||0; const d=real-sEsp; return (<div>
+                      {fila('🔎 Rectificación · contado físico'+(modoRep==='sede'?' (base sede)':' (Σ operadores)'), real)}
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid var(--bd)"}}>
+                        <span className="muted">Diferencia vs esperado</span>
+                        <b style={{color:d<0?"var(--red)":d>0?"var(--amber)":"var(--green)"}}>{d===0?"✓ 0":(d>0?"+":"")+d}{d<0?" (perdidos)":d>0?" (sobrantes)":""}</b>
+                      </div>
+                    </div>); })()}
                     {fila('+ Tokens físicos contados', tokFis)}
                     {aj!==0 && fila('+ Ajuste'+(rep.ajusteMotivo?(' — '+rep.ajusteMotivo):''), (aj>0?'+':'')+aj)}
                     <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontWeight:800,fontSize:15}}>
@@ -8501,8 +8570,14 @@ function Recaudo({showToast, quien, rol}){
 
             {ct.length>0 && <div>
               <div className="card-t" style={{marginTop:14}}>Control de tokens por operador</div>
-              <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev</th><th className="num">Memb.</th><th className="num">Saldo esp.</th></tr></thead>
-                <tbody>{ct.map((o,i)=>(<tr key={i}><td className="row-name">{o.nombre}</td><td className="num muted">{o.historial?o.historial.saldo:0}</td><td className="num">{o.vendidosEsteC}</td><td className="num">{o.devTokensEsteC}</td><td className="num">{o.membresiaEsteC}</td><td className="num" style={{fontWeight:700,color:(o.saldoEsperado!=null&&o.saldoEsperado<0)?"var(--red)":"var(--t)"}}>{o.saldoEsperado==null?"base sede":o.saldoEsperado}</td></tr>))}</tbody></table></div>
+              {(()=>{ const conRect=ct.some(o=>o.contado!=null); const conNuevo=ct.some(o=>o.saldoNuevo!=null); return (
+              <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Saldo ant.</th><th className="num">Vendidos</th><th className="num">Dev</th><th className="num">Memb.</th><th className="num">Saldo esp.</th>{conRect && <th className="num">Contado</th>}{conRect && <th className="num">Dif.</th>}{conNuevo && <th className="num">Dejado</th>}</tr></thead>
+                <tbody>{ct.map((o,i)=>{ const d=o.diferencia!=null?Number(o.diferencia):null; return (<tr key={i}><td className="row-name">{o.nombre}</td><td className="num muted">{o.historial?o.historial.saldo:0}</td><td className="num">{o.vendidosEsteC}</td><td className="num">{o.devTokensEsteC}</td><td className="num">{o.membresiaEsteC}</td><td className="num" style={{fontWeight:700,color:(o.saldoEsperado!=null&&o.saldoEsperado<0)?"var(--red)":"var(--t)"}}>{o.saldoEsperado==null?"base sede":o.saldoEsperado}</td>
+                  {conRect && <td className="num">{o.contado!=null?o.contado:<span className="muted">—</span>}</td>}
+                  {conRect && <td className="num" style={{fontWeight:800,color:d==null?"var(--td)":d<0?"var(--red)":d>0?"var(--amber)":"var(--green)"}}>{d==null?"—":d===0?"✓ 0":(d>0?"+":"")+d}</td>}
+                  {conNuevo && <td className="num muted">{o.saldoNuevo!=null?o.saldoNuevo:"—"}</td>}
+                </tr>); })}</tbody></table></div>
+              ); })()}
             </div>}
 
             {detalle.gastos.length>0 && <div>

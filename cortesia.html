@@ -233,9 +233,23 @@
 
   $('telefono').addEventListener('keydown',e=>{ if(e.key==='Enter') registrar(); });
 
+  // ---- campañas viejas (link ?sede=&campana=): ¿la cerraron desde el admin? ----
+  // Cerrada = no se registra gente nueva. Quien ya tenía su cortesía la sigue viendo y canjeando.
+  async function revisarCierreLegacy(){
+    if(CODIGO || !SEDE) return;
+    try{
+      const { data } = await sb.rpc('campana_legacy_estado',{ p_campana:CAMPANA||null, p_sede:SEDE });
+      if(data && data.cerrada){
+        $('err').textContent='Esta promoción ya terminó. Si ya te habías registrado, escribe tu celular y te mostramos tu cortesía.';
+        $('nombre').placeholder='Solo si ya te registraste';
+        $('btn').textContent='Ver mi cortesía';
+      }
+    }catch(e){}
+  }
+
   (async function(){
     if(VER){ $('form').classList.add('hidden'); await verCortesia(); return; }
-    if(CODIGO) await cargarCampana();
+    if(CODIGO) await cargarCampana(); else await revisarCierreLegacy();
     // Si ya se registró desde este celular en esta campaña, se le muestra su QR (no puede sacar otra)
     const p=yaRegistrado(); if(p && p.id) mostrarOk(p, p.nombre, true);
   })();

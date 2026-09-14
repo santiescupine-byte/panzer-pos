@@ -796,6 +796,16 @@ const db = {
     const {error}=await sb.from('campanas').delete().eq('id',id); if(error) throw error;
   },
   // registrados de cada campaña, para el contador del panel
+  // ---- campañas VIEJAS (link ?sede=&campana=): se listan desde las cortesías y se cierran aparte ----
+  async listCampanasLegacy(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('campanas_legacy_resumen'); if(error) return []; return data||[];
+  },
+  async cerrarCampanaLegacy(campana,sede,cerrar,quien){
+    if(DEMO_MODE) return;
+    if(cerrar){ const {error}=await sb.from('campanas_legacy_cerradas').upsert({campana,sede,por:quien||null},{onConflict:'campana,sede'}); if(error) throw error; }
+    else { const {error}=await sb.from('campanas_legacy_cerradas').delete().eq('campana',campana).eq('sede',sede); if(error) throw error; }
+  },
   async conteoCampanas(){
     if(DEMO_MODE) return {};
     const {data}=await sb.from('cortesias').select('campana_id,estado').not('campana_id','is',null).limit(5000);
@@ -2075,19 +2085,28 @@ function Empleados({showToast, quien}){
 //   código. Ahora cada campaña tiene sus textos, sus sedes, su cupo y su
 //   vigencia, y el link sale de aquí.
 // ============================================================
-function Campanas({showToast, sedes}){
+function Campanas({showToast, sedes, quien}){
   const [items,setItems]=useState(null);
   const [conteo,setConteo]=useState({});
   const [ed,setEd]=useState(null);
   const [busy,setBusy]=useState(false);
   const [conf,setConf]=useState(null);
 
+  const [legacy,setLegacy]=useState(null);   // campañas viejas (link ?sede=&campana=)
+
   const cargar=async()=>{
-    try{ const [c,n]=await Promise.all([db.listCampanas(), db.conteoCampanas()]);
-      setItems(c); setConteo(n); }
-    catch(e){ showToast(""+(e.message||e),"err"); setItems([]); }
+    try{ const [c,n,l]=await Promise.all([db.listCampanas(), db.conteoCampanas(), db.listCampanasLegacy()]);
+      setItems(c); setConteo(n); setLegacy(l); }
+    catch(e){ showToast(""+(e.message||e),"err"); setItems([]); setLegacy([]); }
   };
   useEffect(()=>{ cargar(); },[]);
+  const toggleLegacy=async(l,cerrar)=>{
+    setBusy(true);
+    try{ await db.cerrarCampanaLegacy(l.campana,l.sede,cerrar,(quien&&quien.nombre)||'admin'); await cargar();
+      showToast(cerrar?"Campaña cerrada: ya no se registra gente nueva ✓":"Campaña reabierta ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+    finally{ setBusy(false); }
+  };
 
   const linkDe=c=>location.origin+location.pathname.replace(/[^/]*$/,'')+'cortesia.html?c='+encodeURIComponent(c.codigo);
   const copiar=c=>{ try{ navigator.clipboard.writeText(linkDe(c)); showToast("Link copiado ✓","ok"); }catch(e){} };
@@ -2256,9 +2275,40 @@ function Campanas({showToast, sedes}){
         </div>
       )}
 
-      {items.length>0 && <div className="muted" style={{fontSize:12,margin:"12px 0 4px"}}>
-        Abajo siguen las campañas viejas (las de links <code>?sede=…</code>) con sus registrados.
-      </div>}
+      {/* ---------- campañas viejas (link ?sede=&campana=) ---------- */}
+      {legacy!==null && legacy.length>0 && (
+        <div style={{marginTop:18}}>
+          <div className="sec-title" style={{fontSize:14,marginBottom:4}}>📜 Campañas anteriores <span className="muted">({legacy.length})</span></div>
+          <div className="muted" style={{fontSize:12,marginBottom:10}}>
+            Son las de los links viejos (<code>?sede=…&campana=…</code>). <b>Cerrar</b> = ya no se registra gente nueva; los que ya tienen su cortesía la siguen canjeando hasta que se les venza. No se borra nada y se puede reabrir.
+          </div>
+          <div className="card" style={{padding:0,overflowX:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th>Campaña</th><th>Sede</th><th className="num">Registrados</th><th className="num">Canjeadas</th><th className="num">Por canjear</th><th>Último registro</th><th>Estado</th><th></th></tr></thead>
+              <tbody>
+                {legacy.map(l=>(
+                  <tr key={l.campana+'|'+l.sede} style={{opacity:l.cerrada?.7:1}}>
+                    <td className="row-name">{l.campana||"(sin nombre)"}</td>
+                    <td className="muted">{String(l.sede||"").replace(/\s*\(franquicia\)/i,'')}</td>
+                    <td className="num">{l.registros}</td>
+                    <td className="num" style={{color:"var(--green)"}}>{l.canjeadas}</td>
+                    <td className="num">{l.pendientes}</td>
+                    <td className="muted">{l.ultima||"—"}</td>
+                    <td>{l.cerrada
+                      ? <span className="pill pill-off">🔒 Cerrada{l.cerrada_en?" · "+String(l.cerrada_en).slice(0,10):""}</span>
+                      : <span className="pill pill-prod">Abierta</span>}</td>
+                    <td>{l.cerrada
+                      ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>toggleLegacy(l,false)}>↩ Reabrir</button>
+                      : <button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>setConf({titulo:"Cerrar "+(l.campana||l.sede), peligro:false,
+                          texto:"Ya nadie más se podrá registrar por ese link. Los "+l.pendientes+" que tienen cortesía pendiente la siguen canjeando normal. Puedes reabrirla cuando quieras.",
+                          textoBoton:"Cerrar campaña", onOk:()=>toggleLegacy(l,true)})}>🔒 Cerrar</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {conf && (
         <div className="modal-bg" onClick={()=>!busy&&setConf(null)}>
@@ -9536,7 +9586,7 @@ function Membresias({showToast, admin}){
 
       {vista==='cortesias' && (
         <div>
-          <Campanas showToast={showToast} sedes={sedesList}/>
+          <Campanas showToast={showToast} sedes={sedesList} quien={{nombre:admin}}/>
 
           {cortesias===null ? <div className="empty">Cargando cortesías…</div> : (()=>{
             const sedeTxt=s=>String(s||'—').replace(/\|/g,' o ');   // "A|B" -> "A o B"

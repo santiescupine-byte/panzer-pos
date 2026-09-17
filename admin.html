@@ -1449,22 +1449,6 @@ const db = {
     if(f.operador) q=q.eq('operador',f.operador);
     const {data,error}=await q; if(error) throw error; return data;
   },
-  // ---- ABONOS QR: plata que entró a la cuenta (SMS de Bold) y quién la reclamó en el POS ----
-  async listAbonos(desdeISO){
-    if(DEMO_MODE) return [];
-    const out=[]; const paso=1000;
-    for(let i=0;i<20;i++){
-      const {data,error}=await sb.from('abonos').select('*').gte('recibido_en',desdeISO)
-        .order('fecha_pago',{ascending:false}).range(i*paso,(i+1)*paso-1);
-      if(error) throw error;
-      out.push(...(data||[])); if(!data || data.length<paso) break;
-    }
-    return out;
-  },
-  async liberarAbono(id, admin){
-    if(DEMO_MODE) return {ok:true};
-    const {data,error}=await sb.rpc('liberar_abono',{p_id:id, p_admin:admin||'admin'}); if(error) throw error; return data;
-  },
   // ---- Solicitudes de anulación que mandan los cajeros desde el POS ----
   async listSolicitudesAnulacion(){
     if(DEMO_MODE) return [];
@@ -7424,116 +7408,6 @@ function HojaVidaModal({equipo, onClose}){
 // SECCIÓN: RECAUDO / TESORERÍA — ciclo de cierre por sede (migrado de Sheets)
 // ============================================================
 const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina 5','Máquina 6','Aspiradora','Canillita'];
-// ============================================================
-// ABONOS QR — lo que de verdad entró a la cuenta Bold y quién lo reclamó.
-// Un abono SIN reclamar = plata que entró y ningún cajero la amarró a una venta
-// (o nadie verificó). Un QR registrado en una liquidación sin abono que lo
-// respalde = posible comprobante falso.
-// ============================================================
-function AbonosQR({showToast, quien, rol}){
-  const [dias,setDias]=useState(1);
-  const [rows,setRows]=useState(null);
-  const [fEstado,setFEstado]=useState('todos');   // todos | libres | reclamados
-  const [fSede,setFSede]=useState('');
-  const [conf,setConf]=useState(null);
-  const [busy,setBusy]=useState(false);
-
-  const cargar=async()=>{
-    setRows(null);
-    try{ const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-(dias-1));
-      setRows(await db.listAbonos(d.toISOString())); }
-    catch(e){ showToast(""+(e.message||e),"err"); setRows([]); }
-  };
-  useEffect(()=>{ cargar(); },[dias]);
-
-  const hora=iso=>iso?(fLocalDia(iso)+" "+fLocalHora(iso)):"—";
-  const all=rows||[];
-  const sedes=[...new Set(all.map(a=>a.reclamado_sede).filter(Boolean))].sort();
-  const vis=all.filter(a=>(fEstado==='todos'||(fEstado==='libres'?!a.reclamado_en:!!a.reclamado_en)) && (!fSede||a.reclamado_sede===fSede));
-  const sum=a=>a.reduce((x,r)=>x+(Number(r.valor)||0),0);
-  const libres=all.filter(a=>!a.reclamado_en), recl=all.filter(a=>a.reclamado_en);
-  const ultimo=all.length?all.reduce((m,a)=>a.recibido_en>m?a.recibido_en:m,all[0].recibido_en):null;
-  const minUlt=ultimo?Math.round((Date.now()-new Date(ultimo))/60000):null;
-  const porOp={}; recl.forEach(a=>{ const k=a.reclamado_por+'|'+a.reclamado_sede; (porOp[k]=porOp[k]||{op:a.reclamado_por,sede:a.reclamado_sede,n:0,v:0}); porOp[k].n++; porOp[k].v+=Number(a.valor)||0; });
-  const opsRows=Object.values(porOp).sort((a,b)=>b.v-a.v);
-
-  const liberar=a=>setConf({a});
-  const confirmarLiberar=async()=>{ setBusy(true);
-    try{ await db.liberarAbono(conf.a.id,quien); setConf(null); await cargar(); showToast("Abono liberado: vuelve a la lista del POS ✓","ok"); }
-    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
-
-  return (
-    <div>
-      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>💸 Pagos QR que entraron a la cuenta Bold.</b> <span className="muted">Llegan solos por el SMS de BoldCF. En el POS el cajero los reclama con "Verificar pago" antes de entregar. Lo que un cajero registre por QR y no tenga abono reclamado, no entró.</span>
-      </div>
-      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
-        <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
-          {[[1,"Hoy"],[7,"7 días"],[30,"30 días"]].map(([d,l])=>(
-            <button key={d} className={"btn btn-sm "+(dias===d?'btn-amber':'btn-ghost')} onClick={()=>setDias(d)}>{l}</button>))}
-        </div>
-        <select className="select" style={{maxWidth:180,margin:0}} value={fEstado} onChange={e=>setFEstado(e.target.value)}>
-          <option value="todos">Todos</option><option value="libres">Sin reclamar</option><option value="reclamados">Reclamados</option>
-        </select>
-        <select className="select" style={{maxWidth:180,margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}>
-          <option value="">Todas las sedes</option>{sedes.map(x=><option key={x} value={x}>{x}</option>)}
-        </select>
-        <button className="btn btn-ghost btn-sm" onClick={cargar}>↻ Actualizar</button>
-        <span className="muted" style={{marginLeft:"auto",fontSize:12}}>
-          {ultimo===null ? "Aún no ha llegado ningún SMS" : <span>Último SMS recibido <b style={{color:minUlt>180?"var(--red)":"var(--green)"}}>{minUlt<60?("hace "+minUlt+" min"):("hace "+Math.round(minUlt/60)+" h")}</b></span>}
-        </span>
-      </div>
-
-      {rows===null ? <div className="empty">Cargando…</div> : (<div>
-        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
-          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Entró a la cuenta</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(sum(all))}</div><div className="muted" style={{fontSize:11}}>{all.length} pagos</div></div>
-          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">✅ Reclamado en el POS</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{fmt(sum(recl))}</div><div className="muted" style={{fontSize:11}}>{recl.length} pagos</div></div>
-          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">⏳ Sin reclamar</div><div style={{fontSize:24,fontWeight:800,color:libres.length?"var(--red)":"var(--t)"}}>{fmt(sum(libres))}</div><div className="muted" style={{fontSize:11}}>{libres.length} pagos · nadie los verificó</div></div>
-        </div>
-
-        {opsRows.length>0 && (
-          <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
-            <table className="tbl">
-              <thead><tr><th>Cajero</th><th>Sede</th><th className="num">Pagos verificados</th><th className="num">Total</th></tr></thead>
-              <tbody>{opsRows.map(o=>(<tr key={o.op+o.sede}><td className="row-name">{o.op}</td><td className="muted">{o.sede}</td><td className="num">{o.n}</td><td className="num" style={{fontWeight:700}}>{fmt(o.v)}</td></tr>))}</tbody>
-            </table>
-          </div>)}
-
-        <div className="card" style={{padding:0,overflowX:"auto"}}>
-          <table className="tbl">
-            <thead><tr><th>Pago</th><th className="num">Valor</th><th>Estado</th><th>Verificado</th><th className="num">Demora</th><th></th></tr></thead>
-            <tbody>
-              {vis.length===0 && <tr><td colSpan="6"><div className="empty">No hay abonos con ese filtro.</div></td></tr>}
-              {vis.slice(0,400).map(a=>{ const dem=a.reclamado_en?Math.round((new Date(a.reclamado_en)-new Date(a.fecha_pago))/60000):null; return (
-                <tr key={a.id}>
-                  <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(a.fecha_pago)}</td>
-                  <td className="num" style={{fontWeight:800}}>{fmt(a.valor)}</td>
-                  <td>{a.reclamado_en ? <span className="pill pill-prod">✓ {a.reclamado_por} · {a.reclamado_sede}</span> : <span className="pill pill-off" style={{color:"var(--red)"}}>Sin reclamar</span>}</td>
-                  <td className="muted" style={{whiteSpace:"nowrap"}}>{a.reclamado_en?hora(a.reclamado_en):"—"}</td>
-                  <td className="num muted" title="Tiempo entre que entró el pago y que el cajero lo verificó">{dem===null?"—":dem<60?(dem+" min"):(Math.round(dem/60)+" h")}</td>
-                  <td>{a.reclamado_en && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={()=>liberar(a)}>Liberar</button>}</td>
-                </tr>);})}
-            </tbody>
-          </table>
-          {vis.length>400 && <div className="muted" style={{padding:12}}>Mostrando 400 de {vis.length}.</div>}
-        </div>
-      </div>)}
-
-      {conf && (
-        <div className="modal-bg" onClick={()=>!busy&&setConf(null)}>
-          <div className="modal" style={{maxWidth:420}} onClick={e=>e.stopPropagation()}>
-            <div className="modal-t">Liberar abono de {fmt(conf.a.valor)}</div>
-            <div className="muted" style={{fontSize:13,lineHeight:1.5}}>Lo tiene <b style={{color:"var(--t)"}}>{conf.a.reclamado_por}</b> en {conf.a.reclamado_sede}. Al liberarlo vuelve a la lista del POS para que lo reclame el cajero correcto. Queda anotado quién lo tenía.</div>
-            <div className="modal-actions">
-              <button className="btn btn-ghost" disabled={busy} onClick={()=>setConf(null)}>Cancelar</button>
-              <button className="btn btn-amber" disabled={busy} onClick={confirmarLiberar}>{busy?"Liberando…":"Liberar"}</button>
-            </div>
-          </div>
-        </div>)}
-    </div>
-  );
-}
-
 function Recaudo({showToast, quien, rol}){
   const [paso,setPaso]=useState('inicio');   // inicio|liquidaciones|maquinas|conteo|gastos|reparto|resumen|historial
   const [sedes,setSedes]=useState([]);
@@ -7930,10 +7804,9 @@ function Recaudo({showToast, quien, rol}){
 
   return (
     <div>
-      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='saldos'||paso==='frhist'||paso==='frmaq'||paso==='abonos'); return (
+      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='saldos'||paso==='frhist'||paso==='frmaq'); return (
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
-        {!sub && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('abonos')}>💸 Abonos QR</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirSaldos}>🪙 Saldos</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
@@ -7943,8 +7816,6 @@ function Recaudo({showToast, quien, rol}){
         {sub && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso(esFranquicia?'fr':'inicio')}>← Volver</button>}
       </div>
       );})()}
-
-      {paso==='abonos' && <AbonosQR showToast={showToast} quien={quien} rol={rol}/>}
 
       {/* INICIO */}
       {paso==='inicio' && (

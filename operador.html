@@ -518,6 +518,13 @@ const db = {
       .eq('reclamado_por',operador).gte('reclamado_en',desdeISO).order('reclamado_en',{ascending:false}).limit(200);
     if(error) return []; return data||[];
   },
+  // QR ya registrado en recibos del turno (se lee de la base: sirve aunque haya vuelto a entrar al POS)
+  async qrRegistradoTurno(sede, operador, desdeISO){
+    if(DEMO_MODE) return 0;
+    const { data, error } = await sb.from('ventas').select('pago_qr')
+      .eq('sede',sede).eq('operador',operador).eq('anulada',false).gt('pago_qr',0).gte('created_at',desdeISO).limit(1000);
+    if(error) return 0; return (data||[]).reduce((a,v)=>a+Number(v.pago_qr||0),0);
+  },
   async reclamarAbono(id, operador, sede){
     if(DEMO_MODE) return {ok:true};
     const { data, error } = await sb.rpc('reclamar_abono',{ p_id:id, p_operador:operador, p_sede:sede });
@@ -1044,7 +1051,7 @@ function App(){
       {showCart && (
         <CartSheet cart={cart} total={totalCart} bruto={brutoCart} descTotal={descTotal} busy={busy}
           descuentos={descuentos} descTicket={descTicket} setDescTicket={setDescTicket} onLineDesc={setLineDesc}
-          lineFull={lineFull} lineNet={lineNet}
+          lineFull={lineFull} lineNet={lineNet} sede={sede} operador={operador} turno={turno}
           onClose={()=>setShowCart(false)} onQty={changeQty} onSetQty={setQty} onSplit={separarUnidad} onCobrar={cobrar}/>
       )}
 
@@ -1389,12 +1396,30 @@ function QtyInput({value,onSet}){
     onKeyDown={e=>{ if(e.key==='Enter') e.target.blur(); }}
     style={{width:54,textAlign:"center",background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--tb)",fontSize:15,fontWeight:800,padding:"6px 2px"}}/>;
 }
-function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,onClose,onQty,onSetQty,onSplit,onCobrar}){
+function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,sede,operador,turno,onClose,onQty,onSetQty,onSplit,onCobrar}){
   const [paso,setPaso]=useState("carrito"); // carrito | pago
   const hayDesc = (descuentos||[]).length>0;
   const selStyle={background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--blue)",fontSize:11,fontWeight:600,padding:"2px 4px",marginTop:2};
   const [metodo,setMetodo]=useState("efectivo"); // efectivo | qr | tarjeta | mixto
   const [ef,setEf]=useState(""); const [qr,setQr]=useState(""); const [tj,setTj]=useState("");
+
+  // ---- SUGERIDO DE QR: lo verificado en "Verificar pago" que todavía no está en ningún recibo ----
+  // Por ahora es solo una sugerencia editable. Más adelante será automático.
+  const [qrInfo,setQrInfo]=useState(null);   // {verificado, registrado, disponible} | null mientras carga
+  useEffect(()=>{ if(paso!=="pago" || DEMO_MODE || !operador) return;
+    const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+    let vivo=true;
+    Promise.all([db.misAbonos(operador,d), db.qrRegistradoTurno(sede,operador,d)])
+      .then(([ab,reg])=>{ if(!vivo) return; const ver=ab.reduce((a,x)=>a+Number(x.valor||0),0);
+        setQrInfo({verificado:ver, registrado:reg, disponible:Math.max(0,ver-reg)}); })
+      .catch(()=>{ if(vivo) setQrInfo(null); });
+    return ()=>{ vivo=false; };
+  },[paso]);
+  const sugQr = qrInfo ? Math.min(qrInfo.disponible, total) : 0;      // lo que cabe en este recibo
+  const usarSugeridoMixto=()=>{ setMetodo("mixto"); setQr(sugQr?String(sugQr):""); setEf(String(Math.max(0,total-sugQr))); setTj(""); };
+  const elegirMetodo=k=>{ setMetodo(k);
+    // al entrar a mixto con los campos vacíos, se propone el QR verificado y el resto en efectivo
+    if(k==="mixto" && qrInfo && ef==="" && qr==="" && tj===""){ setQr(sugQr?String(sugQr):""); setEf(String(Math.max(0,total-sugQr))); } };
 
   const pago = ()=>{
     if(metodo==="efectivo") return {efectivo:total,qr:0,tarjeta:0};
@@ -1479,10 +1504,24 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
             <div className="card-t">💵 Método de pago</div>
             <div className="pay-opts">
               {[["efectivo","Efectivo"],["qr","QR/Transf."],["tarjeta","Tarjeta"]].map(([k,l])=>(
-                <div key={k} className={"pay-opt"+(metodo===k?" active":"")} onClick={()=>setMetodo(k)}>{l}</div>
+                <div key={k} className={"pay-opt"+(metodo===k?" active":"")} onClick={()=>elegirMetodo(k)}>{l}</div>
               ))}
             </div>
-            <div className={"pay-opt"+(metodo==="mixto"?" active":"")} style={{marginBottom:12}} onClick={()=>setMetodo("mixto")}>Pago mixto</div>
+            <div className={"pay-opt"+(metodo==="mixto"?" active":"")} style={{marginBottom:12}} onClick={()=>elegirMetodo("mixto")}>Pago mixto</div>
+
+            {/* sugerido según los pagos QR verificados */}
+            {(metodo==="qr"||metodo==="mixto") && qrInfo && (()=>{ const d=qrInfo.disponible; const qrEste=p.qr;
+              const ok = d>0 && qrEste===Math.min(d,total) && (metodo==="mixto" || d>=total);
+              const col = d===0 ? "var(--amber)" : (qrEste>d ? "var(--red)" : "var(--green)");
+              return (
+              <div style={{marginBottom:12,padding:"10px 12px",borderRadius:12,border:"1px solid "+col,background:d===0?"var(--amber-d)":(qrEste>d?"var(--red-d)":"var(--green-d)")}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>💸 Pagos QR verificados sin registrar</span><b>{fmt(d)}</b></div>
+                {d===0 && <div style={{fontSize:12.5,marginTop:4,color:"var(--amber)",fontWeight:700}}>No tienes pagos QR verificados pendientes. Verifícalos primero en 💸 Verificar pago.</div>}
+                {d>0 && qrEste>d && <div style={{fontSize:12.5,marginTop:4,color:"var(--red)",fontWeight:700}}>Este recibo cobra {fmt(qrEste)} por QR, pero solo tienes {fmt(d)} verificados. ¿El resto fue en efectivo?</div>}
+                {d>0 && qrEste<=d && <div style={{fontSize:12.5,marginTop:4,color:"var(--green)",fontWeight:700}}>{ok?"✓ Coincide con lo verificado":("Sugerido para este recibo: "+fmt(sugQr)+" por QR")}</div>}
+                {d>0 && !ok && <button className="btn-secondary" style={{marginTop:8,padding:"9px",borderColor:"var(--green)",color:"var(--green)"}} onClick={usarSugeridoMixto}>
+                  Usar sugerido: {fmt(sugQr)} QR{total-sugQr>0?(" + "+fmt(total-sugQr)+" efectivo"):""}</button>}
+              </div>);})()}
             {metodo==="mixto" && (
               <div>
                 <label className="label">Efectivo</label>

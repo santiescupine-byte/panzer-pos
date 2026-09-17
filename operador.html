@@ -504,6 +504,25 @@ const db = {
     if(error) return [];
     return data||[];
   },
+  // ---- ABONOS QR: plata que SÍ entró a la cuenta (la reporta el banco, no el cliente) ----
+  async abonosLibres(horas){
+    if(DEMO_MODE) return [];
+    const desde=new Date(Date.now()-(horas||6)*3600*1000).toISOString();
+    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,recibido_en,cuenta_fin')
+      .is('reclamado_en',null).gte('recibido_en',desde).order('fecha_pago',{ascending:false}).limit(200);
+    if(error) throw error; return data||[];
+  },
+  async misAbonos(operador, desdeISO){
+    if(DEMO_MODE) return [];
+    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,reclamado_en,reclamado_sede')
+      .eq('reclamado_por',operador).gte('reclamado_en',desdeISO).order('reclamado_en',{ascending:false}).limit(200);
+    if(error) return []; return data||[];
+  },
+  async reclamarAbono(id, operador, sede){
+    if(DEMO_MODE) return {ok:true};
+    const { data, error } = await sb.rpc('reclamar_abono',{ p_id:id, p_operador:operador, p_sede:sede });
+    if(error) throw error; return data;
+  },
   // ---- Solicitudes de anulación: el cajero NO borra, solo pide con un motivo ----
   async misSolicitudesAnulacion(ventaIds){
     if(DEMO_MODE || !ventaIds.length) return [];
@@ -654,6 +673,7 @@ function App(){
   const [showCierre,setShowCierre]=useState(false);
   const [showMaq,setShowMaq]=useState(false);   // sheet de máquinas / mantenimiento
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
+  const [showPagos,setShowPagos]=useState(false);     // sheet "verificar pago QR"
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"
@@ -935,7 +955,8 @@ function App(){
           <h1>{sede}</h1>
           <div className="header-sub">{operador} · Caja abierta</div>
         </div>
-        <button className="header-x" style={{marginLeft:"auto"}} onClick={()=>setMenuOpen(true)}>☰ Menú{pendTransito>0?(" ("+pendTransito+")"):""}</button>
+        <button className="header-x" style={{marginLeft:"auto",background:"var(--green-d)",borderColor:"var(--green)",color:"var(--green)",fontWeight:800}} onClick={()=>setShowPagos(true)}>💸 Verificar pago</button>
+        <button className="header-x" onClick={()=>setMenuOpen(true)}>☰ Menú{pendTransito>0?(" ("+pendTransito+")"):""}</button>
       </div>
 
       {liqPend>0 && (
@@ -972,6 +993,7 @@ function App(){
         <div className="drawer-bg" onClick={()=>setMenuOpen(false)}>
           <div className="drawer" onClick={e=>e.stopPropagation()}>
             <div className="card-t" style={{marginBottom:6}}>Menú</div>
+            <button className="drawer-item" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{setMenuOpen(false);setShowPagos(true);}}>💸 Verificar pago QR</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
             {miMeta && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMeta(true);}}>🎯 Mi meta del mes</button>}
@@ -1051,6 +1073,7 @@ function App(){
         <MetaSheet mm={miMeta} operador={operador} onClose={()=>{setShowMeta(false);cargarMiMeta(operador);}}/>
       )}
 
+      {showPagos && <PagosSheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowPagos(false)}/>}
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
       )}
@@ -1195,6 +1218,10 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   const [observaciones,setObservaciones]=useState("");
   const [sending,setSending]=useState(false);
   const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
+  const [abonosTurno,setAbonosTurno]=useState(null);   // pagos QR que este cajero verificó en el turno
+  useEffect(()=>{ if(DEMO_MODE) return;
+    const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+    db.misAbonos(operador,d).then(setAbonosTurno).catch(()=>setAbonosTurno([])); },[]);
 
   // Auto-llenar "tokens membresía" con los canjes VIP del turno (reporte_turno → tokens_canjeados).
   // Es una sugerencia: el operador puede ajustarla. No bloquea el cierre si falla.
@@ -1215,6 +1242,9 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   const valor=productosVal+tokensVal+membresiasVal;                // total
   const qr=ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
   const efectivo=ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
+  const qrSolo=ventas.reduce((s,v)=>s+(v.pago.qr||0),0);          // solo QR/transferencia (sin tarjeta)
+  const qrVerificado=(abonosTurno||[]).reduce((s,a)=>s+Number(a.valor||0),0);
+  const qrSinVerificar=Math.max(0,qrSolo-qrVerificado);
   const dev=Number(devoluciones)||0;
   const efectivoEsperado=efectivo-dev;
   const tokensRestantes=(Number(tokensBase)||0)-(Number(tokensVendidos)||0)-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
@@ -1225,7 +1255,8 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
     tokensBase:Number(tokensBase)||0, tokensVendidos:Number(tokensVendidos)||0,
     devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
     valor, valorProductos:productosVal, valorTokens:tokensVal, valorMembresias:membresiasVal,
-    qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado, observaciones,
+    qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado,
+    observaciones:(observaciones||"")+((abonosTurno&&qrSolo>0)?((observaciones?" | ":"")+"QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):""),
   });
 
   const mensajeWA=()=>{
@@ -1241,6 +1272,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
       'Total vendido: '+fmt(valor)+'\n'+
       'QR/Tarjeta: '+fmt(qr)+'\n'+
       'Efectivo: '+fmt(efectivo)+'\n'+
+      ((abonosTurno&&qrSolo>0)?('QR verificado: '+fmt(qrVerificado)+' de '+fmt(qrSolo)+(qrSinVerificar>0?(' ⚠ sin verificar '+fmt(qrSinVerificar)):' ✓')+'\n'):'')+
       '———\n'+
       'Tokens vendidos: '+p.tokensVendidos+' · Dev: '+p.devTokens+' · Membresía: '+p.tokensMembresia+'\n'+
       'Tokens restantes: '+p.tokensRestantes+'\n'+
@@ -1293,6 +1325,16 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
         {row("Total vendido", valor, "var(--tb)", true)}
         {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
         {row("Efectivo", efectivo, "var(--green)")}
+
+        {/* QR registrado vs pagos que de verdad verificó en "Verificar pago" */}
+        {abonosTurno && (qrSolo>0 || qrVerificado>0) && (
+          <div style={{margin:"10px 0",padding:"10px 12px",borderRadius:12,border:"1px solid "+(qrSinVerificar>0?"var(--red)":"var(--green)"),background:qrSinVerificar>0?"var(--red-d)":"var(--green-d)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>QR / transferencia registrado</span><b>{fmt(qrSolo)}</b></div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>Pagos QR verificados ({abonosTurno.length})</span><b>{fmt(qrVerificado)}</b></div>
+            {qrSinVerificar>0
+              ? <div style={{marginTop:6,fontWeight:800,color:"var(--red)",fontSize:13}}>⚠ Hay {fmt(qrSinVerificar)} por QR sin verificar. Ábrelos en 💸 Verificar pago antes de cerrar: lo que no aparezca ahí no entró a la cuenta.</div>
+              : <div style={{marginTop:6,fontWeight:800,color:"var(--green)",fontSize:13}}>✓ Todo lo de QR está verificado</div>}
+          </div>)}
 
         {/* Tokens (manual) */}
         <div className="card-t" style={{fontSize:14,marginTop:14}}>🪙 Control de tokens</div>
@@ -1771,6 +1813,127 @@ function TareasSheet({sede,operador,showToast,onClose}){
             {hechas.map(t=><Fila key={t.id} t={t}/>)}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SHEET: VERIFICAR PAGO QR
+// El pantallazo del cliente NO es prueba: se puede falsificar. Aquí el cajero
+// ve los abonos que de verdad entraron a la cuenta (los reporta el banco por
+// SMS). Busca el del cliente y lo RECLAMA: queda a su nombre y no le sirve a
+// nadie más. Si no aparece, no se entrega.
+// ============================================================
+function PagosSheet({sede,operador,turno,onClose}){
+  const [libres,setLibres]=useState(null);
+  const [mios,setMios]=useState([]);
+  const [q,setQ]=useState("");                 // valor que dice el cliente que pagó
+  const [sel,setSel]=useState(null);           // abono a punto de reclamar
+  const [okAbono,setOkAbono]=useState(null);   // reclamado con éxito → pantalla verde
+  const [err,setErr]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [tab,setTab]=useState('buscar');       // 'buscar' | 'mios'
+  const [ult,setUlt]=useState(null);           // hora de la última actualización
+  const desdeTurno=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+
+  const cargar=async()=>{
+    try{ const [l,m]=await Promise.all([db.abonosLibres(6), db.misAbonos(operador,desdeTurno)]);
+      setLibres(l); setMios(m); setUlt(new Date()); }
+    catch(e){ if(libres===null) setLibres([]); }
+  };
+  useEffect(()=>{ cargar(); const t=setInterval(cargar,8000); return ()=>clearInterval(t); },[]);
+
+  const hora=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
+  const hace=iso=>{ const m=Math.max(0,Math.round((Date.now()-new Date(iso))/60000)); return m<1?"ahora mismo":m<60?("hace "+m+" min"):("hace "+Math.floor(m/60)+" h "+(m%60)+" min"); };
+  const num=Number(String(q).replace(/[^0-9]/g,""))||0;
+  const lista=(libres||[]).filter(a=>!num || Math.round(Number(a.valor))===num || String(Math.round(Number(a.valor))).startsWith(String(num)));
+  const exactos=num?(libres||[]).filter(a=>Math.round(Number(a.valor))===num):[];
+
+  const reclamar=async()=>{
+    if(!sel||busy) return; setBusy(true); setErr(null);
+    try{ const r=await db.reclamarAbono(sel.id,operador,sede);
+      if(r&&r.ok){ setOkAbono(sel); setSel(null); setQ(""); cargar(); }
+      else { setErr((r&&r.error)||"No se pudo reclamar."); setSel(null); cargar(); } }
+    catch(e){ setErr("Error de conexión. Intenta de nuevo."); }
+    finally{ setBusy(false); }
+  };
+  const totalMios=mios.reduce((a,x)=>a+Number(x.valor||0),0);
+
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">💸 Verificar pago QR</div>
+        <div className="header-sub" style={{marginBottom:10}}>El pantallazo no es prueba. Entrega solo si el pago aparece aquí.</div>
+
+        {okAbono ? (
+          <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:"var(--green-d)",border:"2px solid var(--green)"}}>
+            <div style={{fontSize:54,lineHeight:1}}>✅</div>
+            <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>PAGO VERIFICADO</div>
+            <div style={{fontSize:30,fontWeight:900,margin:"6px 0"}}>{fmt(okAbono.valor)}</div>
+            <div className="header-sub">Entró a las {hora(okAbono.fecha_pago)} · quedó a tu nombre en {sede}</div>
+            <div style={{fontWeight:800,marginTop:10}}>Ya puedes entregar.</div>
+            <button className="btn-primary" style={{marginTop:14}} onClick={()=>setOkAbono(null)}>Verificar otro pago</button>
+          </div>
+        ) : (<div>
+          <div style={{display:"flex",gap:6,marginBottom:10}}>
+            <button className="btn-secondary" style={{marginTop:0,flex:1,padding:"10px",borderColor:tab==='buscar'?"var(--green)":"var(--bd)",color:tab==='buscar'?"var(--green)":"var(--t)"}} onClick={()=>setTab('buscar')}>Buscar pago</button>
+            <button className="btn-secondary" style={{marginTop:0,flex:1,padding:"10px",borderColor:tab==='mios'?"var(--green)":"var(--bd)",color:tab==='mios'?"var(--green)":"var(--t)"}} onClick={()=>setTab('mios')}>Mis verificados ({mios.length})</button>
+          </div>
+
+          {tab==='buscar' && (<div>
+            <label className="label">¿De cuánto fue el pago?</label>
+            <input className="input" type="text" inputMode="numeric" placeholder="Ej: 36000" autoFocus value={q}
+              onChange={e=>{ setQ(e.target.value.replace(/[^0-9]/g,"")); setSel(null); setErr(null); }} style={{fontSize:22,fontWeight:800,textAlign:"center"}}/>
+            {err && <div style={{margin:"8px 0",padding:"10px 12px",borderRadius:10,background:"var(--red-d)",color:"var(--red)",fontWeight:700,fontSize:13}}>{err}</div>}
+
+            {libres===null ? <div className="empty">Buscando pagos…</div> : (<div>
+              {num>0 && exactos.length===0 && (
+                <div style={{margin:"10px 0",padding:"14px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)"}}>
+                  <div style={{fontWeight:900,fontSize:15}}>⛔ No ha entrado ningún pago de {fmt(num)}</div>
+                  <div style={{fontSize:13,marginTop:4}}>NO entregues todavía. El aviso del banco tarda cerca de un minuto: espera y toca Actualizar. Si no aparece, el pago no entró.</div>
+                </div>)}
+
+              {sel && (
+                <div style={{margin:"10px 0",padding:14,borderRadius:12,border:"2px solid var(--green)",background:"var(--sf)"}}>
+                  <div style={{fontWeight:800}}>¿Este es el pago de tu cliente?</div>
+                  <div style={{fontSize:28,fontWeight:900,margin:"4px 0"}}>{fmt(sel.valor)}</div>
+                  <div className="header-sub">Entró a las {hora(sel.fecha_pago)} · {hace(sel.fecha_pago)}</div>
+                  <div className="header-sub" style={{marginTop:6}}>Compara la hora con la del comprobante. Al confirmar queda a tu nombre y nadie más lo puede usar.</div>
+                  <div style={{display:"flex",gap:8,marginTop:10}}>
+                    <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={busy} onClick={()=>setSel(null)}>No es</button>
+                    <button className="btn-primary" style={{flex:1,marginTop:0,background:"var(--green)"}} disabled={busy} onClick={reclamar}>{busy?"Confirmando…":"Sí, es de mi cliente"}</button>
+                  </div>
+                </div>)}
+
+              {!sel && lista.length>0 && <div className="header-sub" style={{margin:"10px 0 6px"}}>{num?"Pagos que coinciden":"Pagos recibidos sin reclamar (últimas 6 horas)"} · toca el de tu cliente</div>}
+              {!sel && lista.slice(0,40).map(a=>(
+                <div key={a.id} onClick={()=>{ setSel(a); setErr(null); }} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",marginBottom:6,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:"pointer"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:900,fontSize:18}}>{fmt(a.valor)}</div>
+                    <div className="header-sub">{hora(a.fecha_pago)} · {hace(a.fecha_pago)}</div>
+                  </div>
+                  <div style={{color:"var(--green)",fontWeight:800}}>Elegir ›</div>
+                </div>))}
+              {!sel && !num && lista.length===0 && <div className="empty">No hay pagos sin reclamar en las últimas 6 horas.</div>}
+
+              <button className="btn-secondary" style={{marginTop:8}} onClick={cargar}>↻ Actualizar{ult?(" · "+ult.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',second:'2-digit'})):""}</button>
+            </div>)}
+          </div>)}
+
+          {tab==='mios' && (<div>
+            <div className="result-row"><span className="result-label" style={{fontWeight:800}}>Verificados en tu turno</span><span className="result-value" style={{color:"var(--green)"}}>{fmt(totalMios)}</span></div>
+            {mios.length===0 ? <div className="empty">Aún no has verificado pagos en este turno.</div> :
+              mios.map(a=>(
+                <div key={a.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
+                  <span>✅ {hora(a.fecha_pago)} <span className="header-sub">· verificado {hora(a.reclamado_en)}</span></span><b>{fmt(a.valor)}</b>
+                </div>))}
+            <div className="header-sub" style={{marginTop:8}}>Al cerrar caja, lo que registres como QR debe cuadrar con este total.</div>
+          </div>)}
+        </div>)}
+
+        <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Cerrar</button>
       </div>
     </div>
   );

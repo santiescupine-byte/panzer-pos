@@ -1449,6 +1449,27 @@ const db = {
     if(f.operador) q=q.eq('operador',f.operador);
     const {data,error}=await q; if(error) throw error; return data;
   },
+  // ---- Solicitudes de anulación que mandan los cajeros desde el POS ----
+  async listSolicitudesAnulacion(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('solicitudes_anulacion').select('*').eq('estado','pendiente').order('created_at');
+    if(error) return []; return data||[];
+  },
+  async resolverSolicitudAnulacion(id, aprobar, admin, respuesta){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('resolver_solicitud_anulacion',{p_id:id, p_aprobar:!!aprobar, p_admin:admin||'admin', p_respuesta:respuesta||null});
+    if(error) throw error; return data;
+  },
+  // Un recibo suelto, en la misma forma que usan los informes (para abrirlo desde una solicitud
+  // aunque esté fuera del rango de fechas que se está mirando).
+  async getVentaPorId(id){
+    if(DEMO_MODE) return null;
+    const {data:v,error}=await sb.from('ventas').select('*, venta_items(*, productos(categoria,costo))').eq('id',id).maybeSingle();
+    if(error || !v) return null;
+    const items=(v.venta_items||[]).map(i=>({producto_id:i.producto_id,nombre:i.nombre_producto,categoria:(i.productos&&i.productos.categoria)||'—',tipo:i.tipo,cantidad:Number(i.cantidad),precio_unit:Number(i.precio_unit),costo:Number((i.productos&&i.productos.costo)||0),iva:false,subtotal:Number(i.subtotal),descuento_linea:Number(i.descuento)||0}));
+    const bruto=items.reduce((s,i)=>s+i.subtotal,0);
+    return {id:v.id,recibo:v.numero_recibo||('#'+v.id.slice(0,6)),fecha:v.created_at,sede:v.sede,operador:v.operador,items,bruto,descuento:Math.max(0,bruto-Number(v.total)),total:Number(v.total),pago_efectivo:Number(v.pago_efectivo),pago_qr:Number(v.pago_qr),pago_tarjeta:Number(v.pago_tarjeta),anulada:!!v.anulada};
+  },
   // ---- Eliminar recibo (solo back office): devuelve artículos al stock ----
   async anularVenta(venta, motivo){
     if(DEMO_MODE){
@@ -1576,7 +1597,7 @@ function App(){
                 <div className="sec-title">{actual[1]} {actual[2]}</div>
               </div>
               <div className="page">
-                {tab==="informes"   && <Informes showToast={showToast}/>}
+                {tab==="informes"   && <Informes showToast={showToast} admin={auth.nombre}/>}
                 {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
                 {tab==="pedidos"    && <Pedidos showToast={showToast} quien={auth.nombre}/>}
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
@@ -4630,7 +4651,7 @@ function Delta({actual, anterior, label, invertir, conteo}){
   );
 }
 
-function Informes({showToast}){
+function Informes({showToast, admin}){
   const [sedes,setSedes]=useState([]);
   const [emps,setEmps]=useState([]);
   const [preset,setPreset]=useState('30dias');
@@ -4648,7 +4669,30 @@ function Informes({showToast}){
     try{ setOpsHist(await db.listOperadoresVentas()); }catch(err){} })(); },[]);
 
   const [comparar,setComparar]=useState(null);   // {label, ...resumen del periodo anterior}
+  // ---- solicitudes de anulación que mandan los cajeros desde el POS ----
+  const [solAnul,setSolAnul]=useState([]);        // pendientes (todas, sin importar el filtro de fechas)
+  const [verSol,setVerSol]=useState(false);
+  const [resolver,setResolver]=useState(null);    // {sol, aprobar, respuesta}
+  const [detSol,setDetSol]=useState(null);        // recibo abierto desde una solicitud
+  const [busySol,setBusySol]=useState(false);
+  const cargarSol=async()=>{ try{ setSolAnul(await db.listSolicitudesAnulacion()); }catch(e){} };
+  const solMap={}; solAnul.forEach(x=>{ solMap[x.venta_id]=x; });
+  const pedirResolver=(sol,aprobar)=>setResolver({sol,aprobar,respuesta:""});
+  const abrirReciboSol=async(sol)=>{ const v=await db.getVentaPorId(sol.venta_id);
+    if(!v){ showToast("No se encontró el recibo","err"); return; } setDetSol(v); };
+  const confirmarResolver=async()=>{
+    setBusySol(true);
+    try{ const r=await db.resolverSolicitudAnulacion(resolver.sol.id, resolver.aprobar, admin, resolver.respuesta);
+      if(r && r.ok===false) throw new Error(r.error||"No se pudo");
+      showToast(resolver.aprobar?"Recibo anulado y stock devuelto ✓":"Solicitud rechazada ✓","ok");
+      setResolver(null); setDetSol(null); await cargar(); }
+    catch(e){ showToast(""+(e.message||e),"err"); }
+    finally{ setBusySol(false); }
+  };
+  const haceCuanto=iso=>{ const m=Math.round((Date.now()-new Date(iso))/60000);
+    return m<60?("hace "+m+" min"):m<1440?("hace "+Math.round(m/60)+" h"):("hace "+Math.round(m/1440)+" d"); };
   const cargar=async()=>{
+    cargarSol();
     setVentas(null); setComparar(null);
     try{ setVentas(await db.getVentas({desde,hasta,sede,operador,tipoPago})); }
     catch(e){ showToast(""+(e.message||e),"err"); setVentas([]); }
@@ -4715,16 +4759,70 @@ function Informes({showToast}){
 
       <div className="subnav">
         {[["resumen","Resumen"],["articulo","Por artículo"],["categoria","Por categoría"],["empleado","Por empleado"],["pago","Por tipo de pago"],["recibos","Recibos"],["descuentos","Descuentos"],["impuestos","Impuestos"],["caja","Caja"]].map(([k,l])=>(
-          <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
+          <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}{k==='recibos' && solAnul.length>0 && <span style={{marginLeft:6,color:"var(--red)",fontWeight:800}}>⚠ {solAnul.length}</span>}</div>
         ))}
       </div>
 
-      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar} comparar={comparar}/>}
+      {/* ---------- solicitudes de anulación pendientes ---------- */}
+      {solAnul.length>0 && (
+        <div className="card" style={{marginBottom:12,border:"1px solid var(--red)",background:"var(--red-d)",padding:"12px 14px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <b style={{color:"var(--red)",flex:1,minWidth:220}}>⚠ {solAnul.length} {solAnul.length===1?"recibo con solicitud":"recibos con solicitud"} de anulación pendiente</b>
+            <button className="btn btn-ghost btn-sm" onClick={()=>setVerSol(v=>!v)}>{verSol?"Ocultar":"Revisar"}</button>
+          </div>
+          {verSol && (
+            <div style={{overflowX:"auto",marginTop:10,background:"var(--sf)",borderRadius:10}}>
+              <table className="tbl">
+                <thead><tr><th>Recibo</th><th>Sede</th><th>Cajero</th><th className="num">Total</th><th>Motivo</th><th>Pedido</th><th></th></tr></thead>
+                <tbody>{solAnul.map(s=>(
+                  <tr key={s.id}>
+                    <td className="row-name" style={{whiteSpace:"nowrap"}}><span style={{color:"var(--red)"}}>⚠</span> {s.numero_recibo||"—"}</td>
+                    <td>{s.sede}</td><td className="muted">{s.operador}</td>
+                    <td className="num">{fmt(s.total)}</td>
+                    <td style={{maxWidth:320,whiteSpace:"normal",fontSize:12.5}}>{s.motivo}</td>
+                    <td className="muted" style={{whiteSpace:"nowrap"}}>{haceCuanto(s.created_at)}</td>
+                    <td><div className="actions">
+                      <button className="btn btn-ghost btn-sm" onClick={()=>abrirReciboSol(s)}>Ver recibo</button>
+                      <button className="btn btn-danger btn-sm" onClick={()=>pedirResolver(s,true)}>Anular</button>
+                      <button className="btn btn-ghost btn-sm" onClick={()=>pedirResolver(s,false)}>Rechazar</button>
+                    </div></td>
+                  </tr>))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar} comparar={comparar} solMap={solMap} onResolver={pedirResolver}/>}
+
+      {detSol && <ReciboDetalle v={detSol} borrando={busySol} onClose={()=>setDetSol(null)} onEliminar={()=>{}} sol={solMap[detSol.id]} onResolver={pedirResolver}/>}
+
+      {resolver && (
+        <div className="modal-bg" style={{zIndex:260}} onClick={()=>!busySol&&setResolver(null)}>
+          <div className="modal" style={{maxWidth:440}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">{resolver.aprobar?"🗑 Anular el recibo ":"Rechazar la solicitud de "}{resolver.sol.numero_recibo}</div>
+            <div className="muted" style={{fontSize:13,marginBottom:8}}>{resolver.sol.operador} · {resolver.sol.sede} · <b style={{color:"var(--t)"}}>{fmt(resolver.sol.total)}</b></div>
+            <div className="card" style={{padding:"9px 12px",marginBottom:10,fontSize:13}}><span className="muted">Motivo del cajero:</span> {resolver.sol.motivo}</div>
+            <div className="muted" style={{fontSize:12.5,marginBottom:8}}>{resolver.aprobar
+              ? "El recibo se anula: los artículos vuelven al stock de la sede y la venta sale de informes, metas y comisiones. No se puede deshacer."
+              : "El recibo queda activo tal como está. El cajero verá en su POS que fue rechazada, con tu respuesta."}</div>
+            <label className="label">{resolver.aprobar?"Nota (opcional)":"Respuesta para el cajero (opcional)"}</label>
+            <input className="input" value={resolver.respuesta} maxLength={200} onChange={e=>setResolver(r=>({...r,respuesta:e.target.value}))}
+              placeholder={resolver.aprobar?"":"Ej: ese recibo está bien, el duplicado era el otro"}/>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busySol} onClick={()=>setResolver(null)}>Cancelar</button>
+              <button className={"btn "+(resolver.aprobar?"btn-danger":"btn-amber")} disabled={busySol} onClick={confirmarResolver}>
+                {busySol?"Guardando…":resolver.aprobar?"Sí, anular recibo":"Rechazar solicitud"}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function ReporteVista({sub,ventas,showToast,recargar,comparar}){
+function ReporteVista({sub,ventas,showToast,recargar,comparar,solMap,onResolver}){
+  const SOL=solMap||{};
   const [detalle,setDetalle]=useState(null);   // recibo abierto en el panel de detalle
   const [borrando,setBorrando]=useState(false);
   if(!ventas.length) return <div className="empty">No hay ventas en el periodo/filtros seleccionados.</div>;
@@ -4841,8 +4939,8 @@ function ReporteVista({sub,ventas,showToast,recargar,comparar}){
           <table className="tbl">
             <thead><tr><th>Recibo</th><th>Fecha</th><th>Sede</th><th>Colaborador</th><th className="num">Total</th><th>Pago</th><th></th></tr></thead>
             <tbody>{rows.map(v=>(
-              <tr key={v.id} style={{cursor:"pointer"}} onClick={()=>setDetalle(v)}>
-                <td className="row-name" style={{color:"var(--green)"}}>{v.recibo}</td>
+              <tr key={v.id} style={{cursor:"pointer",background:SOL[v.id]?"var(--red-d)":undefined}} onClick={()=>setDetalle(v)}>
+                <td className="row-name" style={{color:"var(--green)",whiteSpace:"nowrap"}}>{SOL[v.id] && <span title={"Solicitud de anulación: "+SOL[v.id].motivo} style={{color:"var(--red)",marginRight:5,fontSize:15}}>⚠</span>}{v.recibo}</td>
                 <td className="muted">{fLocalDia(v.fecha)} {fLocalHora(v.fecha)}</td>
                 <td>{v.sede}</td><td className="muted">{v.operador}</td>
                 <td className="num">{fmt(v.total)}</td>
@@ -4853,7 +4951,7 @@ function ReporteVista({sub,ventas,showToast,recargar,comparar}){
           </table>
           {ventas.length>200 && <div className="muted" style={{padding:12}}>Mostrando los 200 más recientes de {ventas.length}.</div>}
         </div>
-        {detalle && <ReciboDetalle v={detalle} metodo={metodo} borrando={borrando} onClose={()=>setDetalle(null)} onEliminar={()=>eliminar(detalle)}/>}
+        {detalle && <ReciboDetalle v={detalle} metodo={metodo} borrando={borrando} onClose={()=>setDetalle(null)} onEliminar={()=>eliminar(detalle)} sol={SOL[detalle.id]} onResolver={onResolver}/>}
       </div>
     );
   }
@@ -4914,7 +5012,7 @@ function ReporteVista({sub,ventas,showToast,recargar,comparar}){
 }
 
 // Panel de detalle de un recibo (estilo Loyverse) con opción de eliminar
-function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
+function ReciboDetalle({v,metodo,borrando,onClose,onEliminar,sol,onResolver}){
   const iva = v.items.reduce((s,i)=> s + (i.iva ? (i.subtotal - i.subtotal/1.19) : 0), 0);
   const pagoLabel = v.pago_efectivo>0?"Efectivo":v.pago_qr>0?"QR / Transferencia":"Tarjeta";
   return (
@@ -4925,6 +5023,13 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
           <div className="muted">Total</div>
         </div>
         <div className="muted" style={{marginBottom:14}}>Colaborador: <b style={{color:"var(--t)"}}>{v.operador}</b> · Sede: <b style={{color:"var(--t)"}}>{v.sede}</b></div>
+        {sol && (
+          <div style={{padding:"10px 12px",borderRadius:10,marginBottom:12,border:"1px solid var(--red)",background:"var(--red-d)"}}>
+            <div style={{fontWeight:800,color:"var(--red)",marginBottom:3}}>⚠ El cajero pidió anular este recibo</div>
+            <div style={{fontSize:13}}>{sol.motivo}</div>
+            <div className="muted" style={{fontSize:11,marginTop:4}}>{sol.operador} · {fLocalDia(sol.created_at)} {fLocalHora(sol.created_at)}</div>
+          </div>
+        )}
         <div className="card" style={{padding:14,marginBottom:14}}>
           {v.items.map((i,idx)=>(
             <div key={idx} className="result-row" style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid var(--bd)"}}>
@@ -4940,7 +5045,12 @@ function ReciboDetalle({v,metodo,borrando,onClose,onEliminar}){
         <div className="muted" style={{marginBottom:14}}>{fLocalDia(v.fecha)} {fLocalHora(v.fecha)} · {v.recibo}</div>
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
-          <button className="btn btn-danger" disabled={borrando} onClick={onEliminar}>{borrando?"Eliminando…":"🗑 Eliminar recibo"}</button>
+          {sol && onResolver
+            ? <React.Fragment>
+                <button className="btn btn-ghost" disabled={borrando} onClick={()=>onResolver(sol,false)}>Rechazar</button>
+                <button className="btn btn-danger" disabled={borrando} onClick={()=>onResolver(sol,true)}>🗑 Aprobar y anular</button>
+              </React.Fragment>
+            : <button className="btn btn-danger" disabled={borrando} onClick={onEliminar}>{borrando?"Eliminando…":"🗑 Eliminar recibo"}</button>}
         </div>
       </div>
     </div>

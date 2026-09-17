@@ -500,9 +500,21 @@ const db = {
     const { data, error } = await sb.from('ventas')
       .select('id,numero_recibo,total,descuento,pago_efectivo,pago_qr,pago_tarjeta,anulada,created_at, venta_items(nombre_producto,cantidad,precio_unit,subtotal,descuento)')
       .eq('sede',sede).eq('operador',operador)
-      .order('created_at',{ascending:false}).limit(5);
+      .order('created_at',{ascending:false}).limit(12);
     if(error) return [];
     return data||[];
+  },
+  // ---- Solicitudes de anulación: el cajero NO borra, solo pide con un motivo ----
+  async misSolicitudesAnulacion(ventaIds){
+    if(DEMO_MODE || !ventaIds.length) return [];
+    const { data, error } = await sb.from('solicitudes_anulacion')
+      .select('venta_id,estado,motivo,respuesta,created_at').in('venta_id',ventaIds).order('created_at',{ascending:false});
+    if(error) return []; return data||[];
+  },
+  async solicitarAnulacion(ventaId, operador, motivo){
+    if(DEMO_MODE) return {ok:true};
+    const { data, error } = await sb.rpc('solicitar_anulacion',{ p_venta_id:ventaId, p_operador:operador, p_motivo:motivo });
+    if(error) throw error; return data;
   },
   // ---- Recepción de mercancía de proveedor (entra al inventario de la sede) ----
   async recibirMercancia(sede, operador, items){
@@ -1767,8 +1779,34 @@ function TareasSheet({sede,operador,showToast,onClose}){
 function RecibosSheet({sede,operador,onClose}){
   const [recibos,setRecibos]=useState(null);
   const [abierto,setAbierto]=useState(null); // id del recibo expandido
+  const [sols,setSols]=useState({});          // venta_id -> última solicitud de anulación
+  const [pidiendo,setPidiendo]=useState(null);// id del recibo con el formulario abierto
+  const [motivo,setMotivo]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [msg,setMsg]=useState(null);          // {tipo:'ok'|'err', txt}
 
-  useEffect(()=>{ db.misRecibos(sede,operador).then(setRecibos).catch(()=>setRecibos([])); },[]);
+  const cargar=async()=>{
+    try{
+      const r=await db.misRecibos(sede,operador); setRecibos(r);
+      const s=await db.misSolicitudesAnulacion(r.map(x=>x.id));
+      const m={}; s.forEach(x=>{ if(!m[x.venta_id]) m[x.venta_id]=x; });   // vienen de la más nueva a la más vieja
+      setSols(m);
+    }catch(e){ setRecibos([]); }
+  };
+  useEffect(()=>{ cargar(); },[]);
+
+  const enviarSolicitud=async(r)=>{
+    const t=motivo.trim();
+    if(t.length<10){ setMsg({tipo:'err',txt:"Escribe el motivo con más detalle (mínimo 10 letras)."}); return; }
+    setBusy(true); setMsg(null);
+    try{
+      const res=await db.solicitarAnulacion(r.id,operador,t);
+      if(!res || !res.ok){ setMsg({tipo:'err',txt:(res&&res.error)||"No se pudo enviar."}); return; }
+      setPidiendo(null); setMotivo(""); setMsg({tipo:'ok',txt:"Solicitud enviada. Administración la revisa y decide."});
+      await cargar();
+    }catch(e){ setMsg({tipo:'err',txt:"Error de conexión. Intenta de nuevo."}); }
+    finally{ setBusy(false); }
+  };
 
   const metodo=r=>{ const m=[]; if(r.pago_efectivo>0)m.push("Efectivo"); if(r.pago_qr>0)m.push("QR/Transf."); if(r.pago_tarjeta>0)m.push("Tarjeta"); return m.join(" + ")||"—"; };
   const fechaHora=iso=>{ const d=new Date(iso); return d.toLocaleDateString('es-CO')+" "+d.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}); };
@@ -1778,15 +1816,19 @@ function RecibosSheet({sede,operador,onClose}){
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
         <div className="card-t">🧾 Mis últimos recibos</div>
-        <div className="header-sub" style={{marginBottom:10}}>{operador} · {sede} · solo consulta</div>
+        <div className="header-sub" style={{marginBottom:10}}>{operador} · {sede} · ¿te equivocaste en uno? Ábrelo y pide la anulación.</div>
+        {msg && <div style={{marginBottom:10,padding:"9px 12px",borderRadius:10,fontSize:13,fontWeight:700,
+          background:msg.tipo==='ok'?"var(--green-d)":"var(--red-d)",color:msg.tipo==='ok'?"var(--green)":"var(--red)"}}>{msg.txt}</div>}
 
         {!recibos ? <div className="empty">Cargando…</div> :
          recibos.length===0 ? <div className="empty">Aún no has registrado ventas.</div> :
-         recibos.map(r=>{ const exp=abierto===r.id; return (
-          <div key={r.id} style={{marginBottom:8,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",overflow:"hidden",opacity:r.anulada?0.6:1}}>
+         recibos.map(r=>{ const exp=abierto===r.id; const sol=sols[r.id]; const pend=sol&&sol.estado==='pendiente'&&!r.anulada; const rech=sol&&sol.estado==='rechazada'&&!r.anulada; return (
+          <div key={r.id} style={{marginBottom:8,borderRadius:12,border:"1px solid "+(pend?"var(--amber)":"var(--bd)"),background:"var(--sf2)",overflow:"hidden",opacity:r.anulada?0.6:1}}>
             <div onClick={()=>setAbierto(exp?null:r.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",cursor:"pointer"}}>
               <div style={{flex:1}}>
-                <div style={{fontWeight:700}}>{r.numero_recibo||"(sin Nº)"} {r.anulada && <span style={{fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--red-d)",color:"var(--red)",marginLeft:4}}>ANULADO</span>}</div>
+                <div style={{fontWeight:700}}>{r.numero_recibo||"(sin Nº)"} {r.anulada && <span style={{fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--red-d)",color:"var(--red)",marginLeft:4}}>ANULADO</span>}
+                  {pend && <span style={{fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--amber-d)",color:"var(--amber)",marginLeft:4}}>⏳ ANULACIÓN SOLICITADA</span>}
+                  {rech && <span style={{fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"var(--sf3)",color:"var(--td)",marginLeft:4}}>SOLICITUD RECHAZADA</span>}</div>
                 <div className="header-sub">{fechaHora(r.created_at)} · {metodo(r)}</div>
               </div>
               <div style={{textAlign:"right"}}>
@@ -1804,6 +1846,28 @@ function RecibosSheet({sede,operador,onClose}){
                 ))}
                 {r.descuento>0 && <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13,color:"var(--green)"}}><span>Descuento total</span><span>−{fmt(r.descuento)}</span></div>}
                 <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0",borderTop:"1px solid var(--bd)",fontWeight:800}}><span>Total</span><span>{fmt(r.total)}</span></div>
+
+                {/* ---- solicitud de anulación: el cajero no borra, pide ---- */}
+                {pend && <div style={{marginTop:10,padding:"9px 11px",borderRadius:10,background:"var(--amber-d)",color:"var(--amber)",fontSize:12.5}}>
+                  <b>⏳ Anulación solicitada.</b> Administración la está revisando.<div style={{opacity:.85,marginTop:3}}>Motivo: {sol.motivo}</div></div>}
+                {rech && <div style={{marginTop:10,padding:"9px 11px",borderRadius:10,background:"var(--sf3)",fontSize:12.5}}>
+                  <b>Solicitud rechazada.</b>{sol.respuesta?(" "+sol.respuesta):" El recibo sigue activo."}</div>}
+                {!r.anulada && !pend && pidiendo!==r.id && (
+                  <button className="btn-secondary" style={{marginTop:10,borderColor:"var(--red)",color:"var(--red)"}}
+                    onClick={()=>{ setPidiendo(r.id); setMotivo(""); setMsg(null); }}>⚠ Solicitar anulación de este recibo</button>)}
+                {pidiendo===r.id && (
+                  <div style={{marginTop:10,padding:12,borderRadius:12,border:"1px solid var(--red)",background:"var(--sf)"}}>
+                    <div style={{fontWeight:800,marginBottom:4}}>Solicitar anulación · {r.numero_recibo}</div>
+                    <div className="header-sub" style={{marginBottom:8}}>Cuenta qué pasó. El recibo NO se borra todavía: lo revisa administración.</div>
+                    <textarea className="input" rows={3} style={{width:"100%",resize:"vertical"}} maxLength={300} autoFocus
+                      placeholder="Ej: lo registré dos veces, el bueno es el R-001234 · puse 10 tokens y eran 8 · me equivoqué de producto"
+                      value={motivo} onChange={e=>setMotivo(e.target.value)}/>
+                    <div className="header-sub" style={{textAlign:"right",marginTop:2}}>{motivo.trim().length}/300 · mínimo 10</div>
+                    <div style={{display:"flex",gap:8,marginTop:8}}>
+                      <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={busy} onClick={()=>{ setPidiendo(null); setMotivo(""); }}>Cancelar</button>
+                      <button className="btn-primary" style={{flex:1,marginTop:0,background:"var(--red)"}} disabled={busy||motivo.trim().length<10} onClick={()=>enviarSolicitud(r)}>{busy?"Enviando…":"Enviar solicitud"}</button>
+                    </div>
+                  </div>)}
               </div>
             )}
           </div>

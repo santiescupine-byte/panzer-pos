@@ -582,6 +582,27 @@ const db = {
     const {error}=await sb.from('productos').update({granel_id:granelId||null, granel_kg:Number(granelKg)||0}).eq('id',productoId);
     if(error) throw error;
   },
+  // ---- ENVASADO POR ETAPAS: el granel ya está en stock, aquí solo se envasa ----
+  async listLotesGranel(granelId){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('lotes_granel',{p_granel_id:granelId}); if(error) return []; return data||[];
+  },
+  async envasarLote(granelId, sede, items, produccionId, operador, nota){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('envasar_lote',{p_granel_id:granelId,p_sede:sede,p_items:items,
+      p_produccion_id:produccionId||null,p_operador:operador||null,p_nota:nota||null});
+    if(error) throw error; return data;
+  },
+  async listEnvasados(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('envasados').select('*').order('created_at',{ascending:false}).limit(200);
+    if(error) return []; return data||[];
+  },
+  async stockGranel(granelId, sede){
+    if(DEMO_MODE) return 0;
+    const {data}=await sb.from('inventario').select('cantidad').eq('producto_id',granelId).eq('sede',sede).maybeSingle();
+    return Number(data&&data.cantidad)||0;
+  },
   async envasar(granelId, kg, sede, items, operador, nota){
     if(DEMO_MODE) return {ok:true};
     const {data,error}=await sb.rpc('envasar',{p_granel_id:granelId,p_kg:Number(kg),p_sede:sede,p_items:items,p_operador:operador||null,p_nota:nota||null});
@@ -640,7 +661,7 @@ const db = {
   async listProducciones(){
     if(DEMO_MODE) return [...DEMO.producciones];
     // sin embed: el detalle de insumos está bloqueado y se carga aparte con la clave
-    const {data,error}=await sb.from('producciones').select('id,producto_nombre,cantidad,sede,costo_total,operador,created_at').order('created_at',{ascending:false}).limit(200);
+    const {data,error}=await sb.from('producciones').select('id,producto_id,producto_nombre,cantidad,kg_envasados,sede,costo_total,operador,created_at').order('created_at',{ascending:false}).limit(200);
     if(error) return []; return data||[];
   },
   // ---- MANTENIMIENTO ----
@@ -5093,7 +5114,7 @@ function Produccion({showToast, quien}){
   return (
     <div>
       <div className="subnav">
-        {[["insumos","Insumos"],["compras","🛒 Compras"],["recetas","Recetas"],["costeo","💰 Costeo"],["envasar","📦 Envasar"],["producir","🧪 Producir granel"],["historial","Historial"]].map(([k,l])=>(
+        {[["insumos","Insumos"],["compras","🛒 Compras"],["recetas","Recetas"],["costeo","💰 Costeo"],["producir","🧪 1. Producir granel"],["envasar","📦 2. Envasar"],["historial","Historial"]].map(([k,l])=>(
           <div key={k} className={"subnav-btn"+(sub===k?" on":"")} onClick={()=>setSub(k)}>{l}</div>
         ))}
       </div>
@@ -6128,6 +6149,11 @@ function Envasar({showToast,clave,onUnlock}){
   const [busy,setBusy]=useState(false);
   const [res,setRes]=useState(null);
   const [cfg,setCfg]=useState(null);        // panel de configuración de graneles/presentaciones
+  // ---- modo: 'stock' = envasar granel que ya está en inventario (etapas) · 'todo' = producir y envasar de una ----
+  const [modo,setModo]=useState('stock');
+  const [stockG,setStockG]=useState(null);  // kg del granel en la sede elegida
+  const [lotes,setLotes]=useState([]);      // lotes del granel con kilos pendientes
+  const [loteId,setLoteId]=useState("");
   const recargar=()=>db.listProductos().then(setProds).catch(()=>{});
   const recargarInsumos=()=>db.listInsumos().then(setInsumos).catch(()=>{});
   useEffect(()=>{ recargar(); recargarInsumos(); db.listSedes().then(s=>{ setSedes(s); const b=s.find(x=>x.es_bodega)||s[0]; if(b) setSede(b.nombre); }).catch(()=>{}); },[]);
@@ -6140,6 +6166,12 @@ function Envasar({showToast,clave,onUnlock}){
       .then(pares=>{ const m={}; pares.forEach(([k,v])=>m[k]=v); setEmpPorProd(m); });
   },[gid,clave,prods.length]);
 
+  // stock y lotes del granel elegido (modo por etapas)
+  useEffect(()=>{
+    if(!gid||!sede){ setStockG(null); setLotes([]); setLoteId(""); return; }
+    db.stockGranel(gid,sede).then(setStockG).catch(()=>setStockG(0));
+    db.listLotesGranel(gid).then(l=>{ setLotes(l); const ab=l.find(x=>Number(x.pendiente)>0); setLoteId(ab?ab.id:""); }).catch(()=>setLotes([]));
+  },[gid,sede,res]);
   const granel=prods.find(p=>p.id===gid)||{};
   // graneles = los que tienen presentaciones ligadas
   const conPresent=new Set(prods.filter(p=>p.granel_id).map(p=>p.granel_id));
@@ -6155,7 +6187,7 @@ function Envasar({showToast,clave,onUnlock}){
   // ---- material que se va a consumir (químicos del granel + empaque de cada presentación) ----
   const insDe=id=>insumos.find(x=>x.id===id)||{};
   const consumo={};   // insumo_id -> cantidad total
-  recetaG.forEach(r=>{ const i=insDe(r.insumo_id);
+  (modo==='stock'?[]:recetaG).forEach(r=>{ const i=insDe(r.insumo_id);
     const c=(Number(r.cantidad)||0)/100*kgNum*((i.unidad==='g'||i.unidad==='ml')?1000:1);
     consumo[r.insumo_id]=(consumo[r.insumo_id]||0)+c; });
   items.forEach(x=>{ (empPorProd[x.p.id]||[]).forEach(e=>{
@@ -6252,6 +6284,22 @@ function Envasar({showToast,clave,onUnlock}){
       showToast("Configuración guardada ✓","ok");
     }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
 
+  const lote=lotes.find(l=>l.id===loteId)||null;
+  // costo/kg efectivo = costo del lote ÷ kilos que realmente salieron (esta tanda + las anteriores)
+  const kgEnvTotal = lote ? (Number(lote.kg_envasados)||0) + kgUsados : 0;
+  const costoKgStock = (lote && Number(lote.costo_total)>0 && kgEnvTotal>0) ? Number(lote.costo_total)/kgEnvTotal : cKg;
+  const enviarStock=async()=>{
+    if(!gid){ showToast("Elige el granel","err"); return; }
+    if(items.length===0){ showToast("Escribe cuántas unidades salieron","err"); return; }
+    const rendTxt = (lote&&Number(lote.cantidad)>0) ? (" · rendimiento del lote "+((Number(lote.kg_envasados)+kgUsados)/Number(lote.cantidad)*100).toFixed(1)+"%") : "";
+    if(!confirm("¿Registrar el envasado?\n\n"+granel.nombre+(lote?(" · lote del "+fLocalDia(lote.created_at)+" ("+Number(lote.cantidad)+" kg)"):"")+rendTxt+"\n"+items.map(x=>"• "+x.n+" × "+x.p.nombre).join("\n")+"\n\nSe descuenta el empaque y las unidades entran a "+sede+". El stock del granel no se toca.")) return;
+    setBusy(true);
+    try{
+      const r=await db.envasarLote(gid,sede,items.map(x=>({producto_id:x.p.id,cantidad:x.n})),loteId||null,"ADMIN",nota.trim()||null);
+      setRes(r); await recargar(); await recargarInsumos(); setCant({}); setNota("");
+      showToast("Envasado registrado ✓","ok");
+    }catch(e){ showToast(""+(e.message||e).replace(/^.*?ERROR:\s*/,''),"err"); } finally{ setBusy(false); }
+  };
   const enviar=async()=>{
     if(!gid){ showToast("Elige el granel","err"); return; }
     if(kgNum<=0){ showToast("Escribe los kilos fabricados","err"); return; }
@@ -6451,23 +6499,42 @@ function Envasar({showToast,clave,onUnlock}){
       </div>)}
 
       {!cfg && !nv && (<div>
-      <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabricas el granel una sola vez y anotas cuántas unidades salieron de cada presentación. El sistema descuenta los químicos y el empaque, carga las unidades al inventario y le pone su costo real a cada una.</div>
+      <div style={{display:"flex",gap:6,background:"var(--sf2)",borderRadius:10,padding:4,marginBottom:12,flexWrap:"wrap"}}>
+        <button className={"btn btn-sm "+(modo==='stock'?'btn-amber':'btn-ghost')} onClick={()=>{setModo('stock');setRes(null);}}>📦 Envasar granel que ya tengo</button>
+        <button className={"btn btn-sm "+(modo==='todo'?'btn-amber':'btn-ghost')} onClick={()=>{setModo('todo');setRes(null);}}>🧪+📦 Producir y envasar de una</button>
+      </div>
+      {modo==='stock'
+        ? <div className="muted" style={{marginBottom:12,fontSize:12}}>El granel ya se produjo en <b>🧪 1. Producir granel</b>. Aquí anotas de qué lote y cuántas unidades salieron de cada presentación: se descuenta el empaque, las unidades entran al inventario con su costo y queda el <b>rendimiento</b> del lote. Puedes envasar el mismo lote en varias tandas.</div>
+        : <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabricas el granel y lo envasas en el mismo paso. El sistema descuenta los químicos y el empaque, carga las unidades al inventario y le pone su costo real a cada una.</div>}
 
       <div className="card">
         <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-          <div className="fld" style={{flex:"2 1 240px"}}><label className="label">Granel a fabricar</label>
+          <div className="fld" style={{flex:"2 1 240px"}}><label className="label">{modo==='stock'?"Granel a envasar":"Granel a fabricar"}</label>
             <select className="select" style={{margin:0}} value={gid} onChange={e=>{setGid(e.target.value);setCant({});setRes(null);}}>
               <option value="">— Elige —</option>
               {graneles.map(p=><option key={p.id} value={p.id}>{p.nombre}{Number(p.costo)>0?(" · "+fmt(p.costo)+"/kg"):""}</option>)}
             </select></div>
-          <div className="fld" style={{flex:"1 1 120px"}}><label className="label">Kilos fabricados</label>
-            <input className="input" style={{margin:0}} type="number" step="0.01" value={kg} onChange={e=>setKg(e.target.value)} placeholder="ej. 60"/></div>
-          <div className="fld" style={{flex:"1 1 160px"}}><label className="label">Entra a</label>
+          {modo==='todo' && <div className="fld" style={{flex:"1 1 120px"}}><label className="label">Kilos fabricados</label>
+            <input className="input" style={{margin:0}} type="number" step="0.01" value={kg} onChange={e=>setKg(e.target.value)} placeholder="ej. 60"/></div>}
+          <div className="fld" style={{flex:"1 1 160px"}}><label className="label">{modo==='stock'?"Granel en / unidades entran a":"Entra a"}</label>
             <select className="select" style={{margin:0}} value={sede} onChange={e=>setSede(e.target.value)}>
               {sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}{s.es_bodega?" (bodega)":""}</option>)}
             </select></div>
         </div>
         {graneles.length===0 && <div className="muted" style={{marginTop:10,color:"var(--amber)"}}>⚠ No hay graneles con presentaciones ligadas. Ve a <b>💰 Costeo</b>, elige cada presentación e indícale de qué granel sale.</div>}
+        {modo==='stock' && gid && (
+          <div style={{marginTop:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div className="fld" style={{flex:"2 1 260px"}}><label className="label">Lote del que sale</label>
+              <select className="select" style={{margin:0}} value={loteId} onChange={e=>setLoteId(e.target.value)}>
+                <option value="">— Sin lote (solo usa el costo actual del granel) —</option>
+                {lotes.map(l=><option key={l.id} value={l.id}>{fLocalDia(l.created_at)} · {Number(l.cantidad)} kg{Number(l.kg_envasados)>0?(" · envasado "+Number(l.kg_envasados).toFixed(2)+" kg"):""}{Number(l.pendiente)>0?(" · faltan "+Number(l.pendiente).toFixed(2)):" · completo"} · {fmt(l.costo_kg)}/kg{l.nota?(" · "+l.nota):""}</option>)}
+              </select></div>
+            {lote && <div className="card" style={{flex:"1 1 200px",padding:"10px 12px",margin:0,background:"var(--sf2)"}}>
+              <div className="muted" style={{fontSize:11}}>Lote de {Number(lote.cantidad)} kg</div>
+              <div style={{fontSize:15,fontWeight:800}}>envasado {Number(lote.kg_envasados).toFixed(2)} kg · {lote.cantidad>0?Math.round(lote.kg_envasados/lote.cantidad*100):0}%</div>
+            </div>}
+            {lotes.length===0 && <div className="muted" style={{fontSize:12,color:"var(--amber)"}}>⚠ Este granel no tiene lotes producidos. Prodúcelo primero en 🧪 1. Producir granel.</div>}
+          </div>)}
       </div>
 
       {gid && (<div className="card" style={{marginTop:12}}>
@@ -6477,13 +6544,34 @@ function Envasar({showToast,clave,onUnlock}){
           <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid var(--bd)"}}>
             <div style={{flex:1}}>
               <div className="row-name">{p.nombre}</div>
-              <div className="muted" style={{fontSize:12}}>{Number(p.granel_kg)||0} kg por unidad{Number(p.granel_kg)>0&&kgNum>0?(" · caben "+Math.floor(kgNum/Number(p.granel_kg))+" si usas todo el lote"):""}</div>
+              <div className="muted" style={{fontSize:12}}>{Number(p.granel_kg)||0} kg por unidad{Number(p.granel_kg)>0&&(modo==='stock'?(lote&&Number(lote.pendiente)>0):(kgNum>0))?(" · caben "+Math.floor((modo==='stock'?Number(lote.pendiente):kgNum)/Number(p.granel_kg))+(modo==='stock'?" con lo que falta del lote":" si usas todo el lote")):""}</div>
             </div>
             <input className="input" style={{margin:0,width:110,textAlign:"center"}} type="number" value={cant[p.id]||""} placeholder="0"
               onChange={e=>setCant(c=>({...c,[p.id]:e.target.value}))}/>
           </div>
         ))}
-        {items.length>0 && (
+        {items.length>0 && modo==='stock' && (
+          <div className="card" style={{marginTop:10,background:"var(--sf2)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span className="muted">Kilos que equivalen las unidades</span>
+              <b>{kgUsados.toFixed(3)} kg{lote?(" de un lote de "+Number(lote.cantidad)+" kg"):""}</b></div>
+            {lote && Number(lote.cantidad)>0 && (()=>{ const acum=Number(lote.kg_envasados)+kgUsados; const rs=acum/Number(lote.cantidad)*100; return (<div>
+              <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span className="muted">Rendimiento del lote{Number(lote.kg_envasados)>0?(" (con lo ya envasado)"):""}</span>
+                <b style={{color:rs>100?"var(--amber)":(rs>=95?"var(--green)":"var(--amber)")}}>{rs.toFixed(1)}%</b></div>
+              {rs>100 && <div className="muted" style={{fontSize:12}}>Salieron más unidades de las que daban los kilos: pasa por la densidad. Se registra igual.</div>}
+              {rs<95 && <div className="muted" style={{fontSize:12}}>Del lote faltan {Math.max(0,Number(lote.cantidad)-acum).toFixed(2)} kg por envasar (o fue merma).</div>}
+            </div>); })()}
+            {!lote && <div className="muted" style={{fontSize:12}}>Sin lote no se calcula rendimiento. Elige el lote arriba si quieres tenerlo.</div>}
+            <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderTop:"1px solid var(--bd)",marginTop:4}}>
+              <span className="muted">Costo estimado por unidad <span style={{opacity:.7}}>(granel {fmt(costoKgStock)}/kg según rendimiento + empaque)</span></span><span></span></div>
+            {items.map(x=>{ const emp=(empPorProd[x.p.id]||[]).reduce((s,e)=>s+(Number(e.cantidad)||0)*(Number(insDe(e.insumo_id).costo)||0),0);
+              const cu=(Number(x.p.granel_kg)||0)*costoKgStock+emp; return (
+              <div key={x.p.id} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",fontSize:13}}>
+                <span>{x.n} × {x.p.nombre}</span><b>{fmt(cu)}</b>
+              </div>
+            );})}
+          </div>
+        )}
+        {items.length>0 && modo==='todo' && (
           <div className="card" style={{marginTop:10,background:"var(--sf2)"}}>
             <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span className="muted">Kilos que usaste</span><b>{kgUsados.toFixed(3)} kg de {kgNum} kg</b></div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span className="muted">Rendimiento</span>
@@ -6501,15 +6589,19 @@ function Envasar({showToast,clave,onUnlock}){
         )}
         <label className="label" style={{marginTop:10}}>Nota (opcional)</label>
         <input className="input" value={nota} onChange={e=>setNota(e.target.value)} placeholder="Lote, observaciones…"/>
-        <button className="btn btn-amber" style={{width:"100%",marginTop:6}} disabled={busy||items.length===0||kgNum<=0} onClick={enviar}>
-          {busy?"Registrando…":"✅ Registrar producción y envasado"}</button>
+        {modo==='stock'
+          ? <button className="btn btn-amber" style={{width:"100%",marginTop:6}} disabled={busy||items.length===0} onClick={enviarStock}>
+              {busy?"Registrando…":"✅ Registrar envasado"}</button>
+          : <button className="btn btn-amber" style={{width:"100%",marginTop:6}} disabled={busy||items.length===0||kgNum<=0} onClick={enviar}>
+              {busy?"Registrando…":"✅ Registrar producción y envasado"}</button>}
       </div>)}
 
       {/* ---- material que se va a consumir ---- */}
-      {gid && kgNum>0 && (<div className="card" style={{marginTop:12}}>
-        <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>🧾 Material que vas a gastar</div>
-          {!clave && <button className="btn btn-ghost btn-sm" onClick={onUnlock}>🔒 Desbloquear fórmulas</button>}</div>
-        {!clave && <div className="muted" style={{fontSize:12,marginBottom:8}}>Desbloquea las fórmulas para ver los químicos. El empaque sí se muestra.</div>}
+      {gid && (modo==='stock' ? items.length>0 : kgNum>0) && (<div className="card" style={{marginTop:12}}>
+        <div className="toolbar"><div className="card-t" style={{marginRight:"auto"}}>🧾 {modo==='stock'?"Empaque que vas a gastar":"Material que vas a gastar"}</div>
+          {modo==='todo' && !clave && <button className="btn btn-ghost btn-sm" onClick={onUnlock}>🔒 Desbloquear fórmulas</button>}</div>
+        {modo==='todo' && !clave && <div className="muted" style={{fontSize:12,marginBottom:8}}>Desbloquea las fórmulas para ver los químicos. El empaque sí se muestra.</div>}
+        {modo==='stock' && <div className="muted" style={{fontSize:12,marginBottom:8}}>Los químicos ya se descontaron al producir el granel. Aquí solo sale el empaque.</div>}
         {lineasCons.length===0 && <div className="empty">Nada por consumir todavía.</div>}
         {faltantes.length>0 && <div className="card" style={{background:"var(--red-d)",border:"1px solid var(--red)",marginBottom:10}}>
           <b style={{color:"var(--red)"}}>⚠ No te alcanza para {faltantes.length} material(es):</b>
@@ -6540,7 +6632,9 @@ function Envasar({showToast,clave,onUnlock}){
       {res && res.ok && (<div className="card" style={{marginTop:12,border:"1px solid var(--green)"}}>
         <div className="card-t" style={{color:"var(--green)"}}>✓ Envasado registrado</div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:8}}>
-          {[["Químicos",fmt(res.costo_quimicos)],["Empaque",fmt(res.costo_empaque)],["Costo del lote",fmt(res.costo_total)],["Rendimiento",res.rendimiento+"%"]].map(([l,v])=>(
+          {(res.kg_usados!=null
+            ? [["Equivale a",Number(res.kg_usados).toFixed(3)+" kg"],["Lote",res.lote_kg!=null?(Number(res.lote_kg)+" kg"):"—"],["Envasado del lote",res.lote_envasado!=null?(Number(res.lote_envasado).toFixed(2)+" kg"):"—"],["Rendimiento",res.rendimiento!=null?(res.rendimiento+"%"):"—"],["Granel",fmt(res.costo_granel)],["Empaque",fmt(res.costo_empaque)],["Costo total",fmt(res.costo_total)]]
+            : [["Químicos",fmt(res.costo_quimicos)],["Empaque",fmt(res.costo_empaque)],["Costo del lote",fmt(res.costo_total)],["Rendimiento",res.rendimiento+"%"]]).map(([l,v])=>(
             <div key={l} className="card" style={{flex:"1 1 130px",padding:10}}><div className="muted" style={{fontSize:11}}>{l}</div><div style={{fontSize:16,fontWeight:800}}>{v}</div></div>
           ))}
         </div>
@@ -6581,11 +6675,11 @@ function Producir({showToast,clave,onUnlock}){
   const valido = pid && n>0 && sede;
   return (
     <div>
-      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Producir granel (sin envasar)</div></div>
-      <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabrica <b>kilos de granel</b> y los deja en stock. Úsalo solo para graneles que no se envasan de una (por ejemplo los que sirven de base para otras fórmulas). Si vas a envasar, hazlo desde <b>📦 Envasar</b>.</div>
+      <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>🧪 Etapa 1 · Producir granel</div></div>
+      <div className="muted" style={{marginBottom:12,fontSize:12}}>Fabrica los <b>kilos de granel</b>: se descuentan los químicos y los kilos quedan en el stock de la bodega. Cuando lo envases (hoy, mañana o en varias tandas) ve a <b>📦 2. Envasar</b> y anota cuántas unidades salieron de cada presentación.</div>
       {pid && prods.some(p=>p.granel_id===pid) && (
-        <div className="card" style={{background:"var(--amber-d)",border:"1px solid var(--amber)",marginBottom:12}}>
-          <b style={{color:"var(--amber)"}}>⚠ Este granel tiene presentaciones ligadas.</b> <span className="muted">Lo normal es fabricarlo desde <b>📦 Envasar</b>, para que quede repartido en unidades. Si lo produces aquí, te quedan <b>kilos sueltos</b> en el inventario.</span>
+        <div className="card" style={{background:"var(--green-d)",border:"1px solid var(--green)",marginBottom:12}}>
+          <b style={{color:"var(--green)"}}>✓ Este granel tiene presentaciones.</b> <span className="muted">Los kilos quedan en stock y luego los envasas desde <b>📦 2. Envasar → Envasar granel que ya tengo</b>.</span>
         </div>
       )}
       <div className="card">
@@ -6630,7 +6724,9 @@ function Producir({showToast,clave,onUnlock}){
 function HistorialProd({showToast,clave,onUnlock}){
   const [items,setItems]=useState(null);
   const [det,setDet]=useState(null);
-  useEffect(()=>{ db.listProducciones().then(setItems).catch(()=>setItems([])); },[]);
+  const [envs,setEnvs]=useState([]);
+  const [verEnv,setVerEnv]=useState(null);
+  useEffect(()=>{ db.listProducciones().then(setItems).catch(()=>setItems([])); db.listEnvasados().then(setEnvs).catch(()=>{}); },[]);
   const verDetalle=async(p)=>{
     if(!clave){ onUnlock(); return; }
     try{ const ins=await db.getProduccionInsumos(p.id,clave); setDet({...p,insumos:ins}); }
@@ -6642,22 +6738,62 @@ function HistorialProd({showToast,clave,onUnlock}){
       <div className="toolbar"><div className="sec-title" style={{marginRight:"auto"}}>Historial de producción <span className="muted">({items.length})</span></div></div>
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Fecha</th><th>Producto</th><th className="num">Cantidad</th><th>Sede</th><th className="num">Costo</th><th></th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Producto</th><th className="num">Kg</th><th className="num">Envasado</th><th>Sede</th><th className="num">Costo</th><th></th></tr></thead>
           <tbody>
-            {items.length===0 && <tr><td colSpan="6"><div className="empty">Aún no hay producciones.</div></td></tr>}
-            {items.map(p=>(
+            {items.length===0 && <tr><td colSpan="7"><div className="empty">Aún no hay producciones.</div></td></tr>}
+            {items.map(p=>{ const env=Number(p.kg_envasados)||0, tot=Number(p.cantidad)||0, pend=Math.max(0,tot-env); return (
               <tr key={p.id} style={{cursor:"pointer"}} onClick={()=>verDetalle(p)}>
                 <td className="muted">{fLocalDia(p.created_at)} {fLocalHora(p.created_at)}</td>
                 <td className="row-name">{p.producto_nombre}</td>
-                <td className="num">{Number(p.cantidad)}</td>
+                <td className="num">{tot}</td>
+                <td className="num">{env<=0 ? <span className="muted">—</span> : pend>0.001
+                  ? <span style={{color:"var(--amber)",fontWeight:700}} title={"Faltan "+pend.toFixed(2)+" kg por envasar"}>{env.toFixed(1)} / {tot}</span>
+                  : <span style={{color:"var(--green)",fontWeight:700}}>✓ todo</span>}</td>
                 <td>{p.sede}</td>
                 <td className="num">{fmt(p.costo_total)}</td>
                 <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();verDetalle(p);}}>{clave?"Ver":"🔒 Ver"}</button></td>
               </tr>
-            ))}
+            );})}
           </tbody>
         </table>
       </div>
+
+      {envs.length>0 && (<div style={{marginTop:16}}>
+        <div className="sec-title" style={{fontSize:14,marginBottom:6}}>📦 Envasados por etapas <span className="muted">({envs.length})</span></div>
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Fecha</th><th>Granel</th><th className="num">Kg usados</th><th>Unidades</th><th>Sede</th><th className="num">Costo</th></tr></thead>
+            <tbody>{envs.map(e=>(
+              <tr key={e.id} style={{cursor:"pointer"}} onClick={()=>setVerEnv(e)}>
+                <td className="muted">{fLocalDia(e.created_at)} {fLocalHora(e.created_at)}</td>
+                <td className="row-name">{e.granel_nombre}</td>
+                <td className="num">{Number(e.kg_usados).toFixed(3)}</td>
+                <td style={{fontSize:12}}>{(e.items||[]).map(i=>Number(i.cantidad)+" × "+i.nombre).join(" · ")}</td>
+                <td>{e.sede}</td>
+                <td className="num">{fmt(e.costo_total)}</td>
+              </tr>))}</tbody>
+          </table>
+        </div>
+      </div>)}
+      {verEnv && (
+        <div className="modal-bg" onClick={()=>setVerEnv(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">📦 Envasado de {verEnv.granel_nombre}</div>
+            <div className="muted" style={{marginBottom:10}}>{fLocalDia(verEnv.created_at)} {fLocalHora(verEnv.created_at)} · {verEnv.sede} · {Number(verEnv.kg_usados).toFixed(3)} kg a {fmt(verEnv.costo_kg)}/kg{verEnv.nota?(" · "+verEnv.nota):""}</div>
+            <div className="card" style={{padding:0}}>
+              <table className="tbl">
+                <thead><tr><th>Presentación</th><th className="num">Unidades</th><th className="num">Kg c/u</th><th className="num">Empaque</th><th className="num">Costo unit.</th></tr></thead>
+                <tbody>{(verEnv.items||[]).map((i,k)=>(
+                  <tr key={k}><td className="row-name">{i.nombre}</td><td className="num">{Number(i.cantidad)}</td><td className="num muted">{Number(i.granel_kg)}</td><td className="num muted">{fmt(i.costo_empaque)}</td><td className="num"><b>{fmt(i.costo_unitario)}</b></td></tr>))}</tbody>
+              </table>
+            </div>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:10}}>
+              {[["Granel",fmt(verEnv.costo_granel)],["Empaque",fmt(verEnv.costo_empaque)],["Total",fmt(verEnv.costo_total)]].map(([l,v])=>(
+                <div key={l} className="card" style={{flex:"1 1 110px",padding:10,margin:0}}><div className="muted" style={{fontSize:11}}>{l}</div><div style={{fontSize:16,fontWeight:800}}>{v}</div></div>))}
+            </div>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setVerEnv(null)}>Cerrar</button></div>
+          </div>
+        </div>)}
       {det && (
         <div className="modal-bg" onClick={()=>setDet(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>

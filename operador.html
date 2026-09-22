@@ -946,7 +946,10 @@ function App(){
           productos={productos.filter(p=>p.controla_stock)}
           sede={sede} operador={operador} showToast={showToast}
           onCancelar={cerrarCaja}
-          onListo={()=>setChequeoHecho(true)}/>
+          onListo={()=>setChequeoHecho(true)}
+          onVerificarPago={()=>setShowPagos(true)}/>
+        {/* Verificar pago también aquí: si le pagan por QR mientras cuenta, no tiene que esperar a terminar */}
+        {showPagos && <PagosSheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowPagos(false)}/>}
       </div>
     );
   }
@@ -1103,7 +1106,7 @@ function App(){
 // ============================================================
 // PANTALLA: CHEQUEO DE INVENTARIO (al iniciar turno)
 // ============================================================
-function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo}){
+function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo,onVerificarPago}){
   const [counts,setCounts]=useState({});       // id → string
   const [base,setBase]=useState("");           // valor de base recibida (efectivo del turno anterior)
   const [q,setQ]=useState("");
@@ -1148,6 +1151,12 @@ function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo
         </div>
         <div className="header-badge" style={{background:contados===total?"var(--green-d)":"var(--amber-d)",color:contados===total?"var(--green)":"var(--amber)"}}>{contados}/{total}</div>
       </div>
+
+      {onVerificarPago && (
+        <button className="btn-secondary" style={{marginTop:0,marginBottom:12,borderColor:"var(--green)",color:"var(--green)",fontWeight:800}} onClick={onVerificarPago}>
+          💸 Verificar pago QR <span style={{fontWeight:500,opacity:.8,fontSize:12}}>· si te pagan mientras cuentas</span>
+        </button>
+      )}
 
       <div className="card">
         <label className="label">💵 Valor de base recibida</label>

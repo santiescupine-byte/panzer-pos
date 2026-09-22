@@ -4736,10 +4736,13 @@ function Informes({showToast, admin}){
     // periodo anterior, con los mismos filtros, para el "cuánto subí / bajé" de las tarjetas
     try{ if(desde && hasta){ const r=rangoAnterior(preset,desde,hasta);
       const pv=await db.getVentas({desde:r.desde,hasta:r.hasta,sede,operador,tipoPago});
-      setComparar({label:r.label, ...resumenVentas(pv)}); } }
+      const pd={}; pv.forEach(v=>{ const d=fLocalDia(v.fecha); const o=pd[d]||(pd[d]={bruto:0,neto:0,n:0,ef:0,qr:0,tj:0});
+        o.bruto+=v.bruto; o.neto+=v.total; o.n++; o.ef+=v.pago_efectivo||0; o.qr+=v.pago_qr||0; o.tj+=v.pago_tarjeta||0; });
+      setComparar({label:r.label, ...resumenVentas(pv), porDiaPrev:pd, desdePrev:r.desde, desdeActual:desde}); } }
     catch(e){}
   };
   useEffect(()=>{ cargar(); },[desde,hasta,sede,operador,tipoPago]);
+  const verDia=d=>{ setPreset('custom'); setDesde(d); setHasta(d); setSub('recibos'); };
 
   const aplicarPreset=p=>{ setPreset(p); if(p!=='custom'){ const r=rangoPreset(p); setDesde(r.desde); setHasta(r.hasta); } };
 
@@ -4830,7 +4833,7 @@ function Informes({showToast, admin}){
         </div>
       )}
 
-      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar} comparar={comparar} solMap={solMap} onResolver={pedirResolver}/>}
+      {ventas===null ? <div className="empty">Cargando informe…</div> : <ReporteVista sub={sub} ventas={ventas} showToast={showToast} recargar={cargar} comparar={comparar} solMap={solMap} onResolver={pedirResolver} onVerDia={verDia}/>}
 
       {detSol && <ReciboDetalle v={detSol} borrando={busySol} onClose={()=>setDetSol(null)} onEliminar={()=>{}} sol={solMap[detSol.id]} onResolver={pedirResolver}/>}
 
@@ -4858,8 +4861,9 @@ function Informes({showToast, admin}){
   );
 }
 
-function ReporteVista({sub,ventas,showToast,recargar,comparar,solMap,onResolver}){
+function ReporteVista({sub,ventas,showToast,recargar,comparar,solMap,onResolver,onVerDia}){
   const SOL=solMap||{};
+  const [metrica,setMetrica]=useState('bruto');   // qué muestra la gráfica: bruto | neto | n | ticket
   const [detalle,setDetalle]=useState(null);   // recibo abierto en el panel de detalle
   const [borrando,setBorrando]=useState(false);
   if(!ventas.length) return <div className="empty">No hay ventas en el periodo/filtros seleccionados.</div>;
@@ -4877,11 +4881,33 @@ function ReporteVista({sub,ventas,showToast,recargar,comparar,solMap,onResolver}
   const beneficio=netas-costo;
 
   if(sub==='resumen'){
-    // agrupar bruto por día
+    // ---- por día: bruto, neto, recibos y cómo pagaron ----
     const porDia={};
-    ventas.forEach(v=>{ const d=fLocalDia(v.fecha); porDia[d]=(porDia[d]||0)+v.bruto; });
+    ventas.forEach(v=>{ const d=fLocalDia(v.fecha); const o=porDia[d]||(porDia[d]={bruto:0,neto:0,n:0,ef:0,qr:0,tj:0});
+      o.bruto+=v.bruto; o.neto+=v.total; o.n++; o.ef+=v.pago_efectivo||0; o.qr+=v.pago_qr||0; o.tj+=v.pago_tarjeta||0; });
     const dias=Object.keys(porDia).sort();
-    const max=Math.max(...dias.map(d=>porDia[d]),1);
+    const MET={bruto:{lbl:"Ventas brutas",val:o=>o.bruto,money:true,stack:true},
+               neto:{lbl:"Ventas netas",val:o=>o.neto,money:true,stack:true},
+               n:{lbl:"Nº de recibos",val:o=>o.n,money:false,stack:false},
+               ticket:{lbl:"Ticket promedio",val:o=>o.n?o.neto/o.n:0,money:true,stack:false}};
+    const M=MET[metrica]||MET.bruto;
+    const vals=dias.map(d=>M.val(porDia[d]));
+    // periodo anterior alineado por posición (día 1 con día 1, etc.)
+    const prevMap=(comparar&&comparar.porDiaPrev&&comparar.desdeActual&&comparar.desdePrev)?comparar.porDiaPrev:null;
+    const addDays=(iso,n)=>{ const [y,m,dd]=iso.split('-').map(Number); const t=new Date(y,m-1,dd+n); return t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0'); };
+    const diffDays=(a,b)=>{ const pa=a.split('-').map(Number), pb=b.split('-').map(Number); return Math.round((new Date(pb[0],pb[1]-1,pb[2])-new Date(pa[0],pa[1]-1,pa[2]))/86400000); };
+    const prevOf=d=>{ if(!prevMap) return null; const o=prevMap[addDays(comparar.desdePrev, diffDays(comparar.desdeActual,d))]; return o?M.val(o):0; };
+    const prevVals=dias.map(prevOf).filter(x=>x!=null);
+    const max=Math.max(...vals,...prevVals,1);
+    const avg=vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:0;
+    let iBest=-1,iWorst=-1; vals.forEach((v,i)=>{ if(iBest<0||v>vals[iBest]) iBest=i; if(v>0&&(iWorst<0||v<vals[iWorst])) iWorst=i; });
+    const abr=v=>M.money ? (v>=1e6?(v/1e6).toLocaleString('es-CO',{maximumFractionDigits:1})+"M":v>=1e3?Math.round(v/1e3)+"k":String(Math.round(v))) : String(Math.round(v));
+    const fv=v=>M.money?fmt(Math.round(v)):String(Math.round(v));
+    const lblDia=d=>d.slice(8,10)+"/"+d.slice(5,7);
+    const COL={ef:"#10b981",qr:"#3b82f6",tj:"#8b5cf6"};
+    const segs=o=>{ const t=(o.ef||0)+(o.qr||0)+(o.tj||0); if(!t) return null;
+      return [["ef",o.ef/t],["qr",o.qr/t],["tj",o.tj/t]].filter(([,p])=>p>0); };
+    const muchos=dias.length>45;
     return (
       <div>
         <div className="kpis">
@@ -4894,13 +4920,37 @@ function ReporteVista({sub,ventas,showToast,recargar,comparar,solMap,onResolver}
           </React.Fragment>); })()}
         </div>
         <div className="chart-wrap">
-          <div className="label" style={{marginBottom:14}}>Ventas brutas por día</div>
-          <div className="chart" style={{paddingBottom:20}}>
-            {dias.map(d=>(
-              <div key={d} className="bar" style={{height:(porDia[d]/max*100)+"%"}} title={d+": "+fmt(porDia[d])}>
-                <span className="bar-lbl">{d.slice(8,10)}/{d.slice(5,7)}</span>
-              </div>
-            ))}
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:6}}>
+            <div className="label" style={{marginRight:"auto",marginBottom:0}}>{M.lbl} por día</div>
+            <div style={{display:"flex",gap:3,background:"var(--sf2)",borderRadius:8,padding:3}}>
+              {Object.entries(MET).map(([k,m])=>(
+                <button key={k} className={"btn btn-sm "+(metrica===k?'btn-amber':'btn-ghost')} style={{padding:"3px 8px",fontSize:11}} onClick={()=>setMetrica(k)}>{m.lbl}</button>))}
+            </div>
+          </div>
+          <div className="muted" style={{fontSize:12,marginBottom:6,display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+            <span>Promedio <b style={{color:"var(--t)"}}>{fv(avg)}</b>/día</span>
+            {iBest>=0 && <span style={{color:"var(--green)"}}>▲ Mejor {lblDia(dias[iBest])} <b>{fv(vals[iBest])}</b></span>}
+            {iWorst>=0 && iWorst!==iBest && <span style={{color:"var(--red)"}}>▼ Peor {lblDia(dias[iWorst])} <b>{fv(vals[iWorst])}</b></span>}
+            {prevMap && <span><span style={{display:"inline-block",width:10,height:10,background:"#cbd5e1",borderRadius:2,verticalAlign:"middle",marginRight:4}}/>{comparar.label}</span>}
+            {M.stack && <span>{[["ef","Efectivo"],["qr","QR/Transf."],["tj","Tarjeta"]].map(([k,l])=>(
+              <span key={k} style={{marginRight:8}}><span style={{display:"inline-block",width:10,height:10,background:COL[k],borderRadius:2,verticalAlign:"middle",marginRight:4}}/>{l}</span>))}</span>}
+            {onVerDia && <span style={{marginLeft:"auto",opacity:.8}}>toca un día para ver sus recibos</span>}
+          </div>
+          <div className="chart" style={{position:"relative",paddingBottom:0,marginTop:18,marginBottom:26,overflow:"visible"}}>
+            {avg>0 && <div style={{position:"absolute",left:0,right:0,bottom:(avg/max*100)+"%",borderTop:"2px dashed var(--amber)",pointerEvents:"none",zIndex:2}}>
+              <span style={{position:"absolute",right:0,top:-14,fontSize:10,color:"var(--amber)",fontWeight:800,background:"var(--sf)",padding:"0 3px"}}>prom {abr(avg)}</span></div>}
+            {dias.map((d,i)=>{ const o=porDia[d]; const v=vals[i]; const pv=prevOf(d); const h=v/max*100; const sg=M.stack?segs(o):null;
+              const tip=lblDia(d)+": "+fv(v)+(pv!=null?("  ·  "+comparar.label+": "+fv(pv)):"")+"  ·  "+o.n+" recibos"+(M.stack?("  ·  Efectivo "+fmt(o.ef)+" · QR "+fmt(o.qr)+" · Tarjeta "+fmt(o.tj)):"");
+              return (
+              <div key={d} style={{flex:1,minWidth:muchos?6:14,position:"relative",height:"100%",cursor:onVerDia?"pointer":"default"}} title={tip} onClick={()=>onVerDia&&onVerDia(d)}>
+                {pv!=null && <div style={{position:"absolute",bottom:0,left:0,right:0,height:(pv/max*100)+"%",background:"#cbd5e1",borderRadius:"3px 3px 0 0",opacity:.75}}/>}
+                <div className="bar" style={{position:"absolute",bottom:0,left:"18%",right:"18%",height:h+"%",overflow:"hidden",display:"flex",flexDirection:"column-reverse",zIndex:1,
+                    background:sg?"transparent":undefined, boxShadow:i===iBest?"0 0 0 2px var(--green)":(i===iWorst&&iWorst!==iBest)?"0 0 0 2px var(--red)":"none"}}>
+                  {sg && sg.map(([k,pct])=><div key={k} style={{height:(pct*100)+"%",background:COL[k]}}/>)}
+                </div>
+                {!muchos && v>0 && <span style={{position:"absolute",left:"50%",transform:"translateX(-50%)",bottom:"calc("+h+"% + 2px)",fontSize:9,fontWeight:800,color:i===iBest?"var(--green)":(i===iWorst&&iWorst!==iBest)?"var(--red)":"var(--t)",whiteSpace:"nowrap",zIndex:3}}>{abr(v)}</span>}
+                <span className="bar-lbl">{lblDia(d)}</span>
+              </div>);})}
           </div>
         </div>
       </div>

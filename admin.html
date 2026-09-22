@@ -911,7 +911,8 @@ const db = {
       escala:c.escala, minimo_asesor:Number(c.minimo_asesor)||85,
       bono_mejor_sede:Number(c.bono_mejor_sede)||0, bono_sede_se_reparte:c.bono_sede_se_reparte!==false,
       bono_mejor_vendedor:Number(c.bono_mejor_vendedor)||0, bono_membresias:Number(c.bono_membresias)||0,
-      bono_mejor_anio:Number(c.bono_mejor_anio)||0
+      bono_mejor_anio:Number(c.bono_mejor_anio)||0,
+      supera_sede:!!c.supera_sede, supera_vendedor:!!c.supera_vendedor, supera_membresias:c.supera_membresias!==false
     }).eq('id',1); if(error) throw error;
   },
   async listEstados(anio,mes){
@@ -2643,6 +2644,7 @@ function Metas({showToast, quien}){
   const [prevMetas,setPrevMetas]=useState([]);  // metas del mes anterior (para precargar)
   const [prevAses,setPrevAses]=useState([]);    // asesores del mes anterior
   const [rendPrev,setRendPrev]=useState([]);    // rendimiento del mes anterior: de ahí sale el estado de ESTE mes
+  const [membPrev,setMembPrev]=useState([]);    // membresías del mes anterior: el récord a superar
   const [cfg,setCfg]=useState(null);
   const [cargando,setCargando]=useState(false);
   const [busy,setBusy]=useState(false);
@@ -2669,13 +2671,13 @@ function Metas({showToast, quien}){
     try{
       // mes anterior: sirve para el arrastre de estados y para precargar las metas
       const pm=new Date(y,m-2,1), py=pm.getFullYear(), pmm=pm.getMonth()+1;
-      const [mt,as,rd,mb,es,pe,pmt,pas,rp]=await Promise.all([
+      const [mt,as,rd,mb,es,pe,pmt,pas,rp,mbp]=await Promise.all([
         db.listMetas(y,m), db.listAsesoresMes(y,m), db.rendimientoMes(y,m),
         db.membresiasMes(y,m), db.listEstados(y,m),
         db.listEstados(py,pmm), db.listMetas(py,pmm), db.listAsesoresMes(py,pmm),
-        db.rendimientoMes(py,pmm)]);
+        db.rendimientoMes(py,pmm), db.membresiasMes(py,pmm).catch(()=>[])]);
       setMetas(mt); setAses(as); setRend(rd); setMemb(mb); setEstados(es); setPrevEst(pe);
-      setPrevMetas(pmt); setPrevAses(pas); setRendPrev(rp);
+      setPrevMetas(pmt); setPrevAses(pas); setRendPrev(rp); setMembPrev(mbp||[]);
     }catch(e){ showToast(""+(e.message||e),"err"); setMetas([]); setRend([]); }
     finally{ setCargando(false); }
   };
@@ -2704,6 +2706,28 @@ function Metas({showToast, quien}){
   const bonoSedeCU=(()=>{ if(!cfg||!mejorSede) return 0;
     const n=(porSede[mejorSede.sede]||[]).length||1;
     return cfg.bono_sede_se_reparte ? Math.round(Number(cfg.bono_mejor_sede)/n) : Number(cfg.bono_mejor_sede); })();
+
+  // ---- "debe superar el mes anterior": el bono solo se paga si el ganador vendió más
+  //      que el valor con que se ganó el mes pasado (configurable por bono) ----
+  const mesAntNom=(()=>{ const d=new Date(y,m-2,1); return MES_NOM[d.getMonth()]; })();
+  const recPrev={
+    sede: (rendPrev||[]).length ? Math.max(...(rendPrev||[]).map(r=>Number(r.cumpl_sede)||0)) : null,
+    vendedor: (rendPrev||[]).filter(r=>r.evalua!==false).length ? Math.max(...(rendPrev||[]).filter(r=>r.evalua!==false).map(r=>Number(r.cumplimiento)||0)) : null,
+    membresias: (membPrev||[])[0] ? Number(membPrev[0].monto)||0 : null
+  };
+  const exige={ sede:!!(cfg&&cfg.supera_sede), vendedor:!!(cfg&&cfg.supera_vendedor), membresias:!(cfg&&cfg.supera_membresias===false) };
+  const mejorVendEval=(rend||[]).filter(r=>r.evalua!==false).slice().sort((a,b)=>Number(b.cumplimiento)-Number(a.cumplimiento))[0]||null;
+  const supera=(k,valor)=>!exige[k] || recPrev[k]==null || Number(valor)>recPrev[k];
+  const bonoGana={
+    sede: !!mejorSede && supera('sede', mejorSede.cs),
+    vendedor: !!mejorVendEval && supera('vendedor', mejorVendEval.cumplimiento),
+    membresias: !!mejorMemb && supera('membresias', mejorMemb.monto)
+  };
+  const pct1=v=>(Number(v)*100).toFixed(1)+"%";   // (pctTxt se define más abajo)
+  const recTxt={ sede: recPrev.sede!=null?pct1(recPrev.sede):"—", vendedor: recPrev.vendedor!=null?pct1(recPrev.vendedor):"—", membresias: recPrev.membresias!=null?fmt(recPrev.membresias):"—" };
+  // etiqueta corta para las tarjetas
+  const bonoLbl=k=>{ if(!exige[k]) return null; if(recPrev[k]==null) return {ok:true, txt:"sin récord anterior"};
+    return bonoGana[k] ? {ok:true, txt:"✓ supera "+recTxt[k]+" de "+mesAntNom} : {ok:false, txt:"✗ no supera "+recTxt[k]+" de "+mesAntNom+" · sin bono"}; };
 
   // ---- guardar meta + asesores de una sede ----
   // Si la sede aún no tiene meta este mes, se precarga con la del mes anterior.
@@ -2846,12 +2870,12 @@ function Metas({showToast, quien}){
     try{
       const canvas=await html2canvas(node,{scale:2,backgroundColor:'#ffffff',useCORS:true});
       const blob=await new Promise(r=>canvas.toBlob(r,'image/png'));
-      const fname=(verImg.que==='__general__'?'Ranking_':'Metas_'+verImg.que.replace(/[^a-z0-9]+/gi,'_')+'_')
+      const fname=(verImg.que==='__general__'?'Ranking_':verImg.que==='__cierre__'?'Cierre_':'Metas_'+verImg.que.replace(/[^a-z0-9]+/gi,'_')+'_')
         +MES_NOM[m-1]+'_'+y+'.png';
       const file=new File([blob],fname,{type:'image/png'});
       if(navigator.canShare && navigator.canShare({files:[file]})){
         await navigator.share({files:[file],
-          title:(verImg.que==='__general__'?'Ranking Panzer':'Metas '+verImg.que)+' — '+MES_NOM[m-1]+' '+y});
+          title:(verImg.que==='__general__'?'Ranking Panzer':verImg.que==='__cierre__'?'Cierre de mes Panzer':'Metas '+verImg.que)+' — '+MES_NOM[m-1]+' '+y});
       } else { const url=URL.createObjectURL(blob); const a=document.createElement('a');
         a.href=url; a.download=fname; a.click(); URL.revokeObjectURL(url);
         showToast("Imagen descargada","ok"); }
@@ -2932,13 +2956,16 @@ function Metas({showToast, quien}){
             <div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{cumplenN} <span className="muted" style={{fontSize:14}}>de {(rend||[]).length}</span></div></div>
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">🏆 Mejor sede</div>
             <div style={{fontSize:16,fontWeight:800}}>{mejorSede?mejorSede.sede:"—"}</div>
-            <div className="muted" style={{fontSize:12}}>{mejorSede?pctTxt(mejorSede.cs):""}{cfg&&mejorSede?(" · "+fmt(bonoSedeCU)+" c/u"):""}</div></div>
+            <div className="muted" style={{fontSize:12}}>{mejorSede?pctTxt(mejorSede.cs):""}{cfg&&mejorSede?(" · "+fmt(bonoSedeCU)+" c/u"):""}</div>
+            {mejorSede && bonoLbl('sede') && <div style={{fontSize:11,fontWeight:700,color:bonoLbl('sede').ok?"var(--green)":"var(--red)"}}>{bonoLbl('sede').txt}</div>}</div>
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">⭐ Mejor vendedor</div>
             <div style={{fontSize:16,fontWeight:800}}>{mejorVend?nombreCorto(mejorVend.empleado):"—"}</div>
-            <div className="muted" style={{fontSize:12}}>{mejorVend?pctTxt(mejorVend.cumplimiento):""}{cfg?(" · "+fmt(cfg.bono_mejor_vendedor)):""}</div></div>
+            <div className="muted" style={{fontSize:12}}>{mejorVend?pctTxt(mejorVend.cumplimiento):""}{cfg?(" · "+fmt(cfg.bono_mejor_vendedor)):""}</div>
+            {mejorVendEval && bonoLbl('vendedor') && <div style={{fontSize:11,fontWeight:700,color:bonoLbl('vendedor').ok?"var(--green)":"var(--red)"}}>{bonoLbl('vendedor').txt}</div>}</div>
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">💳 Mejor en membresías</div>
             <div style={{fontSize:16,fontWeight:800}}>{mejorMemb?nombreCorto(mejorMemb.operador):"—"}</div>
-            <div className="muted" style={{fontSize:12}}>{mejorMemb?fmt(mejorMemb.monto):""}{cfg?(" · "+fmt(cfg.bono_membresias)):""}</div></div>
+            <div className="muted" style={{fontSize:12}}>{mejorMemb?fmt(mejorMemb.monto):""}{cfg?(" · "+fmt(cfg.bono_membresias)):""}</div>
+            {mejorMemb && bonoLbl('membresias') && <div style={{fontSize:11,fontWeight:700,color:bonoLbl('membresias').ok?"var(--green)":"var(--red)"}}>{bonoLbl('membresias').txt}</div>}</div>
         </div>
 
         <div className="muted" style={{fontSize:12,marginBottom:10,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -3179,6 +3206,14 @@ function Metas({showToast, quien}){
                 onChange={e=>setCfgEd(c=>({...c,bono_sede_se_reparte:e.target.checked}))}/>
               <span className="muted">El bono de mejor sede se reparte entre sus asesores</span>
             </label>
+            <label className="label" style={{marginTop:10}}>Solo se paga si el ganador supera el valor del mes anterior</label>
+            <div className="muted" style={{fontSize:11,marginTop:-4,marginBottom:6}}>Ej.: si en agosto el mejor en membresías vendió $1.194.000, en septiembre hay que vender más que eso para ganar el bono.</div>
+            {[["supera_sede","🏆 Mejor sede (supera el % de la sede ganadora)"],["supera_vendedor","⭐ Mejor vendedor (supera el % del ganador)"],["supera_membresias","💳 Membresías (supera lo vendido por el ganador)"]].map(([k,l])=>(
+              <label key={k} className="check" style={{display:"flex",gap:8,alignItems:"center",marginTop:4}}>
+                <input type="checkbox" checked={k==='supera_membresias'?cfgEd[k]!==false:!!cfgEd[k]}
+                  onChange={e=>setCfgEd(c=>({...c,[k]:e.target.checked}))}/>
+                <span className="muted">{l}</span>
+              </label>))}
             <div className="modal-actions">
               <button className="btn btn-ghost" disabled={busy} onClick={()=>setVerCfg(false)}>Cancelar</button>
               <button className="btn btn-amber" disabled={busy} onClick={guardarCfg}>{busy?"Guardando…":"Guardar"}</button>
@@ -3192,7 +3227,8 @@ function Metas({showToast, quien}){
           rankings de bonos, que es la única que se comparte con todos. */}
       {verImg && (()=>{
         const gen=verImg.que==='__general__';
-        const filas=gen?[]:(porSede[verImg.que]||[]);
+        const cierre=verImg.que==='__cierre__';
+        const filas=(gen||cierre)?[]:(porSede[verImg.que]||[]);
         const f0=filas[0];
         const CV=v=>Number(v)>=1?"#16a34a":Number(v)>=0.85?"#d97706":"#dc2626";
         const barra=(v,ancho)=>(
@@ -3211,6 +3247,9 @@ function Metas({showToast, quien}){
               </optgroup>
               <optgroup label="Para todos">
                 <option value="__general__">🏆 Ranking general y bonos</option>
+              </optgroup>
+              <optgroup label="Al cerrar el mes">
+                <option value="__cierre__">🧾 Cierre de mes: comisiones y ganadores de bonos</option>
               </optgroup>
             </select>
             <div className="muted" style={{fontSize:12,marginBottom:8}}>
@@ -3242,7 +3281,7 @@ function Metas({showToast, quien}){
                                fontSize:15,fontWeight:900,letterSpacing:1}}>PANZER</div>
                   <div>
                     <div style={{fontSize:19,fontWeight:900}}>
-                      {gen?"RANKING GENERAL":"METAS · "+verImg.que.toUpperCase()}</div>
+                      {gen?"RANKING GENERAL":cierre?"CIERRE DE MES · COMISIONES Y BONOS":"METAS · "+verImg.que.toUpperCase()}</div>
                     <div style={{fontSize:13,color:"#64748b",fontWeight:600}}>
                       {MES_NOM[m-1]} {y}{esMesActual?(" · día "+diaCorte+" de "+diasDelMes+" · esperado "+(esperado*100).toFixed(0)+"%"):" · mes cerrado"}
                     </div>
@@ -3342,6 +3381,99 @@ function Metas({showToast, quien}){
                   </div>
                 </div>);})()}
 
+                {/* ---- CIERRE DE MES: comisión de cada uno + ganadores de bonos + total a pagar ---- */}
+                {cierre && (()=>{
+                  const B=cfg||{};
+                  const evaluados=(rend||[]).filter(r=>r.evalua!==false);
+                  // ganadores: mejor vendedor entre los evaluados; mejor sede y membresías como en el ranking
+                  const gVend=mejorVendEval;
+                  const gSede=mejorSede;
+                  const gMemb=mejorMemb;
+                  // el bono solo se paga si supera el valor del mes anterior (según configuración)
+                  const bSede=bonoGana.sede?(Number(B.bono_mejor_sede)||0):0;
+                  const bVend=bonoGana.vendedor?(Number(B.bono_mejor_vendedor)||0):0;
+                  const bMemb=bonoGana.membresias?(Number(B.bono_membresias)||0):0;
+                  const sinBono=k=>exige[k]&&recPrev[k]!=null&&!bonoGana[k] ? ("✗ no superó "+recTxt[k]+" de "+mesAntNom+" → sin bono") : null;
+                  const sedeGan=gSede?gSede.sede:null;
+                  const asesSede=sedeGan?(porSede[sedeGan]||[]).map(r=>r.empleado):[];
+                  const reparte=B.bono_sede_se_reparte!==false;
+                  const bSedeCU=(sedeGan&&bSede>0)?(reparte?Math.round(bSede/(asesSede.length||1)):bSede):0;
+                  const k=n=>String(n||'').trim().toLowerCase();
+                  // bonos por persona
+                  const bonosDe=r=>{ const out=[];
+                    if(sedeGan && asesSede.includes(r.empleado) && bSede>0 && reparte) out.push({t:"🏆 Mejor sede",v:bSedeCU});
+                    if(gVend && k(gVend.empleado)===k(r.empleado) && bVend>0) out.push({t:"⭐ Mejor vendedor",v:bVend});
+                    if(gMemb && k(gMemb.operador)===k(r.empleado) && bMemb>0) out.push({t:"💳 Membresías",v:bMemb});
+                    return out; };
+                  const filasC=(rend||[]).map(r=>{ const bs=bonosDe(r); const bt=bs.reduce((a,x)=>a+x.v,0);
+                    return {r, bonos:bs, bonoTot:bt, com:Number(r.comision)||0, total:(Number(r.comision)||0)+bt}; })
+                    .sort((a,b)=>b.total-a.total || Number(b.r.cumplimiento)-Number(a.r.cumplimiento));
+                  const totCom=filasC.reduce((a,x)=>a+x.com,0);
+                  // total de bonos con los montos configurados (evita el peso de diferencia por redondear el reparto)
+                  // ganador de membresías que no está en metas (p.ej. admin): se muestra en una fila aparte
+                  const membFuera = gMemb && bMemb>0 && !(rend||[]).some(r=>k(r.empleado)===k(gMemb.operador));
+                  const totBon=(sedeGan&&bSede>0&&reparte?bSede:0)+(gVend&&bVend>0?bVend:0)+(gMemb&&bMemb>0&&!membFuera?bMemb:0);
+                  const sedeNoReparte = sedeGan && bSede>0 && !reparte;
+                  const TH=(t,extra)=>({padding:"5px 8px",border:"1px solid #e2e8f0",background:"#f8fafc",fontSize:10.5,fontWeight:800,color:"#475569",textAlign:t,...(extra||{})});
+                  const TD=(t,extra)=>({padding:"6px 8px",border:"1px solid #e2e8f0",fontSize:12,textAlign:t,...(extra||{})});
+                  const card=(titulo,quien,sub,bono,extra)=>(
+                    <div style={{flex:"1 1 150px",padding:"9px 11px",background:"#fef9e7",border:"1px solid #fde68a",borderRadius:10}}>
+                      <div style={{fontSize:10.5,color:"#92400e",fontWeight:800}}>{titulo}</div>
+                      <div style={{fontSize:15,fontWeight:900,marginTop:2}}>{quien||"—"}</div>
+                      <div style={{fontSize:11,color:"#64748b"}}>{sub}</div>
+                      <div style={{fontSize:13,fontWeight:900,color:bono>0?"#16a34a":"#dc2626",marginTop:3}}>{bono>0?fmt(bono):"sin bono"}</div>
+                      {extra && <div style={{fontSize:10.5,color:"#64748b"}}>{extra}</div>}
+                    </div>);
+                  return (<div>
+                    {esMesActual && <div style={{marginBottom:10,padding:"7px 10px",borderRadius:8,background:"#fff7ed",border:"1px solid #fed7aa",fontSize:11.5,color:"#9a3412",fontWeight:700}}>
+                      ⚠ El mes todavía no termina: esto va con corte al día {diaCorte}. Los números finales salen al cerrar el mes.</div>}
+
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:6}}>🎁 GANADORES DE LOS BONOS</div>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
+                      {card("🏆 MEJOR SEDE", sedeGan, gSede?("cumplimiento "+pctTxt(gSede.cs)):"", bSede,
+                        sinBono('sede') || (sedeGan && bSede>0 && reparte ? ("se reparte: "+fmt(bSedeCU)+" para "+asesSede.map(nombreCorto).join(", ")) : (sedeGan&&bSede>0?"bono para la sede":null)))}
+                      {card("⭐ MEJOR VENDEDOR", gVend?nombreCorto(gVend.empleado):null, gVend?(gVend.sede+" · "+pctTxt(gVend.cumplimiento)):"", bVend, sinBono('vendedor'))}
+                      {card("💳 MEMBRESÍAS", gMemb?nombreCorto(gMemb.operador):null, gMemb?("vendió "+fmt(gMemb.monto)+(exige.membresias&&recPrev.membresias!=null&&bonoGana.membresias?(" · superó "+recTxt.membresias):"")):"", bMemb, sinBono('membresias'))}
+                    </div>
+
+                    <div style={{fontSize:13,fontWeight:900,marginBottom:6}}>💵 COMISIÓN Y BONOS DE CADA ASESOR</div>
+                    <table style={{borderCollapse:"collapse",width:"100%"}}>
+                      <thead><tr>
+                        <th style={TH("left")}>Asesor</th><th style={TH("left")}>Sede</th>
+                        <th style={TH("right")}>Sede %</th><th style={TH("right")}>Escalón</th><th style={TH("right")}>Asesor %</th>
+                        <th style={TH("right")}>Comisión</th><th style={TH("left")}>Bonos</th><th style={TH("right",{background:"#fef9e7"})}>Total</th>
+                      </tr></thead>
+                      <tbody>
+                        {filasC.map(({r,bonos,bonoTot,com,total})=>{ const noEval=r.evalua===false; return (
+                          <tr key={r.empleado} style={{opacity:noEval?.65:1}}>
+                            <td style={TD("left",{fontWeight:800,fontSize:12.5})}>{nombreCorto(r.empleado)}</td>
+                            <td style={TD("left",{color:"#64748b",fontSize:11})}>{r.sede}</td>
+                            <td style={TD("right",{fontWeight:800,color:CV(r.cumpl_sede)})}>{pctTxt(r.cumpl_sede)}</td>
+                            <td style={TD("right",{color:"#64748b"})}>{Number(r.pct_comision)>0?(r.pct_comision+"%"):"—"}</td>
+                            <td style={TD("right",{fontWeight:900,color:noEval?"#94a3b8":CV(r.cumplimiento)})}>{noEval?"no evalúa":pctTxt(r.cumplimiento)}</td>
+                            <td style={TD("right",{fontWeight:800,color:com>0?"#16a34a":"#94a3b8"})}>{com>0?fmt(com):(noEval?"—":"$0")}</td>
+                            <td style={TD("left",{fontSize:11})}>{bonos.length?bonos.map(b=>b.t+" "+fmt(b.v)).join(" · "):<span style={{color:"#94a3b8"}}>—</span>}</td>
+                            <td style={TD("right",{fontWeight:900,fontSize:13,background:"#fffdf5",color:total>0?"#0f172a":"#94a3b8"})}>{fmt(total)}</td>
+                          </tr>); })}
+                        {membFuera && (
+                          <tr><td style={TD("left",{fontWeight:800})}>{nombreCorto(gMemb.operador)}</td><td style={TD("left",{color:"#64748b",fontSize:11})}>—</td>
+                            <td style={TD("right")} colSpan="4"><span style={{color:"#94a3b8"}}>no participa en metas</span></td>
+                            <td style={TD("left",{fontSize:11})}>💳 Membresías {fmt(bMemb)}</td>
+                            <td style={TD("right",{fontWeight:900,background:"#fffdf5"})}>{fmt(bMemb)}</td></tr>)}
+                      </tbody>
+                      <tfoot><tr>
+                        <td style={TD("left",{fontWeight:900,background:"#f8fafc"})} colSpan="5">TOTAL A PAGAR</td>
+                        <td style={TD("right",{fontWeight:900,background:"#f8fafc"})}>{fmt(totCom)}</td>
+                        <td style={TD("left",{fontWeight:800,background:"#f8fafc",fontSize:11})}>bonos {fmt(totBon+(membFuera?bMemb:0)+(sedeNoReparte?bSede:0))}</td>
+                        <td style={TD("right",{fontWeight:900,fontSize:14,background:"#fef9e7"})}>{fmt(totCom+totBon+(membFuera?bMemb:0)+(sedeNoReparte?bSede:0))}</td>
+                      </tr></tfoot>
+                    </table>
+                    {sedeNoReparte && <div style={{marginTop:6,fontSize:11.5,color:"#475569"}}>🏆 El bono de mejor sede ({fmt(bSede)}) va para <b>{sedeGan}</b> completo, no se reparte por persona.</div>}
+                    <div style={{marginTop:8,fontSize:11,color:"#64748b",lineHeight:1.5}}>
+                      La comisión es el <b>% del escalón de la sede</b> sobre las ventas de accesorios + car detailing del asesor. Solo se paga si la sede llega al <b>85%</b> y el asesor a su <b>85%</b>. "No evalúa" = entró este mes.
+                    </div>
+                  </div>); })()}
+
                 {/* ---- GENERAL: rankings de bonos ---- */}
                 {gen && (<div>
                 <div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"flex-start"}}>
@@ -3394,9 +3526,9 @@ function Metas({showToast, quien}){
                     </table>
                     {cfg && (
                       <div style={{marginTop:8,fontSize:11,color:"#475569",lineHeight:1.6}}>
-                        <div>🏆 Mejor sede: <b>{fmt(cfg.bono_mejor_sede)}</b>{cfg.bono_sede_se_reparte?" (se reparte)":""}</div>
-                        <div>⭐ Mejor vendedor: <b>{fmt(cfg.bono_mejor_vendedor)}</b></div>
-                        <div>💳 Membresías: <b>{fmt(cfg.bono_membresias)}</b></div>
+                        <div>🏆 Mejor sede: <b>{fmt(cfg.bono_mejor_sede)}</b>{cfg.bono_sede_se_reparte?" (se reparte)":""}{exige.sede&&recPrev.sede!=null?<span style={{color:"#64748b"}}> · a superar {recTxt.sede} de {mesAntNom}</span>:null}</div>
+                        <div>⭐ Mejor vendedor: <b>{fmt(cfg.bono_mejor_vendedor)}</b>{exige.vendedor&&recPrev.vendedor!=null?<span style={{color:"#64748b"}}> · a superar {recTxt.vendedor} de {mesAntNom}</span>:null}</div>
+                        <div>💳 Membresías: <b>{fmt(cfg.bono_membresias)}</b>{exige.membresias&&recPrev.membresias!=null?<span style={{color:"#64748b"}}> · a superar {recTxt.membresias} de {mesAntNom}</span>:null}</div>
                       </div>
                     )}
                   </div>

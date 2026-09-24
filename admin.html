@@ -7783,7 +7783,7 @@ function AbonosQR({showToast, quien, rol}){
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>💸 Pagos QR que entraron a la cuenta Bold.</b> <span className="muted">Llegan solos por el SMS de BoldCF. En el POS el cajero los reclama con "Verificar pago" antes de entregar. Lo que un cajero registre por QR y no tenga abono reclamado, no entró.</span>
+        <b style={{color:"var(--amber)"}}>💸 Pagos QR que entraron a la cuenta.</b> <span className="muted">Llegan solos por el SMS del banco (Bancolombia trae el nombre de quien pagó). En el POS el cajero los reclama con "Verificar pago" antes de entregar. Lo que un cajero registre por QR y no tenga abono reclamado, no entró.</span>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
@@ -7819,13 +7819,14 @@ function AbonosQR({showToast, quien, rol}){
 
         <div className="card" style={{padding:0,overflowX:"auto"}}>
           <table className="tbl">
-            <thead><tr><th>Pago</th><th className="num">Valor</th><th>Estado</th><th>Verificado</th><th className="num">Demora</th><th></th></tr></thead>
+            <thead><tr><th>Pago</th><th className="num">Valor</th><th>Pagó</th><th>Estado</th><th>Verificado</th><th className="num">Demora</th><th></th></tr></thead>
             <tbody>
-              {vis.length===0 && <tr><td colSpan="6"><div className="empty">No hay abonos con ese filtro.</div></td></tr>}
+              {vis.length===0 && <tr><td colSpan="7"><div className="empty">No hay abonos con ese filtro.</div></td></tr>}
               {vis.slice(0,400).map(a=>{ const dem=a.reclamado_en?Math.round((new Date(a.reclamado_en)-new Date(a.fecha_pago))/60000):null; return (
                 <tr key={a.id}>
                   <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(a.fecha_pago)}</td>
                   <td className="num" style={{fontWeight:800}}>{fmt(a.valor)}</td>
+                  <td style={{fontSize:12}}>{a.pagador||<span className="muted">—</span>}{a.banco?<span className="muted" style={{fontSize:10,marginLeft:4}}>{a.banco}</span>:null}</td>
                   <td>{a.reclamado_en ? <span className="pill pill-prod">✓ {a.reclamado_por} · {a.reclamado_sede}</span> : <span className="pill pill-off" style={{color:"var(--red)"}}>Sin reclamar</span>}</td>
                   <td className="muted" style={{whiteSpace:"nowrap"}}>{a.reclamado_en?hora(a.reclamado_en):"—"}</td>
                   <td className="num muted" title="Tiempo entre que entró el pago y que el cajero lo verificó">{dem===null?"—":dem<60?(dem+" min"):(Math.round(dem/60)+" h")}</td>

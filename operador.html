@@ -508,13 +508,13 @@ const db = {
   async abonosLibres(horas){
     if(DEMO_MODE) return [];
     const desde=new Date(Date.now()-(horas||6)*3600*1000).toISOString();
-    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,recibido_en,cuenta_fin')
+    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,recibido_en,cuenta_fin,pagador,banco')
       .is('reclamado_en',null).gte('recibido_en',desde).order('fecha_pago',{ascending:false}).limit(200);
     if(error) throw error; return data||[];
   },
   async misAbonos(operador, desdeISO){
     if(DEMO_MODE) return [];
-    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,reclamado_en,reclamado_sede')
+    const { data, error } = await sb.from('abonos').select('id,valor,fecha_pago,reclamado_en,reclamado_sede,pagador')
       .eq('reclamado_por',operador).gte('reclamado_en',desdeISO).order('reclamado_en',{ascending:false}).limit(200);
     if(error) return []; return data||[];
   },
@@ -1913,13 +1913,14 @@ function PagosSheet({sede,operador,turno,onClose}){
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
         <div className="card-t">💸 Verificar pago QR</div>
-        <div className="header-sub" style={{marginBottom:10}}>El pantallazo no es prueba. Entrega solo si el pago aparece aquí.</div>
+        <div className="header-sub" style={{marginBottom:10}}>El pantallazo no es prueba. Entrega solo si el pago aparece aquí, con el nombre de quien pagó.</div>
 
         {okAbono ? (
           <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:"var(--green-d)",border:"2px solid var(--green)"}}>
             <div style={{fontSize:54,lineHeight:1}}>✅</div>
             <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>PAGO VERIFICADO</div>
             <div style={{fontSize:30,fontWeight:900,margin:"6px 0"}}>{fmt(okAbono.valor)}</div>
+            {okAbono.pagador && <div style={{fontSize:15,fontWeight:800}}>👤 {okAbono.pagador}</div>}
             <div className="header-sub">Entró a las {hora(okAbono.fecha_pago)} · quedó a tu nombre en {sede}</div>
             <div style={{fontWeight:800,marginTop:10}}>Ya puedes entregar.</div>
             <button className="btn-primary" style={{marginTop:14}} onClick={()=>setOkAbono(null)}>Verificar otro pago</button>
@@ -1947,8 +1948,9 @@ function PagosSheet({sede,operador,turno,onClose}){
                 <div style={{margin:"10px 0",padding:14,borderRadius:12,border:"2px solid var(--green)",background:"var(--sf)"}}>
                   <div style={{fontWeight:800}}>¿Este es el pago de tu cliente?</div>
                   <div style={{fontSize:28,fontWeight:900,margin:"4px 0"}}>{fmt(sel.valor)}</div>
-                  <div className="header-sub">Entró a las {hora(sel.fecha_pago)} · {hace(sel.fecha_pago)}</div>
-                  <div className="header-sub" style={{marginTop:6}}>Compara la hora con la del comprobante. Al confirmar queda a tu nombre y nadie más lo puede usar.</div>
+                  {sel.pagador && <div style={{fontSize:15,fontWeight:800,color:"var(--green)"}}>👤 {sel.pagador}</div>}
+                  <div className="header-sub">Entró a las {hora(sel.fecha_pago)} · {hace(sel.fecha_pago)}{sel.banco?(" · "+sel.banco):""}</div>
+                  <div className="header-sub" style={{marginTop:6}}>{sel.pagador?"Compara el nombre y la hora con el comprobante.":"Compara la hora con la del comprobante."} Al confirmar queda a tu nombre y nadie más lo puede usar.</div>
                   <div style={{display:"flex",gap:8,marginTop:10}}>
                     <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={busy} onClick={()=>setSel(null)}>No es</button>
                     <button className="btn-primary" style={{flex:1,marginTop:0,background:"var(--green)"}} disabled={busy} onClick={reclamar}>{busy?"Confirmando…":"Sí, es de mi cliente"}</button>
@@ -1960,7 +1962,8 @@ function PagosSheet({sede,operador,turno,onClose}){
                 <div key={a.id} onClick={()=>{ setSel(a); setErr(null); }} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",marginBottom:6,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",cursor:"pointer"}}>
                   <div style={{flex:1}}>
                     <div style={{fontWeight:900,fontSize:18}}>{fmt(a.valor)}</div>
-                    <div className="header-sub">{hora(a.fecha_pago)} · {hace(a.fecha_pago)}</div>
+                    {a.pagador && <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>👤 {a.pagador}</div>}
+                    <div className="header-sub">{hora(a.fecha_pago)} · {hace(a.fecha_pago)}{a.banco?(" · "+a.banco):""}</div>
                   </div>
                   <div style={{color:"var(--green)",fontWeight:800}}>Elegir ›</div>
                 </div>))}
@@ -1975,7 +1978,7 @@ function PagosSheet({sede,operador,turno,onClose}){
             {mios.length===0 ? <div className="empty">Aún no has verificado pagos en este turno.</div> :
               mios.map(a=>(
                 <div key={a.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
-                  <span>✅ {hora(a.fecha_pago)} <span className="header-sub">· verificado {hora(a.reclamado_en)}</span></span><b>{fmt(a.valor)}</b>
+                  <span>✅ {hora(a.fecha_pago)}{a.pagador?(" · "+a.pagador):""} <span className="header-sub">· verificado {hora(a.reclamado_en)}</span></span><b>{fmt(a.valor)}</b>
                 </div>))}
             <div className="header-sub" style={{marginTop:8}}>Al cerrar caja, lo que registres como QR debe cuadrar con este total.</div>
           </div>)}

@@ -174,6 +174,15 @@ const sb = DEMO_MODE ? null : supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
 
 const fmt = n => "$"+Math.round(Number(n)||0).toLocaleString("es-CO");
 const VALOR_TOKEN = 6000;   // precio de un token, para valorar tokens perdidos/faltantes en Recaudo
+// Celda "QR verificado" de una liquidación: verde si todo el QR quedó respaldado por abonos, rojo si falta.
+function QrVerifCell({l}){
+  const qr=Number(l.qr)||0;
+  if(l.qr_verificado==null){ return <span className="muted" title="Liquidación anterior al sistema de verificación">—</span>; }
+  const v=Number(l.qr_verificado)||0, sv=Number(l.qr_sin_verificar)||Math.max(0,qr-v);
+  if(qr<=0) return <span className="muted">sin QR</span>;
+  if(sv<=0) return <span style={{color:"var(--green)",fontWeight:800}} title={"Verificado "+fmt(v)+" de "+fmt(qr)}>✓ {fmt(v)}</span>;
+  return <span style={{color:"var(--red)",fontWeight:800}} title={"Verificado "+fmt(v)+" de "+fmt(qr)}>⚠ falta {fmt(sv)}</span>;
+}
 // Fecha/hora en zona LOCAL (Colombia) a partir de un timestamp UTC de Supabase
 const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
@@ -1472,16 +1481,25 @@ const db = {
     const {data,error}=await q; if(error) throw error; return data;
   },
   // ---- ABONOS QR: plata que entró a la cuenta (SMS de Bold) y quién la reclamó en el POS ----
-  async listAbonos(desdeISO){
+  async listAbonos(desdeISO, hastaISO){
     if(DEMO_MODE) return [];
     const out=[]; const paso=1000;
     for(let i=0;i<20;i++){
-      const {data,error}=await sb.from('abonos').select('*').gte('recibido_en',desdeISO)
-        .order('fecha_pago',{ascending:false}).range(i*paso,(i+1)*paso-1);
+      let q=sb.from('abonos').select('*').gte('recibido_en',desdeISO);
+      if(hastaISO) q=q.lte('recibido_en',hastaISO);
+      const {data,error}=await q.order('fecha_pago',{ascending:false}).range(i*paso,(i+1)*paso-1);
       if(error) throw error;
       out.push(...(data||[])); if(!data || data.length<paso) break;
     }
     return out;
+  },
+  // liquidaciones del rango con su QR verificado (seguimiento por cajero)
+  async listLiqRango(desdeISO, hastaISO){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('recaudo_liquidaciones')
+      .select('id,operador,sede,qr,qr_verificado,qr_sin_verificar,created_at,fecha,num_recibo,estado')
+      .gte('created_at',desdeISO).lte('created_at',hastaISO).neq('estado','anulada').order('created_at',{ascending:false}).limit(2000);
+    if(error) return []; return data||[];
   },
   async liberarAbono(id, admin){
     if(DEMO_MODE) return {ok:true};
@@ -7749,30 +7767,54 @@ const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina
 // respalde = posible comprobante falso.
 // ============================================================
 function AbonosQR({showToast, quien, rol}){
-  const [dias,setDias]=useState(1);
+  const hoyISO=fLocalDia(new Date());
+  const [desde,setDesde]=useState(hoyISO);
+  const [hasta,setHasta]=useState(hoyISO);
   const [rows,setRows]=useState(null);
+  const [liqs,setLiqs]=useState([]);              // liquidaciones del rango (QR registrado vs verificado)
   const [fEstado,setFEstado]=useState('todos');   // todos | libres | reclamados
   const [fSede,setFSede]=useState('');
+  const [fCajero,setFCajero]=useState('');
+  const preset=k=>{ const h=new Date(); h.setHours(0,0,0,0); const d=new Date(h);
+    if(k==='hoy'){ }
+    else if(k==='ayer'){ d.setDate(d.getDate()-1); h.setDate(h.getDate()-1); }
+    else if(k==='7'){ d.setDate(d.getDate()-6); }
+    else if(k==='30'){ d.setDate(d.getDate()-29); }
+    else if(k==='mes'){ d.setDate(1); }
+    setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
   const [conf,setConf]=useState(null);
   const [busy,setBusy]=useState(false);
 
   const cargar=async()=>{
+    if(!desde||!hasta) return;
     setRows(null);
-    try{ const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-(dias-1));
-      setRows(await db.listAbonos(d.toISOString())); }
+    try{ const dISO=new Date(desde+'T00:00:00').toISOString(), hISO=new Date(hasta+'T23:59:59.999').toISOString();
+      const [ab,lq]=await Promise.all([db.listAbonos(dISO,hISO), db.listLiqRango(dISO,hISO).catch(()=>[])]);
+      setRows(ab); setLiqs(lq); }
     catch(e){ showToast(""+(e.message||e),"err"); setRows([]); }
   };
-  useEffect(()=>{ cargar(); },[dias]);
+  useEffect(()=>{ cargar(); },[desde,hasta]);
 
   const hora=iso=>iso?(fLocalDia(iso)+" "+fLocalHora(iso)):"—";
   const all=rows||[];
-  const sedes=[...new Set(all.map(a=>a.reclamado_sede).filter(Boolean))].sort();
-  const vis=all.filter(a=>(fEstado==='todos'||(fEstado==='libres'?!a.reclamado_en:!!a.reclamado_en)) && (!fSede||a.reclamado_sede===fSede));
+  const sedes=[...new Set([...all.map(a=>a.reclamado_sede),...liqs.map(l=>l.sede)].filter(Boolean))].sort();
+  const cajeros=[...new Set([...all.map(a=>a.reclamado_por),...liqs.map(l=>l.operador)].filter(Boolean).map(x=>String(x).trim()))].sort();
+  const vis=all.filter(a=>(fEstado==='todos'||(fEstado==='libres'?!a.reclamado_en:!!a.reclamado_en)) && (!fSede||a.reclamado_sede===fSede) && (!fCajero||String(a.reclamado_por||'').trim()===fCajero));
+  // ---- seguimiento por cajero: lo que registró por QR en sus liquidaciones vs lo que verificó ----
+  const liqVis=liqs.filter(l=>(!fSede||l.sede===fSede) && (!fCajero||String(l.operador||'').trim()===fCajero));
+  const segMap={}; liqVis.forEach(l=>{ const k=String(l.operador||'').trim()+'|'+l.sede;
+    const o=segMap[k]||(segMap[k]={op:String(l.operador||'').trim(),sede:l.sede,n:0,qr:0,ver:0,sin:0,sinDato:0,peor:null});
+    o.n++; const qr=Number(l.qr)||0; o.qr+=qr;
+    if(l.qr_verificado==null){ if(qr>0) o.sinDato++; }
+    else { const v=Number(l.qr_verificado)||0, sv=Number(l.qr_sin_verificar)||Math.max(0,qr-v); o.ver+=v; o.sin+=sv;
+      if(sv>0 && (!o.peor||sv>o.peor.sv)) o.peor={sv, fecha:l.fecha||fLocalDia(l.created_at), rec:l.num_recibo}; } });
+  const segRows=Object.values(segMap).filter(o=>o.qr>0||o.sinDato>0).sort((a,b)=>b.sin-a.sin || b.qr-a.qr);
+  const segTotSin=segRows.reduce((a,o)=>a+o.sin,0);
   const sum=a=>a.reduce((x,r)=>x+(Number(r.valor)||0),0);
   const libres=all.filter(a=>!a.reclamado_en), recl=all.filter(a=>a.reclamado_en);
   const ultimo=all.length?all.reduce((m,a)=>a.recibido_en>m?a.recibido_en:m,all[0].recibido_en):null;
   const minUlt=ultimo?Math.round((Date.now()-new Date(ultimo))/60000):null;
-  const porOp={}; recl.forEach(a=>{ const k=a.reclamado_por+'|'+a.reclamado_sede; (porOp[k]=porOp[k]||{op:a.reclamado_por,sede:a.reclamado_sede,n:0,v:0}); porOp[k].n++; porOp[k].v+=Number(a.valor)||0; });
+  const porOp={}; recl.filter(a=>(!fSede||a.reclamado_sede===fSede)&&(!fCajero||String(a.reclamado_por||'').trim()===fCajero)).forEach(a=>{ const k=a.reclamado_por+'|'+a.reclamado_sede; (porOp[k]=porOp[k]||{op:a.reclamado_por,sede:a.reclamado_sede,n:0,v:0}); porOp[k].n++; porOp[k].v+=Number(a.valor)||0; });
   const opsRows=Object.values(porOp).sort((a,b)=>b.v-a.v);
 
   const liberar=a=>setConf({a});
@@ -7787,14 +7829,19 @@ function AbonosQR({showToast, quien, rol}){
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
-          {[[1,"Hoy"],[7,"7 días"],[30,"30 días"]].map(([d,l])=>(
-            <button key={d} className={"btn btn-sm "+(dias===d?'btn-amber':'btn-ghost')} onClick={()=>setDias(d)}>{l}</button>))}
+          {[['hoy',"Hoy"],['ayer',"Ayer"],['7',"7 días"],['30',"30 días"],['mes',"Este mes"]].map(([k,l])=>(
+            <button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>))}
         </div>
-        <select className="select" style={{maxWidth:180,margin:0}} value={fEstado} onChange={e=>setFEstado(e.target.value)}>
-          <option value="todos">Todos</option><option value="libres">Sin reclamar</option><option value="reclamados">Reclamados</option>
+        <div className="fld"><label className="label" style={{margin:0,fontSize:10}}>Desde</label><input className="input" style={{margin:0,maxWidth:150}} type="date" value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+        <div className="fld"><label className="label" style={{margin:0,fontSize:10}}>Hasta</label><input className="input" style={{margin:0,maxWidth:150}} type="date" value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+        <select className="select" style={{maxWidth:200,margin:0}} value={fCajero} onChange={e=>setFCajero(e.target.value)}>
+          <option value="">Todos los cajeros</option>{cajeros.map(x=><option key={x} value={x}>{x}</option>)}
         </select>
         <select className="select" style={{maxWidth:180,margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}>
           <option value="">Todas las sedes</option>{sedes.map(x=><option key={x} value={x}>{x}</option>)}
+        </select>
+        <select className="select" style={{maxWidth:160,margin:0}} value={fEstado} onChange={e=>setFEstado(e.target.value)}>
+          <option value="todos">Todos los abonos</option><option value="libres">Sin reclamar</option><option value="reclamados">Reclamados</option>
         </select>
         <button className="btn btn-ghost btn-sm" onClick={cargar}>↻ Actualizar</button>
         <span className="muted" style={{marginLeft:"auto",fontSize:12}}>
@@ -7807,6 +7854,29 @@ function AbonosQR({showToast, quien, rol}){
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Entró a la cuenta</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(sum(all))}</div><div className="muted" style={{fontSize:11}}>{all.length} pagos</div></div>
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">✅ Reclamado en el POS</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{fmt(sum(recl))}</div><div className="muted" style={{fontSize:11}}>{recl.length} pagos</div></div>
           <div className="card" style={{flex:"1 1 170px"}}><div className="muted">⏳ Sin reclamar</div><div style={{fontSize:24,fontWeight:800,color:libres.length?"var(--red)":"var(--t)"}}>{fmt(sum(libres))}</div><div className="muted" style={{fontSize:11}}>{libres.length} pagos · nadie los verificó</div></div>
+          <div className="card" style={{flex:"1 1 170px",borderColor:segTotSin>0?"var(--red)":undefined}}><div className="muted">🚩 QR registrado sin verificar</div><div style={{fontSize:24,fontWeight:800,color:segTotSin>0?"var(--red)":"var(--green)"}}>{fmt(segTotSin)}</div><div className="muted" style={{fontSize:11}}>en {liqVis.length} liquidaciones del rango</div></div>
+        </div>
+
+        {/* ---- seguimiento por cajero: aquí se ve quién NO está verificando ---- */}
+        <div className="sec-title" style={{fontSize:14,margin:"4px 0 6px"}}>🚩 Seguimiento por cajero <span className="muted">· QR que registró en sus liquidaciones vs lo que verificó</span></div>
+        <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+          <table className="tbl">
+            <thead><tr><th>Cajero</th><th>Sede</th><th className="num">Liquidaciones</th><th className="num">QR registrado</th><th className="num">QR verificado</th><th className="num">Sin verificar</th><th className="num">% verificado</th><th>Peor turno</th></tr></thead>
+            <tbody>
+              {segRows.length===0 && <tr><td colSpan="8"><div className="empty">No hay liquidaciones con QR en ese rango{fCajero?(" de "+fCajero):""}{fSede?(" en "+fSede):""}.</div></td></tr>}
+              {segRows.map(o=>{ const base=o.ver+o.sin; const pct=base>0?Math.round(o.ver/base*100):null; return (
+                <tr key={o.op+'|'+o.sede} style={{background:o.sin>0?"var(--red-d)":undefined}}>
+                  <td className="row-name">{o.op}</td>
+                  <td className="muted">{o.sede}</td>
+                  <td className="num">{o.n}{o.sinDato>0 && <span className="muted" title="Liquidaciones anteriores al sistema de verificación, sin dato" style={{fontSize:10,marginLeft:4}}>({o.sinDato} sin dato)</span>}</td>
+                  <td className="num">{fmt(o.qr)}</td>
+                  <td className="num" style={{color:"var(--green)",fontWeight:700}}>{fmt(o.ver)}</td>
+                  <td className="num" style={{color:o.sin>0?"var(--red)":"var(--td)",fontWeight:800}}>{o.sin>0?fmt(o.sin):"—"}</td>
+                  <td className="num" style={{fontWeight:800,color:pct==null?"var(--td)":pct>=100?"var(--green)":pct>=80?"var(--amber)":"var(--red)"}}>{pct==null?"—":(pct+"%")}</td>
+                  <td className="muted" style={{fontSize:12}}>{o.peor?(o.peor.fecha+" · "+(o.peor.rec||"")+" · falta "+fmt(o.peor.sv)):"—"}</td>
+                </tr>); })}
+            </tbody>
+          </table>
         </div>
 
         {opsRows.length>0 && (
@@ -7907,6 +7977,7 @@ function Recaudo({showToast, quien, rol}){
     const nuevas=sel.map(p=>({ id:p.id, operador:p.operador, num_recibo:p.num_recibo,
       tokens_base:p.tokens_base, tokens_vendidos:p.tokens_vendidos, dev_tokens:p.dev_tokens,
       tokens_membresia:p.tokens_membresia, tokens_restantes:p.tokens_restantes, valor:p.valor, qr:p.qr,
+      qr_verificado:p.qr_verificado, qr_sin_verificar:p.qr_sin_verificar,
       devoluciones:p.devoluciones, efectivo:p.efectivo, efectivo_contado:"", observaciones:p.observaciones||"" }));
     setLiqs(l=>[...l, ...nuevas]);
     setPend(pe=>pe.filter(p=>!impSel[p.id])); setImpSel({});
@@ -8308,7 +8379,7 @@ function Recaudo({showToast, quien, rol}){
               {pend.map(p=>(
                 <label key={p.id} className="check" style={{display:"flex",gap:8,padding:"4px 0"}}>
                   <input type="checkbox" checked={!!impSel[p.id]} onChange={e=>setImpSel(s=>({...s,[p.id]:e.target.checked}))}/>
-                  <span>{p.operador} · {p.num_recibo||"s/recibo"} · valor {fmt(p.valor)} · {p.fecha||""}</span>
+                  <span>{p.operador} · {p.num_recibo||"s/recibo"} · valor {fmt(p.valor)} · {p.fecha||""}{Number(p.qr)>0 && p.qr_verificado!=null && (Number(p.qr_sin_verificar)||0)>0 ? <b style={{color:"var(--red)",marginLeft:6}}>⚠ QR sin verificar {fmt(p.qr_sin_verificar)}</b> : null}</span>
                 </label>
               ))}
               <button className="btn btn-amber btn-sm" style={{marginTop:8}} onClick={importar}>Importar seleccionadas</button>
@@ -8316,15 +8387,16 @@ function Recaudo({showToast, quien, rol}){
           )}
           <div className="card" style={{padding:0,overflowX:"auto"}}>
             <table className="tbl">
-              <thead><tr><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th className="num">QR</th><th className="num">Efectivo esperado</th><th className="num">Efectivo contado</th><th className="num">Descuadre</th><th></th></tr></thead>
+              <thead><tr><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th className="num">QR</th><th className="num">QR verificado</th><th className="num">Efectivo esperado</th><th className="num">Efectivo contado</th><th className="num">Descuadre</th><th></th></tr></thead>
               <tbody>
-                {liqs.length===0 && <tr><td colSpan="8"><div className="empty">Sin liquidaciones aún.</div></td></tr>}
+                {liqs.length===0 && <tr><td colSpan="9"><div className="empty">Sin liquidaciones aún.</div></td></tr>}
                 {liqs.map((l,i)=>{ const d=descuadreDe(l); return (
                   <tr key={i}>
                     <td className="row-name">{l.operador}</td>
                     <td className="muted">{l.num_recibo||"—"}</td>
                     <td className="num">{fmt(l.valor)}</td>
                     <td className="num">{fmt(l.qr)}</td>
+                    <td className="num"><QrVerifCell l={l}/></td>
                     <td className="num">{fmt(efEsperado(l))}</td>
                     <td className="num" style={{width:130}}><input className="input" style={{margin:0,textAlign:"right"}} type="number" value={l.efectivo_contado} onChange={e=>setLiqContado(i,e.target.value)} placeholder="Contar"/></td>
                     <td className="num" style={{fontWeight:700,color:d===0?"var(--muted)":(d>0?"var(--green)":"var(--red)")}}>{l.efectivo_contado===""?"—":fmt(d)}</td>
@@ -8903,9 +8975,9 @@ function Recaudo({showToast, quien, rol}){
           {pendList===null ? <div className="empty">Cargando…</div> : (
             <div className="card" style={{padding:0,overflowX:"auto"}}>
               <table className="tbl">
-                <thead><tr><th>Fecha</th><th>Sede</th><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th>Origen</th><th></th></tr></thead>
+                <thead><tr><th>Fecha</th><th>Sede</th><th>Operador</th><th>Recibo</th><th className="num">Valor</th><th className="num">QR</th><th className="num">QR verificado</th><th>Origen</th><th></th></tr></thead>
                 <tbody>
-                  {pendVista.length===0 && <tr><td colSpan="7"><div className="empty">No hay liquidaciones pendientes{pendSede?(" en "+pendSede):""}{(pendDesde||pendHasta)?" en ese rango de fechas":""}.</div></td></tr>}
+                  {pendVista.length===0 && <tr><td colSpan="9"><div className="empty">No hay liquidaciones pendientes{pendSede?(" en "+pendSede):""}{(pendDesde||pendHasta)?" en ese rango de fechas":""}.</div></td></tr>}
                   {pendVista.map(l=>(
                     <tr key={l.id}>
                       <td className="muted" style={{whiteSpace:"nowrap"}}>{l.fecha||fLocalDia(l.created_at)}</td>
@@ -8913,6 +8985,8 @@ function Recaudo({showToast, quien, rol}){
                       <td className="row-name">{l.operador}</td>
                       <td className="muted">{l.num_recibo||"—"}</td>
                       <td className="num">{fmt(l.valor)}</td>
+                      <td className="num muted">{Number(l.qr)>0?fmt(l.qr):"—"}</td>
+                      <td className="num"><QrVerifCell l={l}/></td>
                       <td className="muted">{l.origen}</td>
                       <td><button className="btn btn-danger btn-sm" onClick={()=>borrarPend(l)}>✕</button></td>
                     </tr>
@@ -9088,6 +9162,8 @@ function Recaudo({showToast, quien, rol}){
         if(difTokFis!==0) alertas.push(['danger','🚨 '+Math.abs(difTokFis)+' tokens de diferencia: contadores '+sumTD+' vs físico contado '+(Number(c.tokens_fisicos)||0)+' ('+(difTokFis>0?'faltan físicos':'sobran físicos')+')']);
         if(difMon!==0) alertas.push(['warning','⚠️ '+fmt(Math.abs(difMon))+' de diferencia en monedas: contadores '+fmt(sumMD)+' vs físico '+fmt(c.efectivo_total_monedas)]);
         if(descEf!==0) alertas.push(['warning','⚠️ Descuadre de efectivo en liquidaciones: '+fmt(descEf)]);
+        const sinVerif=detalle.liquidaciones.filter(l=>l.qr_verificado!=null && (Number(l.qr_sin_verificar)||0)>0);
+        if(sinVerif.length) alertas.push(['danger','🚨 QR sin verificar: '+sinVerif.map(l=>l.operador+' '+fmt(l.qr_sin_verificar)).join(', ')+' — registraron QR que no tiene abono verificado que lo respalde']);
         if(opsNeg.length) alertas.push(['danger','🚨 '+opsNeg.length+' operador(es) con saldo negativo (vendieron más de lo que tenían): '+opsNeg.map(o=>o.nombre+' ('+o.saldoEsperado+')').join(', ')]);
         if(ajuste!==0) alertas.push(['warning',(ajuste<0?'📤 Retiro':'📥 Ingreso')+' de tokens: '+(ajuste>0?'+':'')+ajuste+(rep.ajusteMotivo?(' — '+rep.ajusteMotivo):'')]);
         // rectificación física de saldos (operadores o base de sede)
@@ -9122,8 +9198,8 @@ function Recaudo({showToast, quien, rol}){
             </div>
 
             <div className="card-t">Liquidaciones ({detalle.liquidaciones.length})</div>
-            <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Valor</th><th className="num">QR</th><th className="num">Efectivo</th><th className="num">Contado</th><th className="num">Descuadre</th></tr></thead>
-              <tbody>{detalle.liquidaciones.map((l,i)=>(<tr key={i}><td className="row-name">{l.operador}</td><td className="num">{fmt(l.valor)}</td><td className="num">{fmt(l.qr)}</td><td className="num">{fmt(l.efectivo)}</td><td className="num">{fmt(l.efectivo_contado)}</td><td className="num" style={{color:Number(l.descuadre)?"var(--red)":"var(--green)"}}>{fmt(l.descuadre)}</td></tr>))}</tbody></table></div>
+            <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Operador</th><th className="num">Valor</th><th className="num">QR</th><th className="num">QR verificado</th><th className="num">Efectivo</th><th className="num">Contado</th><th className="num">Descuadre</th></tr></thead>
+              <tbody>{detalle.liquidaciones.map((l,i)=>(<tr key={i}><td className="row-name">{l.operador}</td><td className="num">{fmt(l.valor)}</td><td className="num">{fmt(l.qr)}</td><td className="num"><QrVerifCell l={l}/></td><td className="num">{fmt(l.efectivo)}</td><td className="num">{fmt(l.efectivo_contado)}</td><td className="num" style={{color:Number(l.descuadre)?"var(--red)":"var(--green)"}}>{fmt(l.descuadre)}</td></tr>))}</tbody></table></div>
 
             <div className="card-t" style={{marginTop:14}}>Máquinas ({detalle.maquinas.length})</div>
             <div style={{overflowX:"auto"}}><table className="tbl"><thead><tr><th>Máquina</th><th className="num">Producido</th><th className="num">Tokens prod.</th><th className="num">Token día</th><th className="num">Mone día</th></tr></thead>

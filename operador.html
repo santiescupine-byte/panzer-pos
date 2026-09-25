@@ -291,6 +291,8 @@ const db = {
         dev_tokens:Number(liq.devTokens)||0, tokens_membresia:Number(liq.tokensMembresia)||0,
         tokens_restantes:Number(liq.tokensRestantes)||0, valor:Number(liq.valor)||0,
         qr:Number(liq.qr)||0, devoluciones:Number(liq.devoluciones)||0, efectivo:Number(liq.efectivo)||0,
+        qr_verificado:(liq.qrVerificado==null?null:Number(liq.qrVerificado)||0),
+        qr_sin_verificar:(liq.qrSinVerificar==null?null:Number(liq.qrSinVerificar)||0),
         observaciones:liq.observaciones||null, estado:'pendiente', origen:'pos',
         fecha:liq.fecha||null, hora:liq.hora||null,
       });
@@ -1272,6 +1274,8 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
     devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
     valor, valorProductos:productosVal, valorTokens:tokensVal, valorMembresias:membresiasVal,
     qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado,
+    // seguimiento por cajero: cuánto del QR registrado quedó respaldado por abonos verificados
+    qrVerificado: abonosTurno ? qrVerificado : null, qrSinVerificar: abonosTurno ? qrSinVerificar : null,
     observaciones:(observaciones||"")+((abonosTurno&&qrSolo>0)?((observaciones?" | ":"")+"QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):""),
   });
 

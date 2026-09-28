@@ -351,14 +351,15 @@ const db = {
   async loginPin(pin){
     if(DEMO_MODE){
       const e = DEMO_EMPLEADOS.find(x=>x.pin===pin);
-      return e ? { nombre:e.nombre, rol:e.rol||'cajero', sedes:[...e.sedes] } : null;
+      return e ? { nombre:String(e.nombre||'').trim(), rol:e.rol||'cajero', sedes:[...e.sedes] } : null;
     }
     const { data, error } = await sb.from('empleados')
       .select('nombre, rol, empleado_sedes(sedes(nombre))')
       .eq('pin', pin).eq('activo', true).maybeSingle();
     if(error || !data) return null;
     const sedes = (data.empleado_sedes||[]).map(r=>r.sedes?.nombre).filter(Boolean);
-    return { nombre:data.nombre, rol:data.rol||'cajero', sedes };
+    // nombre limpio: un espacio al final en Empleados hacia que no encontrara sus abonos ni sus ventas
+    return { nombre:String(data.nombre||'').trim(), rol:data.rol||'cajero', sedes };
   },
   async getProductos(sede){
     if(DEMO_MODE){

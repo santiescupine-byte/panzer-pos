@@ -533,6 +533,24 @@ const db = {
     const { data, error } = await sb.rpc('reclamar_abono',{ p_id:id, p_operador:operador, p_sede:sede });
     if(error) throw error; return data;
   },
+  // ---- LAVADO DE CELDA por Bluetooth: el servidor autoriza y firma la orden para la máquina ----
+  async autorizarLavadoCelda(estado, operador, sede){
+    if(DEMO_MODE) return {ok:false,error:"No disponible en modo demo."};
+    const { data, error } = await sb.rpc('autorizar_lavado_celda',{ p_estado:estado, p_operador:operador, p_sede:sede });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
+  },
+  async confirmarLavadoCelda(id, estado){
+    if(DEMO_MODE) return {ok:true};
+    const { data, error } = await sb.rpc('confirmar_lavado_celda',{ p_id:id, p_estado:estado });
+    if(error) throw error; return data;
+  },
+  async misLavadosCelda(operador){
+    if(DEMO_MODE) return [];
+    const desde=new Date(Date.now()-14*3600*1000).toISOString();
+    const { data, error } = await sb.from('lavados_celda').select('id,maquina,ciclos,creado_en')
+      .eq('operador',operador).eq('estado','aplicado').gte('creado_en',desde).order('creado_en',{ascending:false}).limit(50);
+    if(error) return []; return data||[];
+  },
   // ---- Solicitudes de anulación: el cajero NO borra, solo pide con un motivo ----
   async misSolicitudesAnulacion(ventaIds){
     if(DEMO_MODE || !ventaIds.length) return [];
@@ -684,6 +702,12 @@ function App(){
   const [showMaq,setShowMaq]=useState(false);   // sheet de máquinas / mantenimiento
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showPagos,setShowPagos]=useState(false);     // sheet "verificar pago QR"
+  const [showCelda,setShowCelda]=useState(false);     // sheet "lavar celda" (Bluetooth)
+  // En prueba: el botón solo aparece en el equipo donde se abrió una vez el POS con #celda al final (#celda-off lo quita)
+  const [celdaOn]=useState(()=>{ try{
+    if(/celda-off/i.test(location.hash)) localStorage.removeItem('panzer_celda');
+    else if(/celda/i.test(location.hash)) localStorage.setItem('panzer_celda','1');
+    return localStorage.getItem('panzer_celda')==='1'; }catch(e){ return false; } });
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"
@@ -1007,6 +1031,7 @@ function App(){
           <div className="drawer" onClick={e=>e.stopPropagation()}>
             <div className="card-t" style={{marginBottom:6}}>Menú</div>
             <button className="drawer-item" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{setMenuOpen(false);setShowPagos(true);}}>💸 Verificar pago QR</button>
+            {celdaOn && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowCelda(true);}}>🚿 Lavar celda</button>}
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
             {miMeta && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMeta(true);}}>🎯 Mi meta del mes</button>}
@@ -1087,6 +1112,7 @@ function App(){
       )}
 
       {showPagos && <PagosSheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowPagos(false)}/>}
+      {showCelda && <CeldaSheet sede={sede} operador={operador} onClose={()=>setShowCelda(false)}/>}
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
       )}
@@ -1990,6 +2016,110 @@ function PagosSheet({sede,operador,turno,onClose}){
         </div>)}
 
         <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Cerrar</button>
+      </div>
+    </div>
+  );
+}
+
+// ============ LAVADO DE CELDA POR BLUETOOTH ============
+// El operador ya no gasta tokens para lavar la celda. La máquina entrega su estado firmado
+// (con un reto de un solo uso), el servidor revisa el cupo y firma la orden, y la máquina
+// solo carga los ciclos si la firma es buena. Todo queda registrado a nombre del operador.
+const BLE_CELDA={ svc:'8e7f0001-3b4a-4c5d-9e6f-50414e5a4552', estado:'8e7f0002-3b4a-4c5d-9e6f-50414e5a4552',
+                  orden:'8e7f0003-3b4a-4c5d-9e6f-50414e5a4552', res:'8e7f0004-3b4a-4c5d-9e6f-50414e5a4552' };
+const bleTxt=dv=>new TextDecoder().decode(dv);
+const bleEspera=ms=>new Promise(r=>setTimeout(r,ms));
+const BLE_ERRORES={ ocupada:"La máquina está lavando. Espera a que termine e intenta de nuevo.",
+  reto:"Se venció el tiempo de la conexión. Intenta de nuevo.",
+  bloqueo:"La máquina se bloqueó un minuto por intentos fallidos. Espera e intenta de nuevo.",
+  firma:"La máquina no aceptó la orden. Avisa al administrador.",
+  llave:"La máquina no tiene su llave configurada. Avisa al administrador." };
+
+async function lavarCeldaBLE(operador, sede, paso){
+  if(!navigator.bluetooth) throw new Error("Este equipo no puede usar Bluetooth desde el POS. Usa la tablet Android con Chrome.");
+  paso("Elige la máquina en la lista…");
+  let dev;
+  try{ dev=await navigator.bluetooth.requestDevice({filters:[{services:[BLE_CELDA.svc]}]}); }
+  catch(e){
+    if(e&&e.name==='NotFoundError') throw new Error("No elegiste ninguna máquina. Párate cerca de la máquina e intenta de nuevo.");
+    throw new Error("No se pudo usar el Bluetooth. Revisa que esté encendido y que Chrome tenga permiso.");
+  }
+  try{
+    paso("Conectando con "+(dev.name||"la máquina")+"…");
+    let svc=null;
+    for(let i=0;i<3&&!svc;i++){
+      try{ const srv=await dev.gatt.connect(); svc=await srv.getPrimaryService(BLE_CELDA.svc); }
+      catch(e){ if(i===2) throw new Error("No se pudo conectar con la máquina. Acércate más e intenta de nuevo."); await bleEspera(700); }
+    }
+    const chE=await svc.getCharacteristic(BLE_CELDA.estado);
+    const chO=await svc.getCharacteristic(BLE_CELDA.orden);
+    const chR=await svc.getCharacteristic(BLE_CELDA.res);
+    const estado=bleTxt(await chE.readValue());
+    paso("Pidiendo autorización…");
+    const aut=await db.autorizarLavadoCelda(estado,operador,sede);
+    if(!aut||!aut.ok) throw new Error((aut&&aut.error)||"No se autorizó el lavado.");
+    paso("Cargando ciclos en la máquina…");
+    let ultimo="";
+    const alCambiar=ev=>{ ultimo=bleTxt(ev.target.value); };
+    try{ chR.addEventListener('characteristicvaluechanged',alCambiar); await chR.startNotifications(); }catch(e){}
+    const datos=new TextEncoder().encode(aut.orden);
+    if(chO.writeValueWithResponse) await chO.writeValueWithResponse(datos); else await chO.writeValue(datos);
+    // la máquina contesta ACEPTADA y enseguida OK|n (o ERR|motivo)
+    for(let i=0;i<28 && !/^(OK|ERR)\|/.test(ultimo);i++){
+      await bleEspera(250);
+      if(i%4===3){ try{ await chR.readValue(); }catch(e){} }
+    }
+    if(/^ERR\|/.test(ultimo)) throw new Error(BLE_ERRORES[ultimo.split('|')[1]]||"La máquina rechazó la orden. Intenta de nuevo.");
+    if(!/^OK\|/.test(ultimo)) throw new Error("La máquina no confirmó. Mira su pantalla: si no cargó los ciclos, intenta de nuevo (no se te descuenta el lavado).");
+    try{ await db.confirmarLavadoCelda(aut.id, bleTxt(await chE.readValue())); }catch(e){}
+    return { maquina:aut.maquina, nombre:aut.nombre, ciclos:aut.ciclos };
+  } finally { try{ if(dev.gatt.connected) dev.gatt.disconnect(); }catch(e){} }
+}
+
+function CeldaSheet({sede,operador,onClose}){
+  const [busy,setBusy]=useState(false);
+  const [paso,setPaso]=useState("");
+  const [ok,setOk]=useState(null);       // lavado cargado → pantalla verde
+  const [err,setErr]=useState(null);
+  const [mios,setMios]=useState([]);     // lavados de celda de este operador en las últimas 14 h
+  const cargar=async()=>{ try{ setMios(await db.misLavadosCelda(operador)); }catch(e){} };
+  useEffect(()=>{ cargar(); },[]);
+  const hora=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
+  const lavar=async()=>{
+    if(busy) return; setBusy(true); setErr(null); setOk(null);
+    try{ setOk(await lavarCeldaBLE(operador,sede,setPaso)); }
+    catch(e){ setErr((e&&e.message)||"No se pudo. Intenta de nuevo."); }
+    finally{ setBusy(false); setPaso(""); cargar(); }
+  };
+  return (
+    <div className="sheet-bg" onClick={()=>{ if(!busy) onClose(); }}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🚿 Lavar celda</div>
+        <div className="header-sub" style={{marginBottom:10}}>Ya no se usa token para lavar la celda. Párate frente a la máquina con la tablet y cárgale los ciclos desde aquí. Cada lavado queda registrado a tu nombre.</div>
+
+        {ok ? (
+          <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:"var(--green-d)",border:"2px solid var(--green)"}}>
+            <div style={{fontSize:54,lineHeight:1}}>✅</div>
+            <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>CICLOS CARGADOS</div>
+            <div style={{fontSize:26,fontWeight:900,margin:"6px 0"}}>{ok.maquina}</div>
+            <div className="header-sub">{ok.ciclos} ciclos · quedó registrado a nombre de {operador}</div>
+            <div style={{fontWeight:800,marginTop:10}}>Ya puedes usar los botones de la máquina.</div>
+            <button className="btn-primary" style={{marginTop:14}} onClick={()=>setOk(null)}>Lavar otra celda</button>
+          </div>
+        ) : (<div>
+          {err && <div style={{margin:"0 0 10px",padding:"12px 14px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {err}</div>}
+          <button className="btn-primary" style={{marginTop:0}} disabled={busy} onClick={lavar}>{busy?(paso||"Un momento…"):"🔵 Conectar con la máquina"}</button>
+          <div className="header-sub" style={{marginTop:8}}>Al tocar el botón sale una lista: elige la máquina de la celda que vas a lavar (su nombre empieza por PANZER).</div>
+        </div>)}
+
+        <div className="result-row" style={{marginTop:14}}><span className="result-label" style={{fontWeight:800}}>Celdas que has lavado en tu turno</span><span className="result-value">{mios.length}</span></div>
+        {mios.map(l=>(
+          <div key={l.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
+            <span>✅ {l.maquina}</span><span className="header-sub">{hora(l.creado_en)} · {l.ciclos} ciclos</span>
+          </div>))}
+
+        <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
       </div>
     </div>
   );

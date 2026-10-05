@@ -1505,6 +1505,26 @@ const db = {
     if(DEMO_MODE) return {ok:true};
     const {data,error}=await sb.rpc('liberar_abono',{p_id:id, p_admin:admin||'admin'}); if(error) throw error; return data;
   },
+  // ---- LAVADOS DE CELDA por Bluetooth (el operador ya no usa tokens para lavar la celda) ----
+  async listLavadosCelda(desdeISO, hastaISO){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('lavados_celda').select('*')
+      .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).limit(5000);
+    if(error) throw error; return data||[];
+  },
+  async listMaquinasCelda(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('maquinas_lista'); if(error) throw error; return data||[];
+  },
+  async getCeldaConfig(){
+    if(DEMO_MODE) return {ciclos:3,cupo:1,ventana_horas:10};
+    const {data,error}=await sb.from('celda_config').select('*').eq('id',1).maybeSingle(); if(error) throw error; return data;
+  },
+  async guardarCeldaConfig(c, admin){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('celda_config_guardar',{p_ciclos:Number(c.ciclos), p_cupo:Number(c.cupo), p_ventana:Number(c.ventana_horas), p_admin:admin||'admin'});
+    if(error) throw error; return data;
+  },
   // ---- Solicitudes de anulación que mandan los cajeros desde el POS ----
   async listSolicitudesAnulacion(){
     if(DEMO_MODE) return [];
@@ -1627,7 +1647,7 @@ function App(){
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
           ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["chequeos","✔️","Chequeos"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["chequeos","✔️","Chequeos"],["celdas","🚿","Lavado de celdas"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1665,6 +1685,7 @@ function App(){
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="metas"      && <Metas showToast={showToast} quien={auth.nombre}/>}
                 {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
+                {tab==="celdas"     && <LavadosCelda showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
                 {tab==="descuentos" && <Descuentos showToast={showToast}/>}
@@ -7766,6 +7787,179 @@ const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina
 // (o nadie verificó). Un QR registrado en una liquidación sin abono que lo
 // respalde = posible comprobante falso.
 // ============================================================
+// ============ LAVADOS DE CELDA (Bluetooth) ============
+// Cada lavado de celda lo carga el operador desde el POS y queda a su nombre. Aquí se ve
+// quién lava, cuánto, y qué celdas se quedaron sin lavar. El cupo se configura aquí mismo.
+function LavadosCelda({showToast, quien, rol}){
+  const hoyISO=fLocalDia(new Date());
+  const [desde,setDesde]=useState(()=>{ const d=new Date(); d.setDate(d.getDate()-6); return fLocalDia(d); });
+  const [hasta,setHasta]=useState(hoyISO);
+  const [rows,setRows]=useState(null);
+  const [maqs,setMaqs]=useState([]);
+  const [cfg,setCfg]=useState(null);
+  const [fOp,setFOp]=useState('');
+  const [fSede,setFSede]=useState('');
+  const [fMaq,setFMaq]=useState('');
+  const [busy,setBusy]=useState(false);
+  const preset=k=>{ const h=new Date(); h.setHours(0,0,0,0); const d=new Date(h);
+    if(k==='ayer'){ d.setDate(d.getDate()-1); h.setDate(h.getDate()-1); }
+    else if(k==='7'){ d.setDate(d.getDate()-6); }
+    else if(k==='30'){ d.setDate(d.getDate()-29); }
+    else if(k==='mes'){ d.setDate(1); }
+    setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
+
+  const cargar=async()=>{
+    if(!desde||!hasta) return;
+    setRows(null);
+    try{ const dISO=new Date(desde+'T00:00:00').toISOString(), hISO=new Date(hasta+'T23:59:59.999').toISOString();
+      const [lv,mq,cf]=await Promise.all([db.listLavadosCelda(dISO,hISO), db.listMaquinasCelda().catch(()=>[]), db.getCeldaConfig().catch(()=>null)]);
+      setRows(lv); setMaqs(mq); if(cf) setCfg(c=>c&&c._sucio?c:{ciclos:cf.ciclos,cupo:cf.cupo,ventana_horas:cf.ventana_horas,actualizado_por:cf.actualizado_por,actualizado_en:cf.actualizado_en}); }
+    catch(e){ showToast(""+(e.message||e),"err"); setRows([]); }
+  };
+  useEffect(()=>{ cargar(); },[desde,hasta]);
+
+  const hora=iso=>iso?(fLocalDia(iso)+" "+fLocalHora(iso)):"—";
+  const hace=iso=>{ if(!iso) return "nunca"; const m=Math.max(0,Math.round((Date.now()-new Date(iso))/60000)); return m<60?("hace "+m+" min"):m<2880?("hace "+Math.round(m/60)+" h"):("hace "+Math.round(m/1440)+" días"); };
+  const all=rows||[];
+  const sedes=[...new Set([...all.map(l=>l.sede),...maqs.map(m=>m.sede)].filter(Boolean))].sort();
+  const ops=[...new Set(all.map(l=>String(l.operador||'').trim()).filter(Boolean))].sort();
+  const ids=[...new Set([...all.map(l=>l.maquina),...maqs.map(m=>m.id)].filter(Boolean))].sort();
+  const pasa=l=>(!fOp||String(l.operador||'').trim()===fOp) && (!fSede||l.sede===fSede) && (!fMaq||l.maquina===fMaq);
+  const vis=all.filter(pasa);
+  const apl=vis.filter(l=>l.estado==='aplicado');
+  const fall=vis.filter(l=>l.estado==='no_aplicado');
+  const ciclos=apl.reduce((a,l)=>a+(Number(l.ciclos)||0),0);
+  // días del rango (para saber qué celdas se quedaron sin lavar)
+  const dias=[]; { const d=new Date(desde+'T00:00:00'), h=new Date(hasta+'T00:00:00'), hoy=new Date(hoyISO+'T00:00:00');
+    for(let i=0;i<400 && d<=h && d<=hoy;i++){ dias.push(fLocalDia(d)); d.setDate(d.getDate()+1); } }
+  // por operador
+  const mOp={}; apl.forEach(l=>{ const k=String(l.operador||'').trim(); const o=mOp[k]||(mOp[k]={op:k,n:0,ciclos:0,maqs:new Set(),dias:new Set(),sedes:new Set(),ult:null});
+    o.n++; o.ciclos+=Number(l.ciclos)||0; o.maqs.add(l.maquina); o.dias.add(fLocalDia(l.creado_en)); if(l.sede) o.sedes.add(l.sede); if(!o.ult||l.creado_en>o.ult) o.ult=l.creado_en; });
+  const opRows=Object.values(mOp).sort((a,b)=>b.n-a.n);
+  // por máquina (incluye las registradas aunque no tengan lavados en el rango)
+  const mMq={}; maqs.filter(m=>(!fSede||m.sede===fSede)&&(!fMaq||m.id===fMaq)).forEach(m=>{ mMq[m.id]={id:m.id,sede:m.sede,nombre:m.nombre,n:0,dias:new Set(),ops:new Set(),ult:null,reg:m}; });
+  apl.forEach(l=>{ const o=mMq[l.maquina]||(mMq[l.maquina]={id:l.maquina,sede:l.sede,nombre:null,n:0,dias:new Set(),ops:new Set(),ult:null,reg:null});
+    o.n++; o.dias.add(fLocalDia(l.creado_en)); o.ops.add(String(l.operador||'').trim()); if(!o.ult||l.creado_en>o.ult) o.ult=l.creado_en; });
+  const mqRows=Object.values(mMq).map(o=>{ const desdeAlta=o.reg&&o.reg.creado_en?fLocalDia(o.reg.creado_en):null;
+    const diasM=dias.filter(d=>!desdeAlta||d>=desdeAlta); return {...o, diasTot:diasM.length, sinLavar:diasM.filter(d=>!o.dias.has(d)).length}; })
+    .sort((a,b)=>b.sinLavar-a.sinLavar || String(a.id).localeCompare(String(b.id)));
+  const totSin=fOp?0:mqRows.reduce((a,o)=>a+o.sinLavar,0);
+
+  const guardarCfg=async()=>{ setBusy(true);
+    try{ const r=await db.guardarCeldaConfig(cfg,quien);
+      if(r&&r.ok){ showToast("Cupo guardado ✓","ok"); setCfg(c=>({...c,_sucio:false,actualizado_por:quien,actualizado_en:new Date().toISOString()})); }
+      else showToast((r&&r.error)||"No se pudo guardar","err"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+  const setC=(k,v)=>setCfg(c=>({...c,[k]:v.replace(/[^0-9]/g,""),_sucio:true}));
+
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>🚿 Lavados de celda sin token.</b> <span className="muted">El operador carga los ciclos desde el POS por Bluetooth, parado frente a la máquina. La máquina solo obedece si el sistema lo autoriza, y cada lavado queda con nombre, máquina y hora. Así ya no hay tokens de lavado de celda que se puedan vender.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
+          {[['hoy',"Hoy"],['ayer',"Ayer"],['7',"7 días"],['30',"30 días"],['mes',"Este mes"]].map(([k,l])=>(
+            <button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>))}
+        </div>
+        <div className="fld"><label className="label" style={{margin:0,fontSize:10}}>Desde</label><input className="input" style={{margin:0,maxWidth:150}} type="date" value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+        <div className="fld"><label className="label" style={{margin:0,fontSize:10}}>Hasta</label><input className="input" style={{margin:0,maxWidth:150}} type="date" value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+        <select className="select" style={{maxWidth:200,margin:0}} value={fOp} onChange={e=>setFOp(e.target.value)}>
+          <option value="">Todos los operadores</option>{ops.map(x=><option key={x} value={x}>{x}</option>)}
+        </select>
+        <select className="select" style={{maxWidth:180,margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}>
+          <option value="">Todas las sedes</option>{sedes.map(x=><option key={x} value={x}>{x}</option>)}
+        </select>
+        <select className="select" style={{maxWidth:180,margin:0}} value={fMaq} onChange={e=>setFMaq(e.target.value)}>
+          <option value="">Todas las máquinas</option>{ids.map(x=><option key={x} value={x}>{x}</option>)}
+        </select>
+        <button className="btn btn-ghost btn-sm" onClick={cargar}>↻ Actualizar</button>
+      </div>
+
+      {rows===null ? <div className="empty">Cargando…</div> : (<div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">🚿 Lavados de celda</div><div style={{fontSize:24,fontWeight:800,color:"var(--green)"}}>{apl.length}</div><div className="muted" style={{fontSize:11}}>{ciclos} ciclos cargados</div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Tokens que ya no se entregan</div><div style={{fontSize:24,fontWeight:800,color:"var(--amber)"}}>{fmt(apl.length*VALOR_TOKEN)}</div><div className="muted" style={{fontSize:11}}>{apl.length} tokens a {fmt(VALOR_TOKEN)}</div></div>
+          <div className="card" style={{flex:"1 1 170px",borderColor:totSin>0?"var(--red)":undefined}}><div className="muted">🚩 Celdas sin lavar</div><div style={{fontSize:24,fontWeight:800,color:totSin>0?"var(--red)":"var(--green)"}}>{fOp?"—":totSin}</div><div className="muted" style={{fontSize:11}}>{fOp?"quita el filtro de operador para verlo":"días-máquina sin ningún lavado en el rango"}</div></div>
+          <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Intentos que no llegaron</div><div style={{fontSize:24,fontWeight:800}}>{fall.length}</div><div className="muted" style={{fontSize:11}}>se cortó el Bluetooth · no gastan cupo</div></div>
+        </div>
+
+        <div className="sec-title" style={{fontSize:14,margin:"4px 0 6px"}}>👤 Por operador <span className="muted">· quién está lavando las celdas</span></div>
+        <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+          <table className="tbl">
+            <thead><tr><th>Operador</th><th>Sede</th><th className="num">Lavados</th><th className="num">Máquinas distintas</th><th className="num">Días con lavado</th><th>Último lavado</th></tr></thead>
+            <tbody>
+              {opRows.length===0 && <tr><td colSpan="6"><div className="empty">No hay lavados de celda en ese rango.</div></td></tr>}
+              {opRows.map(o=>(
+                <tr key={o.op}>
+                  <td className="row-name">{o.op}</td>
+                  <td className="muted">{[...o.sedes].join(", ")||"—"}</td>
+                  <td className="num" style={{fontWeight:800}}>{o.n}</td>
+                  <td className="num">{o.maqs.size}</td>
+                  <td className="num">{o.dias.size}{dias.length>1 && <span className="muted" style={{fontSize:10,marginLeft:4}}>de {dias.length}</span>}</td>
+                  <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(o.ult)}</td>
+                </tr>))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="sec-title" style={{fontSize:14,margin:"4px 0 6px"}}>🔧 Por máquina <span className="muted">· qué celdas se están lavando y cuáles no</span></div>
+        <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+          <table className="tbl">
+            <thead><tr><th>Máquina</th><th>Sede</th><th className="num">Lavados</th><th className="num">Días sin lavar</th><th>Último lavado</th><th>Quién la lavó</th><th>Conexión</th></tr></thead>
+            <tbody>
+              {mqRows.length===0 && <tr><td colSpan="7"><div className="empty">No hay máquinas registradas con ese filtro.</div></td></tr>}
+              {mqRows.map(o=>(
+                <tr key={o.id} style={{background:(!fOp&&o.sinLavar>0)?"var(--red-d)":undefined}}>
+                  <td className="row-name">{o.id}{o.nombre && <span className="muted" style={{fontSize:11,marginLeft:6}}>{o.nombre}</span>}{o.reg&&!o.reg.activa && <span className="pill pill-off" style={{marginLeft:6}}>Desactivada</span>}</td>
+                  <td className="muted">{o.sede||"—"}</td>
+                  <td className="num" style={{fontWeight:800}}>{o.n}</td>
+                  <td className="num" style={{fontWeight:800,color:fOp?"var(--td)":o.sinLavar>0?"var(--red)":"var(--green)"}}>{fOp?"—":(o.sinLavar+" de "+o.diasTot)}</td>
+                  <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(o.ult)}</td>
+                  <td style={{fontSize:12}}>{[...o.ops].join(", ")||<span className="muted">—</span>}</td>
+                  <td className="muted" style={{fontSize:12,whiteSpace:"nowrap"}} title="Última vez que un POS se conectó a esta máquina">{o.reg?hace(o.reg.ult_visto):"sin registrar"}</td>
+                </tr>))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="sec-title" style={{fontSize:14,margin:"4px 0 6px"}}>🧾 Detalle</div>
+        <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+          <table className="tbl">
+            <thead><tr><th>Fecha y hora</th><th>Máquina</th><th>Sede</th><th>Operador</th><th className="num">Ciclos</th><th>Estado</th></tr></thead>
+            <tbody>
+              {vis.length===0 && <tr><td colSpan="6"><div className="empty">Sin registros con ese filtro.</div></td></tr>}
+              {vis.slice(0,400).map(l=>(
+                <tr key={l.id}>
+                  <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(l.creado_en)}</td>
+                  <td className="row-name">{l.maquina}</td>
+                  <td className="muted">{l.sede||"—"}{l.sede_operador&&l.sede&&l.sede_operador!==l.sede && <span style={{color:"var(--red)",fontSize:11,marginLeft:4}} title="El operador tenía abierto el POS de otra sede">(POS de {l.sede_operador})</span>}</td>
+                  <td>{l.operador}</td>
+                  <td className="num">{l.ciclos}</td>
+                  <td>{l.estado==='aplicado' ? <span className="pill pill-prod">✓ Cargado</span> : l.estado==='no_aplicado' ? <span className="pill pill-off">No llegó a la máquina</span> : <span className="muted">En curso</span>}</td>
+                </tr>))}
+            </tbody>
+          </table>
+          {vis.length>400 && <div className="muted" style={{padding:12}}>Mostrando 400 de {vis.length}.</div>}
+        </div>
+
+        {cfg && (
+          <div className="card" style={{marginBottom:12}}>
+            <div className="sec-title" style={{fontSize:14,marginBottom:8}}>⚙️ Cupo de lavado de celda</div>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div className="fld"><label className="label" style={{margin:0,fontSize:11}}>Ciclos por lavado</label><input className="input" style={{margin:0,maxWidth:110}} type="text" inputMode="numeric" disabled={rol!=='admin'} value={cfg.ciclos} onChange={e=>setC('ciclos',e.target.value)}/></div>
+              <div className="fld"><label className="label" style={{margin:0,fontSize:11}}>Lavados por máquina y operador</label><input className="input" style={{margin:0,maxWidth:110}} type="text" inputMode="numeric" disabled={rol!=='admin'} value={cfg.cupo} onChange={e=>setC('cupo',e.target.value)}/></div>
+              <div className="fld"><label className="label" style={{margin:0,fontSize:11}}>Cada cuántas horas (un turno)</label><input className="input" style={{margin:0,maxWidth:110}} type="text" inputMode="numeric" disabled={rol!=='admin'} value={cfg.ventana_horas} onChange={e=>setC('ventana_horas',e.target.value)}/></div>
+              {rol==='admin' && <button className="btn btn-amber" disabled={busy||!cfg._sucio} onClick={guardarCfg}>{busy?"Guardando…":"Guardar cupo"}</button>}
+            </div>
+            <div className="muted" style={{fontSize:12,marginTop:8}}>Hoy: cada operador puede lavar cada máquina <b style={{color:"var(--t)"}}>{cfg.cupo} {Number(cfg.cupo)===1?"vez":"veces"}</b> cada <b style={{color:"var(--t)"}}>{cfg.ventana_horas} horas</b>, y cada lavado carga <b style={{color:"var(--t)"}}>{cfg.ciclos} ciclos</b> (un token son 3).{cfg.actualizado_por?(" Último cambio: "+cfg.actualizado_por+(cfg.actualizado_en?(" · "+hora(cfg.actualizado_en)):"")+"."):""}</div>
+            {Number(cfg.cupo)>3 && <div style={{marginTop:8,padding:"8px 12px",borderRadius:10,background:"var(--red-d)",color:"var(--red)",fontWeight:700,fontSize:13}}>⚠ El cupo está en {cfg.cupo}: es un valor de pruebas. Lo autorizado es 1 lavado por celda.</div>}
+          </div>)}
+      </div>)}
+    </div>
+  );
+}
+
 function AbonosQR({showToast, quien, rol}){
   const hoyISO=fLocalDia(new Date());
   const [desde,setDesde]=useState(hoyISO);

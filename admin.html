@@ -7787,6 +7787,182 @@ const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina
 // (o nadie verificó). Un QR registrado en una liquidación sin abono que lo
 // respalde = posible comprobante falso.
 // ============================================================
+// ============ GRÁFICA DE LÍNEAS POR CICLO (la usan Saldos y Devoluciones) ============
+// pts: [{fecha,...}] en orden · series: [{nombre,color,vals:[n|null]}] · abajo(p): texto rojo bajo la fecha
+function GraficaCiclos({pts, series, porOp, abajo, desdeCero, paso}){
+  const W=760,H=230,padL=46,padR=16,padT=22,padB=30, st=paso||50;
+  const todos=series.flatMap(sr=>sr.vals).filter(v=>v!=null);
+  const vMax=Math.max(...todos,1), vMin=desdeCero?0:Math.min(...todos);
+  const lo=Math.max(0,Math.floor((vMin-(vMax-vMin)*0.15)/st)*st), hi=Math.ceil((vMax+(vMax-vMin)*0.15+1)/st)*st;
+  const cx=i=>pts.length===1?(padL+(W-padL-padR)/2):padL+(W-padL-padR)*i/(pts.length-1);
+  const cy=v=>H-padB-(H-padT-padB)*((v-lo)/Math.max(1,hi-lo));
+  const fmtF=f=>String(f).slice(5).replace('-','/');
+  const ticks=[0,1,2,3,4].map(k=>Math.round(lo+(hi-lo)*k/4));
+  return (
+      <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}>
+        {ticks.map(t=>(<g key={t}>
+          <line x1={padL} y1={cy(t)} x2={W-padR} y2={cy(t)} style={{stroke:"var(--bd)"}} strokeDasharray="3 4"/>
+          <text x={padL-6} y={cy(t)+3} textAnchor="end" fontSize="10" style={{fill:"var(--td)"}}>{t}</text>
+        </g>))}
+        {series.map(sr=>{ const seg=sr.vals.map((v,i)=>v==null?null:cx(i)+','+cy(v)).filter(Boolean).join(' ');
+          return (<g key={sr.nombre}>
+            {pts.length>1 && <polyline points={seg} fill="none" style={{stroke:sr.color}} strokeWidth={porOp?2:3} strokeDasharray={sr.punteada?"6 4":undefined}/>}
+            {sr.vals.map((v,i)=>v==null?null:(<g key={i}>
+              <circle cx={cx(i)} cy={cy(v)} r={porOp?3:4.5} style={{fill:sr.color}}/>
+              {(!porOp || pts.length<=12) && <text x={cx(i)} y={cy(v)-9} textAnchor="middle" fontSize="10" fontWeight="700" style={{fill:sr.color}}>{v}</text>}
+            </g>))}
+          </g>); })}
+        {pts.map((p,i)=>{ const b=abajo?abajo(p):null; return (<g key={p.fecha}>
+          <text x={cx(i)} y={H-padB+14} textAnchor="middle" fontSize="10" style={{fill:"var(--td)"}}>{fmtF(p.fecha)}</text>
+          {b && <text x={cx(i)} y={H-padB+26} textAnchor="middle" fontSize="9" fontWeight="700" style={{fill:"var(--red)"}}>{b}</text>}
+        </g>); })}
+        <line x1={padL} y1={H-padB} x2={W-padR} y2={H-padB} style={{stroke:"var(--bd)"}}/>
+      </svg>
+  );
+}
+
+// ============ SALDOS: TENDENCIA DE DEVOLUCIONES DE TOKENS ============
+// Por ciclo: tokens devueltos (la casilla "Dev. tokens" de las liquidaciones, que
+// hoy mezcla aseo de celdas, devoluciones a clientes, membresías y cortesías) y,
+// al lado, los lavados de celda hechos por Bluetooth en ese mismo periodo. Sirve
+// para ver cómo bajan las devoluciones a medida que entra el nuevo sistema.
+function DevolucionesTendencia({sede}){
+  const [ciclos,setCiclos]=useState(null);
+  const [lavados,setLavados]=useState([]);
+  const [porOp,setPorOp]=useState(false);
+  const [modo,setModo]=useState('tokens');   // 'tokens' | 'pct'
+  const [n,setN]=useState(12);
+  useEffect(()=>{ let vivo=true; setCiclos(null);
+    db.recCiclos({sede}).then(async cs=>{
+      const cerr=(cs||[]).filter(c=>c.estado==='cerrado');
+      let lv=[];
+      try{ const desde=new Date('2026-10-01T00:00:00').toISOString();
+        lv=(await db.listLavadosCelda(desde,new Date(Date.now()+86400000).toISOString())).filter(l=>l.estado==='aplicado' && l.sede===sede); }catch(e){}
+      if(vivo){ setLavados(lv); setCiclos(cerr); }
+    }).catch(()=>{ if(vivo) setCiclos([]); });
+    return ()=>{ vivo=false; }; },[sede]);
+  if(ciclos===null) return <div className="empty">Cargando historial…</div>;
+  const orden=ciclos.map(c=>({c, r:c.reparto||{}})).filter(x=>x.r.totalDevTokensCiclo!=null || x.r.totalVendidosCiclo!=null)
+    .sort((a,b)=>a.c.fecha<b.c.fecha?-1:1);
+  const pts=orden.map((x,i)=>{ const r=x.r; const dev=Number(r.totalDevTokensCiclo)||0, ven=Number(r.totalVendidosCiclo)||0;
+      const ant=i>0?orden[i-1].c.fecha:null;
+      const lav=lavados.filter(l=>{ const f=fLocalDia(l.creado_en); return f<=x.c.fecha && (!ant || f>ant); }).length;
+      return { fecha:x.c.fecha, dev, ven, pct:ven>0?Math.round(dev/ven*1000)/10:null, lav,
+               ops:(r.controlTokens||[]).map(o=>({nombre:o.nombre, dev:Number(o.devTokensEsteC!=null?o.devTokensEsteC:o.devTokens)||0, ven:Number(o.vendidosEsteC!=null?o.vendidosEsteC:o.vendidos)||0})) }; })
+    .slice(-n);
+  if(pts.length===0) return <div className="empty">Esta sede aún no tiene ciclos cerrados con reparto de tokens.</div>;
+  const nombres=[...new Set(pts.flatMap(p=>p.ops.map(o=>o.nombre)))];
+  const paleta=["#2563eb","#16a34a","#dc2626","#9333ea","#ea580c","#0891b2","#be185d","#65a30d"];
+  const valOp=o=>modo==='pct'?(o.ven>0?Math.round(o.dev/o.ven*1000)/10:null):o.dev;
+  const series=porOp ? nombres.map((nm,i)=>({nombre:nm,color:paleta[i%paleta.length],vals:pts.map(p=>{ const o=p.ops.find(x=>x.nombre===nm); return o?valOp(o):null; })}))
+                     : [{nombre:modo==='pct'?"% devuelto sobre vendidos":"Tokens devueltos",color:"var(--red)",vals:pts.map(p=>modo==='pct'?p.pct:p.dev)},
+                        ...(modo==='tokens' && pts.some(p=>p.lav>0) ? [{nombre:"Lavados de celda por Bluetooth",color:"var(--green)",punteada:true,vals:pts.map(p=>p.lav>0?p.lav:null)}] : [])];
+  const totDev=pts.reduce((a,p)=>a+p.dev,0), totVen=pts.reduce((a,p)=>a+p.ven,0), totLav=pts.reduce((a,p)=>a+p.lav,0);
+  const ult=pts[pts.length-1], prev=pts.length>1?pts[pts.length-2]:null;
+  const prom=pts.length?Math.round(totDev/pts.length):0;
+  return (
+    <div className="card" style={{marginTop:12}}>
+      <div className="toolbar" style={{marginBottom:6}}>
+        <div className="sec-title" style={{fontSize:14,marginRight:"auto"}}>↩️ Cómo se mueven las devoluciones de tokens <span className="muted">· por ciclo</span></div>
+        <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
+          <button className={"btn btn-sm "+(modo==='tokens'?'btn-amber':'btn-ghost')} onClick={()=>setModo('tokens')}>Tokens</button>
+          <button className={"btn btn-sm "+(modo==='pct'?'btn-amber':'btn-ghost')} onClick={()=>setModo('pct')}>% de lo vendido</button>
+        </div>
+        <select className="select" style={{maxWidth:150,margin:0}} value={n} onChange={e=>setN(Number(e.target.value))}>
+          <option value={8}>Últimos 8 ciclos</option><option value={12}>Últimos 12 ciclos</option><option value={20}>Últimos 20 ciclos</option><option value={60}>Todos</option>
+        </select>
+        <button className={"btn btn-sm "+(porOp?'btn-amber':'btn-ghost')} onClick={()=>setPorOp(v=>!v)}>{porOp?"Ver total":"Ver por operador"}</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:8}}>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Último ciclo</div><div style={{fontSize:22,fontWeight:800,color:"var(--red)"}}>{ult.dev}</div><div className="muted" style={{fontSize:11}}>devueltos el {ult.fecha}{ult.pct!=null?(" · "+ult.pct+"% de lo vendido"):""}</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Frente al ciclo anterior</div><div style={{fontSize:22,fontWeight:800,color:!prev?"var(--td)":ult.dev<prev.dev?"var(--green)":ult.dev>prev.dev?"var(--red)":"var(--td)"}}>{prev?((ult.dev-prev.dev>0?"+":"")+(ult.dev-prev.dev)):"—"}</div><div className="muted" style={{fontSize:11}}>{prev?("antes "+prev.dev):"sin ciclo anterior"}</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Promedio por ciclo</div><div style={{fontSize:22,fontWeight:800}}>{prom}</div><div className="muted" style={{fontSize:11}}>{totDev} en {pts.length} ciclos · {totVen>0?Math.round(totDev/totVen*1000)/10:0}% de lo vendido</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px",borderColor:totLav>0?"var(--green)":undefined}}><div className="muted" style={{fontSize:11}}>🚿 Lavados de celda por Bluetooth</div><div style={{fontSize:22,fontWeight:800,color:"var(--green)"}}>{totLav}</div><div className="muted" style={{fontSize:11}}>{totLav>0?"en el rango · ya no salen de la casilla de devoluciones":"aún no hay en esta sede"}</div></div>
+      </div>
+      <GraficaCiclos pts={pts} series={series} porOp={porOp} desdeCero={true} paso={modo==='pct'?5:10}/>
+      {porOp && <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:6}}>{series.map(sr=>(<span key={sr.nombre} style={{fontSize:12,display:"flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:5,background:sr.color,display:"inline-block"}}/>{sr.nombre}</span>))}</div>}
+      {!porOp && modo==='tokens' && pts.some(p=>p.lav>0) && <div style={{display:"flex",gap:14,marginTop:6,fontSize:12}}><span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:18,height:3,background:"var(--red)",display:"inline-block"}}/>Tokens devueltos</span><span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:18,height:0,borderTop:"3px dashed var(--green)",display:"inline-block"}}/>Lavados de celda por Bluetooth</span></div>}
+      <div className="muted" style={{fontSize:11,marginTop:6}}>"Devueltos" es la casilla Dev. tokens de las liquidaciones del ciclo: hoy mezcla aseo de celdas, devoluciones a clientes, membresías y cortesías. Cuando el lavado por Bluetooth esté en toda la sede, esa línea debe bajar y quedar solo con devoluciones reales.</div>
+      <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
+        <table className="tbl">
+          <thead><tr><th>Ciclo</th><th className="num">Vendidos</th><th className="num">Devueltos</th><th className="num">% de lo vendido</th><th className="num">Cambio</th><th className="num">🚿 Lavados BT</th></tr></thead>
+          <tbody>{[...pts].reverse().map((p,i,arr)=>{ const ant=arr[i+1]; const d=ant?p.dev-ant.dev:null; return (
+            <tr key={p.fecha}>
+              <td className="muted" style={{whiteSpace:"nowrap"}}>{p.fecha}</td>
+              <td className="num">{p.ven}</td>
+              <td className="num" style={{fontWeight:800,color:"var(--red)"}}>{p.dev}</td>
+              <td className="num">{p.pct!=null?(p.pct+"%"):"—"}</td>
+              <td className="num" style={{color:d==null?"var(--td)":d<0?"var(--green)":d>0?"var(--red)":"var(--td)"}}>{d==null?"—":(d>0?"+":"")+d}</td>
+              <td className="num" style={{color:p.lav>0?"var(--green)":"var(--td)",fontWeight:p.lav>0?800:400}}>{p.lav||"—"}</td>
+            </tr>); })}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ============ SALDOS: TENDENCIA DEL TOTAL DE TOKENS DE LA SEDE ============
+// Cada ciclo cerrado guarda en su reparto el total de tokens con que queda la sede
+// (tokensTotalBase) y el saldo nuevo de cada operador. Con eso se dibuja cómo se
+// mueve el total ciclo a ciclo, y cuántos se vendieron, devolvieron o perdieron.
+function SaldosTendencia({sede}){
+  const [ciclos,setCiclos]=useState(null);
+  const [porOp,setPorOp]=useState(false);
+  const [n,setN]=useState(12);
+  useEffect(()=>{ let vivo=true; setCiclos(null);
+    db.recCiclos({sede}).then(cs=>{ if(vivo) setCiclos((cs||[]).filter(c=>c.estado==='cerrado')); }).catch(()=>{ if(vivo) setCiclos([]); });
+    return ()=>{ vivo=false; }; },[sede]);
+  if(ciclos===null) return <div className="empty">Cargando historial…</div>;
+  const pts=ciclos.map(c=>{ const r=c.reparto||{}, z=c.resumen||{};
+      const tot=Number(r.tokensTotalBase!=null?r.tokensTotalBase:z.tokensDisponibles);
+      const ops=(r.controlTokens||[]).map(o=>({nombre:o.nombre, saldo:Number(o.saldoNuevo)||0}));
+      return { fecha:c.fecha, total:isNaN(tot)?null:tot, vendidos:Number(r.totalVendidosCiclo)||0, dev:Number(r.totalDevTokensCiclo)||0,
+               perdidos:Number(c.tokens_perdidos)||Number(r.tokensPerdidos)||0, ajuste:Number(r.ajusteTokens)||0, ops }; })
+    .filter(p=>p.total!=null).sort((a,b)=>a.fecha<b.fecha?-1:1).slice(-n);
+  if(pts.length===0) return <div className="empty">Esta sede aún no tiene ciclos cerrados con reparto de tokens.</div>;
+  const nombres=[...new Set(pts.flatMap(p=>p.ops.map(o=>o.nombre)))];
+  const paleta=["#2563eb","#16a34a","#dc2626","#9333ea","#ea580c","#0891b2","#be185d","#65a30d"];
+  const series=porOp ? nombres.map((nm,i)=>({nombre:nm,color:paleta[i%paleta.length],vals:pts.map(p=>{ const o=p.ops.find(x=>x.nombre===nm); return o?o.saldo:null; })}))
+                     : [{nombre:"Total de la sede",color:"var(--amber)",vals:pts.map(p=>p.total)}];
+  const ult=pts[pts.length-1], prev=pts.length>1?pts[pts.length-2]:null;
+  const delta=prev?ult.total-prev.total:null;
+  return (
+    <div className="card" style={{marginTop:12}}>
+      <div className="toolbar" style={{marginBottom:6}}>
+        <div className="sec-title" style={{fontSize:14,marginRight:"auto"}}>📈 Cómo se mueve el total de tokens <span className="muted">· al cierre de cada ciclo</span></div>
+        <select className="select" style={{maxWidth:150,margin:0}} value={n} onChange={e=>setN(Number(e.target.value))}>
+          <option value={8}>Últimos 8 ciclos</option><option value={12}>Últimos 12 ciclos</option><option value={20}>Últimos 20 ciclos</option><option value={60}>Todos</option>
+        </select>
+        <button className={"btn btn-sm "+(porOp?'btn-amber':'btn-ghost')} onClick={()=>setPorOp(v=>!v)}>{porOp?"Ver total":"Ver por operador"}</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:8}}>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Total hoy</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{ult.total}</div><div className="muted" style={{fontSize:11}}>ciclo del {ult.fecha}</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Frente al ciclo anterior</div><div style={{fontSize:22,fontWeight:800,color:delta==null?"var(--td)":delta<0?"var(--red)":"var(--green)"}}>{delta==null?"—":(delta>0?"+":"")+delta}</div><div className="muted" style={{fontSize:11}}>{prev?("antes "+prev.total):"sin ciclo anterior"}</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Perdidos en el rango</div><div style={{fontSize:22,fontWeight:800,color:pts.reduce((a,p)=>a+p.perdidos,0)>0?"var(--red)":"var(--green)"}}>{pts.reduce((a,p)=>a+p.perdidos,0)}</div><div className="muted" style={{fontSize:11}}>{pts.length} ciclos</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Vendidos / devueltos</div><div style={{fontSize:22,fontWeight:800}}>{pts.reduce((a,p)=>a+p.vendidos,0)} <span className="muted" style={{fontSize:14}}>/ {pts.reduce((a,p)=>a+p.dev,0)}</span></div><div className="muted" style={{fontSize:11}}>en el rango</div></div>
+      </div>
+      <GraficaCiclos pts={pts} series={series} porOp={porOp} abajo={p=>p.perdidos>0?("−"+p.perdidos):null}/>
+      {porOp && <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:6}}>{series.map(sr=>(<span key={sr.nombre} style={{fontSize:12,display:"flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:5,background:sr.color,display:"inline-block"}}/>{sr.nombre}</span>))}</div>}
+      <div className="muted" style={{fontSize:11,marginTop:6}}>Cada punto es el total de tokens con que quedó la sede al cerrar ese ciclo (la suma de los saldos de arriba). En rojo, debajo de la fecha, los tokens perdidos de ese ciclo.</div>
+      <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
+        <table className="tbl">
+          <thead><tr><th>Ciclo</th><th className="num">Total tokens</th><th className="num">Cambio</th><th className="num">Vendidos</th><th className="num">Devueltos</th><th className="num">Perdidos</th><th className="num">Ajuste</th></tr></thead>
+          <tbody>{[...pts].reverse().map((p,i,arr)=>{ const ant=arr[i+1]; const d=ant?p.total-ant.total:null; return (
+            <tr key={p.fecha}>
+              <td className="muted" style={{whiteSpace:"nowrap"}}>{p.fecha}</td>
+              <td className="num" style={{fontWeight:800}}>{p.total}</td>
+              <td className="num" style={{color:d==null?"var(--td)":d<0?"var(--red)":d>0?"var(--green)":"var(--td)"}}>{d==null?"—":(d>0?"+":"")+d}</td>
+              <td className="num">{p.vendidos}</td>
+              <td className="num">{p.dev}</td>
+              <td className="num" style={{color:p.perdidos>0?"var(--red)":"var(--td)",fontWeight:p.perdidos>0?800:400}}>{p.perdidos||"—"}</td>
+              <td className="num">{p.ajuste?((p.ajuste>0?"+":"")+p.ajuste):"—"}</td>
+            </tr>); })}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ============ LAVADOS DE CELDA (Bluetooth) ============
 // Cada lavado de celda lo carga el operador desde el POS y queda a su nombre. Aquí se ve
 // quién lava, cuánto, y qué celdas se quedaron sin lavar. El cupo se configura aquí mismo.
@@ -9237,6 +9413,8 @@ function Recaudo({showToast, quien, rol}){
             <div className="muted" style={{marginRight:"auto",fontSize:12}}>Total en la sede: <b>{(saldoRows||[]).reduce((a,r)=>a+(Number(r.saldo)||0),0)}</b> tokens</div>
             <button className="btn btn-amber" disabled={busy||saldoRows===null} onClick={guardarSaldos}>{busy?"Guardando…":"💾 Guardar saldos"}</button>
           </div>
+          {saldoSede && <SaldosTendencia sede={saldoSede}/>}
+          {saldoSede && <DevolucionesTendencia sede={saldoSede}/>}
         </div>
       )}
 

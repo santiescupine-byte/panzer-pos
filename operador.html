@@ -703,11 +703,7 @@ function App(){
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showPagos,setShowPagos]=useState(false);     // sheet "verificar pago QR"
   const [showCelda,setShowCelda]=useState(false);     // sheet "lavar celda" (Bluetooth)
-  // En prueba: el botón solo aparece en el equipo donde se abrió una vez el POS con #celda al final (#celda-off lo quita)
-  const [celdaOn]=useState(()=>{ try{
-    if(/celda-off/i.test(location.hash)) localStorage.removeItem('panzer_celda');
-    else if(/celda/i.test(location.hash)) localStorage.setItem('panzer_celda','1');
-    return localStorage.getItem('panzer_celda')==='1'; }catch(e){ return false; } });
+  const celdaOn=true;   // 2026-10-08: "Lavar celda" visible para todos (antes solo con #celda en prueba)
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"

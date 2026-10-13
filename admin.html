@@ -1516,6 +1516,21 @@ const db = {
     if(DEMO_MODE) return [];
     const {data,error}=await sb.rpc('maquinas_lista'); if(error) throw error; return data||[];
   },
+  async listSolicitudesCelda(desdeISO){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('solicitudes_celda').select('*').or('estado.eq.pendiente,creado_en.gte.'+desdeISO).order('creado_en',{ascending:false}).limit(500);
+    if(error) throw error; return data||[];
+  },
+  async countSolicitudesCelda(){
+    if(DEMO_MODE) return 0;
+    const {count,error}=await sb.from('solicitudes_celda').select('id',{count:'exact',head:true}).eq('estado','pendiente');
+    if(error) return 0; return count||0;
+  },
+  async resolverSolicitudCelda(id, aprobar, admin, respuesta, ciclos){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('resolver_solicitud_celda',{p_id:id, p_aprobar:!!aprobar, p_admin:admin||'admin', p_respuesta:respuesta||null, p_ciclos:ciclos?Number(ciclos):null});
+    if(error) throw error; return data;
+  },
   async getCeldaConfig(){
     if(DEMO_MODE) return {ciclos:3,cupo:1,ventana_horas:10};
     const {data,error}=await sb.from('celda_config').select('*').eq('id',1).maybeSingle(); if(error) throw error; return data;
@@ -1586,6 +1601,10 @@ function App(){
   const [misT,setMisT]=useState({pend:0,venc:0});  // tareas pendientes del usuario logueado (banner)
   const showToast=(msg,type="ok")=>{ setToast({msg,type}); setTimeout(()=>setToast(null),2400); };
 
+  // Solicitudes de lavado adicional pendientes (número en el menú, solo admin)
+  const [celdasPend,setCeldasPend]=useState(0);
+  useEffect(()=>{ if(!auth||auth.rol!=='admin'){ setCeldasPend(0); return; }
+    const f=()=>db.countSolicitudesCelda().then(setCeldasPend).catch(()=>{}); f(); const t=setInterval(f,60000); return ()=>clearInterval(t); },[auth,tab]);
   // Tareas pendientes asignadas a la persona logueada (para el banner de aviso)
   const cargarMisTareas=(nombre)=>{ if(!nombre){ setMisT({pend:0,venc:0}); return; } db.listTareas({asignado:nombre}).then(ts=>{ const h=fLocalDia(new Date()); const p=(ts||[]).filter(t=>t.estado!=='hecha'); setMisT({pend:p.length, venc:p.filter(t=>t.fecha_limite&&t.fecha_limite<h).length}); }).catch(()=>{}); };
   useEffect(()=>{ if(auth) cargarMisTareas(auth.nombre); else setMisT({pend:0,venc:0}); },[auth]);
@@ -1659,7 +1678,7 @@ function App(){
               </div>
               {NAV.map(([k,ic,l])=>(
                 <div key={k} className={"nav-item"+(tab===k?" active":"")} onClick={()=>{setTab(k);setNavOpen(false);}}>
-                  <span className="nav-ico">{ic}</span>{l}
+                  <span className="nav-ico">{ic}</span>{l}{k==='celdas'&&celdasPend>0 && <span className="pill pill-off" style={{marginLeft:6,color:"var(--red)"}}>{celdasPend}</span>}
                 </div>
               ))}
               <div style={{marginTop:"auto",paddingTop:10,borderTop:"1px solid var(--bd)"}}>
@@ -7972,6 +7991,8 @@ function LavadosCelda({showToast, quien, rol}){
   const [hasta,setHasta]=useState(hoyISO);
   const [rows,setRows]=useState(null);
   const [maqs,setMaqs]=useState([]);
+  const [sols,setSols]=useState([]);        // solicitudes de lavado adicional (pendientes + del rango)
+  const [resp,setResp]=useState({});        // respuesta/ciclos que se están escribiendo por solicitud
   const [cfg,setCfg]=useState(null);
   const [fOp,setFOp]=useState('');
   const [fSede,setFSede]=useState('');
@@ -7988,8 +8009,8 @@ function LavadosCelda({showToast, quien, rol}){
     if(!desde||!hasta) return;
     setRows(null);
     try{ const dISO=new Date(desde+'T00:00:00').toISOString(), hISO=new Date(hasta+'T23:59:59.999').toISOString();
-      const [lv,mq,cf]=await Promise.all([db.listLavadosCelda(dISO,hISO), db.listMaquinasCelda().catch(()=>[]), db.getCeldaConfig().catch(()=>null)]);
-      setRows(lv); setMaqs(mq); if(cf) setCfg(c=>c&&c._sucio?c:{ciclos:cf.ciclos,cupo:cf.cupo,ventana_horas:cf.ventana_horas,actualizado_por:cf.actualizado_por,actualizado_en:cf.actualizado_en}); }
+      const [lv,mq,cf,sl]=await Promise.all([db.listLavadosCelda(dISO,hISO), db.listMaquinasCelda().catch(()=>[]), db.getCeldaConfig().catch(()=>null), db.listSolicitudesCelda(dISO).catch(()=>[])]);
+      setRows(lv); setMaqs(mq); setSols(sl); if(cf) setCfg(c=>c&&c._sucio?c:{ciclos:cf.ciclos,cupo:cf.cupo,ventana_horas:cf.ventana_horas,actualizado_por:cf.actualizado_por,actualizado_en:cf.actualizado_en}); }
     catch(e){ showToast(""+(e.message||e),"err"); setRows([]); }
   };
   useEffect(()=>{ cargar(); },[desde,hasta]);
@@ -8027,12 +8048,38 @@ function LavadosCelda({showToast, quien, rol}){
       else showToast((r&&r.error)||"No se pudo guardar","err"); }
     catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
   const setC=(k,v)=>setCfg(c=>({...c,[k]:v.replace(/[^0-9]/g,""),_sucio:true}));
+  const resolver=async(s,aprobar)=>{ if(busy) return; setBusy(true);
+    try{ const r=resp[s.id]||{}; const out=await db.resolverSolicitudCelda(s.id,aprobar,quien,r.txt,aprobar?(r.ciclos||(cfg&&cfg.ciclos)||3):null);
+      if(out&&out.ok){ showToast(aprobar?"Lavado adicional aprobado ✓":"Solicitud rechazada","ok"); await cargar(); }
+      else showToast((out&&out.error)||"No se pudo","err"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+  const pendientes=sols.filter(s=>s.estado==='pendiente');
+  const resueltas=sols.filter(s=>s.estado!=='pendiente');
 
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
         <b style={{color:"var(--amber)"}}>🚿 Lavados de celda sin token.</b> <span className="muted">El operador carga los ciclos desde el POS por Bluetooth, parado frente a la máquina. La máquina solo obedece si el sistema lo autoriza, y cada lavado queda con nombre, máquina y hora. Así ya no hay tokens de lavado de celda que se puedan vender.</span>
       </div>
+
+      {/* ---- solicitudes de lavado adicional ---- */}
+      {pendientes.length>0 && (
+        <div className="card" style={{marginBottom:12,borderColor:"var(--amber)"}}>
+          <div className="sec-title" style={{fontSize:14,marginBottom:8}}>➕ Solicitudes de lavado adicional <span className="pill pill-off" style={{color:"var(--red)"}}>{pendientes.length} pendiente{pendientes.length>1?"s":""}</span></div>
+          {pendientes.map(s=>{ const r=resp[s.id]||{}; return (
+            <div key={s.id} style={{padding:"10px 12px",marginBottom:8,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)"}}>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"baseline"}}>
+                <b>{s.operador}</b><span className="muted">{s.sede||"—"}</span><span className="pill pill-prod">{s.maquina}</span><span className="muted" style={{fontSize:12}}>{hora(s.creado_en)} · {hace(s.creado_en)}</span>
+              </div>
+              <div style={{margin:"6px 0",fontSize:14}}>“{s.motivo}”</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <input className="input" style={{margin:0,flex:"1 1 220px"}} placeholder="Respuesta para el operador (opcional)" value={r.txt||""} onChange={e=>setResp(x=>({...x,[s.id]:{...r,txt:e.target.value}}))}/>
+                <div className="fld" style={{display:"flex",alignItems:"center",gap:6}}><span className="muted" style={{fontSize:12}}>Ciclos</span><input className="input" style={{margin:0,width:64,textAlign:"center"}} type="text" inputMode="numeric" value={r.ciclos!=null?r.ciclos:((cfg&&cfg.ciclos)||3)} onChange={e=>setResp(x=>({...x,[s.id]:{...r,ciclos:e.target.value.replace(/[^0-9]/g,"").slice(0,1)}}))}/></div>
+                <button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>resolver(s,false)}>Rechazar</button>
+                <button className="btn btn-amber btn-sm" disabled={busy} onClick={()=>resolver(s,true)}>✓ Aprobar</button>
+              </div>
+            </div>); })}
+        </div>)}
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:4,background:"var(--sf2)",borderRadius:10,padding:3}}>
           {[['hoy',"Hoy"],['ayer',"Ayer"],['7',"7 días"],['30',"30 días"],['mes',"Este mes"]].map(([k,l])=>(
@@ -8112,13 +8159,30 @@ function LavadosCelda({showToast, quien, rol}){
                   <td className="muted">{l.sede||"—"}{l.sede_operador&&l.sede&&l.sede_operador!==l.sede && <span style={{color:"var(--red)",fontSize:11,marginLeft:4}} title="El operador tenía abierto el POS de otra sede">(POS de {l.sede_operador})</span>}</td>
                   <td>{l.operador}</td>
                   <td className="num">{l.ciclos}</td>
-                  <td>{l.estado==='aplicado' ? <span className="pill pill-prod">✓ Cargado</span> : l.estado==='no_aplicado' ? <span className="pill pill-off">No llegó a la máquina</span> : <span className="muted">En curso</span>}</td>
+                  <td>{l.solicitud_id && <span className="pill pill-token" style={{marginRight:4}} title="Lavado adicional aprobado">➕ Adicional</span>}{l.estado==='aplicado' ? <span className="pill pill-prod">✓ Cargado</span> : l.estado==='no_aplicado' ? <span className="pill pill-off">No llegó a la máquina</span> : <span className="muted">En curso</span>}</td>
                 </tr>))}
             </tbody>
           </table>
           {vis.length>400 && <div className="muted" style={{padding:12}}>Mostrando 400 de {vis.length}.</div>}
         </div>
 
+        {resueltas.length>0 && (
+          <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}>
+            <div className="sec-title" style={{fontSize:14,margin:"10px 12px 6px"}}>➕ Solicitudes de lavado adicional <span className="muted">· resueltas en el rango</span></div>
+            <table className="tbl">
+              <thead><tr><th>Pedida</th><th>Operador</th><th>Máquina</th><th>Motivo</th><th>Estado</th><th>Resolvió</th><th>Respuesta</th></tr></thead>
+              <tbody>{resueltas.slice(0,100).map(s=>(
+                <tr key={s.id}>
+                  <td className="muted" style={{whiteSpace:"nowrap"}}>{hora(s.creado_en)}</td>
+                  <td>{s.operador}</td>
+                  <td className="row-name">{s.maquina}</td>
+                  <td style={{fontSize:12}}>{s.motivo}</td>
+                  <td>{s.estado==='rechazada'?<span className="pill pill-off">Rechazada</span>:s.estado==='usada'?<span className="pill pill-prod">✓ Usada{s.ciclos?(" · "+s.ciclos+" ciclos"):""}</span>:<span className="pill pill-token">Aprobada, sin usar</span>}</td>
+                  <td className="muted" style={{fontSize:12}}>{s.resuelto_por||"—"}{s.resuelto_en?(" · "+hora(s.resuelto_en)):""}</td>
+                  <td className="muted" style={{fontSize:12}}>{s.respuesta||"—"}</td>
+                </tr>))}</tbody>
+            </table>
+          </div>)}
         {cfg && (
           <div className="card" style={{marginBottom:12}}>
             <div className="sec-title" style={{fontSize:14,marginBottom:8}}>⚙️ Cupo de lavado de celda</div>

@@ -547,9 +547,27 @@ const db = {
   async misLavadosCelda(operador){
     if(DEMO_MODE) return [];
     const desde=new Date(Date.now()-14*3600*1000).toISOString();
-    const { data, error } = await sb.from('lavados_celda').select('id,maquina,ciclos,creado_en')
+    const { data, error } = await sb.from('lavados_celda').select('id,maquina,ciclos,creado_en,solicitud_id')
       .eq('operador',operador).eq('estado','aplicado').gte('creado_en',desde).order('creado_en',{ascending:false}).limit(50);
     if(error) return []; return data||[];
+  },
+  // ---- Lavado de celda ADICIONAL: el operador pide, el admin aprueba ----
+  async maquinasCeldaDeSede(sede){
+    if(DEMO_MODE) return [];
+    const { data, error } = await sb.rpc('maquinas_lista'); if(error) return [];
+    return (data||[]).filter(m=>m.activa && (!sede || m.sede===sede) && !/^(PANZER_001|SIN_NOMBRE|MAQ-01)$/i.test(m.id)).map(m=>m.id).sort();
+  },
+  async misSolicitudesCelda(operador){
+    if(DEMO_MODE) return [];
+    const desde=new Date(Date.now()-24*3600*1000).toISOString();
+    const { data, error } = await sb.from('solicitudes_celda').select('id,maquina,motivo,ciclos,estado,respuesta,creado_en,resuelto_en')
+      .eq('operador',operador).gte('creado_en',desde).order('creado_en',{ascending:false}).limit(20);
+    if(error) return []; return data||[];
+  },
+  async solicitarLavadoCelda(maquina, sede, operador, motivo){
+    if(DEMO_MODE) return {ok:true};
+    const { data, error } = await sb.rpc('solicitar_lavado_celda',{ p_maquina:maquina, p_sede:sede, p_operador:operador, p_motivo:motivo });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
   },
   // ---- Solicitudes de anulación: el cajero NO borra, solo pide con un motivo ----
   async misSolicitudesAnulacion(ventaIds){
@@ -2053,7 +2071,7 @@ async function lavarCeldaBLE(operador, sede, paso){
     const estado=bleTxt(await chE.readValue());
     paso("Pidiendo autorización…");
     const aut=await db.autorizarLavadoCelda(estado,operador,sede);
-    if(!aut||!aut.ok) throw new Error((aut&&aut.error)||"No se autorizó el lavado.");
+    if(!aut||!aut.ok){ const er=new Error((aut&&aut.error)||"No se autorizó el lavado."); er.cupo=!!(aut&&aut.cupo); er.maquina=aut&&aut.maquina; throw er; }
     paso("Cargando ciclos en la máquina…");
     let ultimo="";
     const alCambiar=ev=>{ ultimo=bleTxt(ev.target.value); };
@@ -2068,7 +2086,7 @@ async function lavarCeldaBLE(operador, sede, paso){
     if(/^ERR\|/.test(ultimo)) throw new Error(BLE_ERRORES[ultimo.split('|')[1]]||"La máquina rechazó la orden. Intenta de nuevo.");
     if(!/^OK\|/.test(ultimo)) throw new Error("La máquina no confirmó. Mira su pantalla: si no cargó los ciclos, intenta de nuevo (no se te descuenta el lavado).");
     try{ await db.confirmarLavadoCelda(aut.id, bleTxt(await chE.readValue())); }catch(e){}
-    return { maquina:aut.maquina, nombre:aut.nombre, ciclos:aut.ciclos };
+    return { maquina:aut.maquina, nombre:aut.nombre, ciclos:aut.ciclos, adicional:!!aut.adicional };
   } finally { try{ if(dev.gatt.connected) dev.gatt.disconnect(); }catch(e){} }
 }
 
@@ -2078,13 +2096,28 @@ function CeldaSheet({sede,operador,onClose}){
   const [ok,setOk]=useState(null);       // lavado cargado → pantalla verde
   const [err,setErr]=useState(null);
   const [mios,setMios]=useState([]);     // lavados de celda de este operador en las últimas 14 h
-  const cargar=async()=>{ try{ setMios(await db.misLavadosCelda(operador)); }catch(e){} };
-  useEffect(()=>{ cargar(); },[]);
+  const [sols,setSols]=useState([]);     // mis solicitudes de lavado adicional (24 h)
+  const [maqs,setMaqs]=useState([]);     // máquinas registradas de la sede
+  const [pedir,setPedir]=useState(false);
+  const [pedMaq,setPedMaq]=useState("");
+  const [pedMotivo,setPedMotivo]=useState("");
+  const [pedBusy,setPedBusy]=useState(false);
+  const [pedErr,setPedErr]=useState(null);
+  const cargar=async()=>{ try{ const [l,s]=await Promise.all([db.misLavadosCelda(operador), db.misSolicitudesCelda(operador)]); setMios(l); setSols(s); }catch(e){} };
+  useEffect(()=>{ cargar(); db.maquinasCeldaDeSede(sede).then(setMaqs).catch(()=>{}); const t=setInterval(cargar,10000); return ()=>clearInterval(t); },[]);
+  const enviarSolicitud=async()=>{
+    if(pedBusy) return; setPedBusy(true); setPedErr(null);
+    try{ const r=await db.solicitarLavadoCelda(pedMaq,sede,operador,pedMotivo.trim());
+      if(r&&r.ok){ setPedir(false); setPedMotivo(""); cargar(); } else setPedErr((r&&r.error)||"No se pudo enviar."); }
+    catch(e){ setPedErr((e&&e.message)||"No se pudo enviar."); }
+    finally{ setPedBusy(false); }
+  };
+  const ESTADO_SOL={pendiente:["⏳ Pendiente","var(--amber)"],aprobada:["✅ Aprobada: conecta con la máquina y cárgalo","var(--green)"],rechazada:["⛔ Rechazada","var(--red)"],usada:["✔ Usada","var(--td)"]};
   const hora=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
   const lavar=async()=>{
     if(busy) return; setBusy(true); setErr(null); setOk(null);
     try{ setOk(await lavarCeldaBLE(operador,sede,setPaso)); }
-    catch(e){ setErr((e&&e.message)||"No se pudo. Intenta de nuevo."); }
+    catch(e){ setErr((e&&e.message)||"No se pudo. Intenta de nuevo."); if(e&&e.cupo){ setPedir(true); if(e.maquina) setPedMaq(e.maquina); } }
     finally{ setBusy(false); setPaso(""); cargar(); }
   };
   return (
@@ -2099,7 +2132,7 @@ function CeldaSheet({sede,operador,onClose}){
             <div style={{fontSize:54,lineHeight:1}}>✅</div>
             <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>CICLOS CARGADOS</div>
             <div style={{fontSize:26,fontWeight:900,margin:"6px 0"}}>{ok.maquina}</div>
-            <div className="header-sub">{ok.ciclos} ciclos · quedó registrado a nombre de {operador}</div>
+            <div className="header-sub">{ok.ciclos} ciclos{ok.adicional?" · lavado ADICIONAL aprobado":""} · quedó registrado a nombre de {operador}</div>
             <div style={{fontWeight:800,marginTop:10}}>Ya puedes usar los botones de la máquina.</div>
             <button className="btn-primary" style={{marginTop:14}} onClick={()=>setOk(null)}>Lavar otra celda</button>
           </div>
@@ -2107,12 +2140,41 @@ function CeldaSheet({sede,operador,onClose}){
           {err && <div style={{margin:"0 0 10px",padding:"12px 14px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {err}</div>}
           <button className="btn-primary" style={{marginTop:0}} disabled={busy} onClick={lavar}>{busy?(paso||"Un momento…"):"🔵 Conectar con la máquina"}</button>
           <div className="header-sub" style={{marginTop:8}}>Al tocar el botón sale una lista: elige la máquina de la celda que vas a lavar (su nombre empieza por PANZER).</div>
+
+          {/* Lavado adicional: cuando la celda necesita más de un lavado en el turno */}
+          {!pedir ? (
+            <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={()=>{ setPedir(true); setPedErr(null); if(!pedMaq && maqs.length) setPedMaq(maqs[0]); }}>➕ Pedir lavado adicional</button>
+          ) : (
+            <div style={{marginTop:10,padding:12,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)"}}>
+              <div style={{fontWeight:800,marginBottom:6}}>Pedir lavado adicional</div>
+              <div className="header-sub" style={{marginBottom:8}}>Para cuando la celda está muy sucia o necesita un lavado profundo. El administrador lo aprueba y te aparece aquí.</div>
+              <label className="label">Máquina</label>
+              {maqs.length>0
+                ? <select className="input" value={pedMaq} onChange={e=>setPedMaq(e.target.value)}>{maqs.map(m=><option key={m} value={m}>{m}</option>)}</select>
+                : <input className="input" placeholder="Nombre de la máquina (ej: BOL_ML_02)" value={pedMaq} onChange={e=>setPedMaq(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g,""))}/>}
+              <label className="label">Motivo</label>
+              <input className="input" placeholder="Ej: muy sucia, lavado profundo" value={pedMotivo} onChange={e=>setPedMotivo(e.target.value)}/>
+              {pedErr && <div style={{margin:"4px 0 8px",color:"var(--red)",fontWeight:700,fontSize:13}}>{pedErr}</div>}
+              <div style={{display:"flex",gap:8}}>
+                <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={pedBusy} onClick={()=>setPedir(false)}>Cancelar</button>
+                <button className="btn-primary" style={{flex:1,marginTop:0}} disabled={pedBusy||!pedMaq||pedMotivo.trim().length<5} onClick={enviarSolicitud}>{pedBusy?"Enviando…":"Enviar solicitud"}</button>
+              </div>
+            </div>
+          )}
+          {sols.length>0 && (<div style={{marginTop:10}}>
+            <div className="header-sub" style={{marginBottom:4}}>Mis solicitudes de lavado adicional</div>
+            {sols.map(s=>{ const es=ESTADO_SOL[s.estado]||[s.estado,"var(--td)"]; return (
+              <div key={s.id} style={{padding:"8px 10px",marginBottom:6,borderRadius:10,border:"1px solid var(--bd)",fontSize:13}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:8}}><b>{s.maquina}</b><span style={{color:es[1],fontWeight:800}}>{es[0]}</span></div>
+                <div className="header-sub">{hora(s.creado_en)} · {s.motivo}{s.ciclos?(" · "+s.ciclos+" ciclos"):""}{s.respuesta?(" · \""+s.respuesta+"\""):""}</div>
+              </div>); })}
+          </div>)}
         </div>)}
 
         <div className="result-row" style={{marginTop:14}}><span className="result-label" style={{fontWeight:800}}>Celdas que has lavado en tu turno</span><span className="result-value">{mios.length}</span></div>
         {mios.map(l=>(
           <div key={l.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
-            <span>✅ {l.maquina}</span><span className="header-sub">{hora(l.creado_en)} · {l.ciclos} ciclos</span>
+            <span>✅ {l.maquina}{l.solicitud_id && <span style={{marginLeft:6,fontSize:11,color:"var(--green)",fontWeight:800}}>ADICIONAL</span>}</span><span className="header-sub">{hora(l.creado_en)} · {l.ciclos} ciclos</span>
           </div>))}
 
         <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>

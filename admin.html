@@ -185,6 +185,8 @@ function QrVerifCell({l}){
 }
 // Fecha/hora en zona LOCAL (Colombia) a partir de un timestamp UTC de Supabase
 const fLocalDia = f => { const d=new Date(f); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+const quincenaDe = f => { const d=String(f).slice(0,10); return d.slice(0,7)+'-'+(Number(d.slice(8,10))<=15?'1':'2'); };   // 'YYYY-MM-1' o 'YYYY-MM-2'
+const quincenaLbl = q => { const [y,m,h]=String(q).split('-'); const M=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"][Number(m)-1]||m; return (h==='1'?'1ª':'2ª')+' quincena '+M+' '+y; };
 const fLocalHora = f => { const d=new Date(f); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 const uid = () => "tmp-"+Math.random().toString(36).slice(2,9);
 
@@ -1500,6 +1502,22 @@ const db = {
       .select('id,operador,sede,qr,qr_verificado,qr_sin_verificar,created_at,fecha,num_recibo,estado')
       .gte('created_at',desdeISO).lte('created_at',hastaISO).neq('estado','anulada').order('created_at',{ascending:false}).limit(2000);
     if(error) return []; return data||[];
+  },
+  // ---- Descuentos de quincena por descuadre (nómina) ----
+  async guardarDescuentos(rows){
+    if(DEMO_MODE || !rows.length) return;
+    const {error}=await sb.from('recaudo_descuentos').insert(rows); if(error) throw error;
+  },
+  async listDescuentos(f={}){
+    if(DEMO_MODE) return [];
+    let q=sb.from('recaudo_descuentos').select('*').order('fecha',{ascending:false}).limit(1000);
+    if(f.sede) q=q.eq('sede',f.sede);
+    if(f.desde) q=q.gte('fecha',f.desde);
+    const {data,error}=await q; if(error) throw error; return data||[];
+  },
+  async marcarDescuento(id, aplicado, quien){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('recaudo_descuentos').update(aplicado?{aplicado:true,aplicado_en:new Date().toISOString(),aplicado_por:quien||null}:{aplicado:false,aplicado_en:null,aplicado_por:null}).eq('id',id); if(error) throw error;
   },
   async liberarAbono(id, admin){
     if(DEMO_MODE) return {ok:true};
@@ -8200,6 +8218,58 @@ function LavadosCelda({showToast, quien, rol}){
   );
 }
 
+// ============ DESCUENTOS DE QUINCENA (nómina) ============
+// Lo que los tesoreros asignaron en el reparto de cada ciclo, agrupado por quincena y operador.
+function DescuentosQuincena({showToast, quien, sedes}){
+  const [rows,setRows]=useState(null);
+  const [fSede,setFSede]=useState("");
+  const [fQ,setFQ]=useState("");
+  const [busy,setBusy]=useState(false);
+  const load=async()=>{ try{ const d=new Date(); d.setMonth(d.getMonth()-6); setRows(await db.listDescuentos({desde:fLocalDia(d)})); }catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  useEffect(()=>{ load(); },[]);
+  if(!rows) return <div className="empty">Cargando…</div>;
+  const quincenas=[...new Set(rows.map(r=>r.quincena))].sort().reverse();
+  const q=fQ||quincenas[0]||"";
+  const vis=rows.filter(r=>r.quincena===q && (!fSede||r.sede===fSede));
+  const porOp={}; vis.forEach(r=>{ const k=r.operador+'|'+r.sede; const o=porOp[k]||(porOp[k]={operador:r.operador,sede:r.sede,total:0,n:0,pend:0,items:[]}); o.total+=Number(r.valor)||0; o.n++; if(!r.aplicado) o.pend+=Number(r.valor)||0; o.items.push(r); });
+  const grupos=Object.values(porOp).sort((a,b)=>b.total-a.total);
+  const total=vis.reduce((a,r)=>a+(Number(r.valor)||0),0), pend=vis.filter(r=>!r.aplicado).reduce((a,r)=>a+(Number(r.valor)||0),0);
+  const marcar=async(r,ap)=>{ if(busy) return; setBusy(true); try{ await db.marcarDescuento(r.id,ap,quien); await load(); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
+  const marcarTodos=async(g)=>{ if(busy) return; setBusy(true); try{ for(const r of g.items.filter(x=>!x.aplicado)) await db.marcarDescuento(r.id,true,quien); await load(); showToast("Marcados como aplicados en nómina ✓"); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>💸 Descuentos de quincena por descuadre.</b> <span className="muted">Los asigna el tesorero en el paso Reparto de cada ciclo. Aquí se ve cuánto descontarle a cada operador en la nómina y se marca cuando ya se aplicó.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <select className="select" style={{maxWidth:220,margin:0}} value={q} onChange={e=>setFQ(e.target.value)}>
+          {quincenas.length===0 && <option value="">Sin descuentos todavía</option>}{quincenas.map(x=><option key={x} value={x}>{quincenaLbl(x)}</option>)}
+        </select>
+        <select className="select" style={{maxWidth:200,margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}>
+          <option value="">Todas las sedes</option>{[...new Set(rows.map(r=>r.sede))].sort().map(x=><option key={x} value={x}>{x}</option>)}
+        </select>
+        <button className="btn btn-ghost btn-sm" onClick={load}>↻ Actualizar</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
+        <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Total de la quincena</div><div style={{fontSize:24,fontWeight:800,color:"var(--red)"}}>{fmt(total)}</div><div className="muted" style={{fontSize:11}}>{vis.length} descuentos · {grupos.length} operadores</div></div>
+        <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Pendiente de aplicar en nómina</div><div style={{fontSize:24,fontWeight:800,color:pend>0?"var(--amber)":"var(--green)"}}>{fmt(pend)}</div></div>
+      </div>
+      {grupos.length===0 && <div className="empty">No hay descuentos en esa quincena.</div>}
+      {grupos.map(g=>(
+        <div key={g.operador+g.sede} className="card" style={{marginBottom:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span className="row-name" style={{fontSize:15}}>{g.operador}</span><span className="muted">{g.sede}</span>
+            <span style={{marginLeft:"auto",fontWeight:800,color:"var(--red)"}}>{fmt(g.total)}</span>
+            {g.pend>0 ? <button className="btn btn-amber btn-sm" disabled={busy} onClick={()=>marcarTodos(g)}>✓ Aplicado en nómina</button> : <span className="pill pill-prod">✓ Aplicado</span>}
+          </div>
+          <table className="tbl" style={{marginTop:6}}><tbody>{g.items.map(r=>(
+            <tr key={r.id}><td className="muted" style={{whiteSpace:"nowrap"}}>{r.fecha}</td><td style={{fontSize:13}}>{r.motivo||<span className="muted">sin motivo</span>}{r.tesorero && <span className="muted" style={{fontSize:11}}> · {r.tesorero}</span>}</td><td className="num" style={{fontWeight:700}}>{fmt(r.valor)}</td>
+              <td style={{textAlign:"right"}}>{r.aplicado?<button className="btn btn-ghost btn-sm" disabled={busy} title={"Aplicado por "+(r.aplicado_por||"—")} onClick={()=>marcar(r,false)}>✓ aplicado</button>:<button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>marcar(r,true)}>marcar aplicado</button>}</td></tr>))}</tbody></table>
+        </div>))}
+    </div>
+  );
+}
+
 function AbonosQR({showToast, quien, rol}){
   const hoyISO=fLocalDia(new Date());
   const [desde,setDesde]=useState(hoyISO);
@@ -8511,7 +8581,9 @@ function Recaudo({showToast, quien, rol}){
         faltanteMaqTokens, opsNegativos:opsNegativos.map(o=>o.nombre), nuevoSaldoSede,
         // rectificación física de saldos (operadores o base de sede)
         totalSaldoReal:totSaldoReal, baseSedeContada, difBaseSede, perdidosOps, sobrantesOps,
-        rectificados:opsRect.map(c=>({nombre:c.nombre, esperado:c.saldoEsperado, contado:c.contado, diferencia:c.diferencia})) };
+        rectificados:opsRect.map(c=>({nombre:c.nombre, esperado:c.saldoEsperado, contado:c.contado, diferencia:c.diferencia})),
+        // descuentos de quincena por descuadre (nómina); también van a recaudo_descuentos
+        descuentos:Object.entries(reparto.descuentos||{}).filter(([n,d])=>Number(d.valor)>0).map(([n,d])=>({operador:n, valor:Number(d.valor)||0, motivo:(d.motivo||'').trim()||null})) };
       const ciclo={ sede, tesorero, fecha:fLocalDia(new Date()),
         total_recaudo:totalRecaudo, a_consignar:aConsignar, total_descuadre:totalDescuadre,
         total_gastos:totalGastos, tokens_perdidos:tokensPerdidos, tokens_fisicos:tokensFis,
@@ -8528,7 +8600,11 @@ function Recaudo({showToast, quien, rol}){
         gen_token_anterior:m.gen_token_anterior, gen_token_actual:Number(m.gen_token_actual)||0,
         producido:(Number(m.gen_actual)||0)-m.gen_anterior, producido_tokens:(Number(m.gen_token_actual)||0)-m.gen_token_anterior,
         token_dia:Number(m.token_dia)||0, mone_dia:Number(m.mone_dia)||0 }));
-      await db.cerrarCiclo({ ciclo, liquidaciones, maquinas:maqs, gastos:gastos.filter(g=>g.concepto||g.monto), reparto:repObj });
+      const cicloId=await db.cerrarCiclo({ ciclo, liquidaciones, maquinas:maqs, gastos:gastos.filter(g=>g.concepto||g.monto), reparto:repObj });
+      if(repObj.descuentos.length){
+        try{ await db.guardarDescuentos(repObj.descuentos.map(d=>({ciclo_id:cicloId||null, sede, operador:d.operador, valor:d.valor, motivo:d.motivo, fecha:ciclo.fecha, quincena:quincenaDe(ciclo.fecha), tesorero}))); }
+        catch(e){ showToast("Ciclo cerrado, pero no se guardaron los descuentos para nómina: "+(e.message||e),"err"); }
+      }
       showToast("Ciclo cerrado y guardado ✓","ok");
       setPaso('inicio'); setSede(""); setTesorero("");
     }catch(e){ showToast("No se pudo cerrar: "+(e.message||e),"err"); } finally{ setBusy(false); }
@@ -8754,10 +8830,11 @@ function Recaudo({showToast, quien, rol}){
 
   return (
     <div>
-      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='saldos'||paso==='frhist'||paso==='frmaq'||paso==='abonos'); return (
+      {(()=>{ const sub=(paso==='historial'||paso==='contadores'||paso==='pendientes'||paso==='saldos'||paso==='frhist'||paso==='frmaq'||paso==='abonos'||paso==='descuentos'); return (
       <div className="toolbar">
         <div className="sec-title" style={{marginRight:"auto"}}>Recaudo / Tesorería</div>
         {!sub && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('abonos')}>💸 Abonos QR</button>}
+        {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={()=>setPaso('descuentos')}>💸 Descuentos</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirPendientes}>📥 Pendientes</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirSaldos}>🪙 Saldos</button>}
         {!sub && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={abrirContadores}>🔧 Contadores</button>}
@@ -8769,6 +8846,7 @@ function Recaudo({showToast, quien, rol}){
       );})()}
 
       {paso==='abonos' && <AbonosQR showToast={showToast} quien={quien} rol={rol}/>}
+      {paso==='descuentos' && <DescuentosQuincena showToast={showToast} quien={quien} sedes={sedes}/>}
 
       {/* INICIO */}
       {paso==='inicio' && (
@@ -8980,6 +9058,40 @@ function Recaudo({showToast, quien, rol}){
             {opsNegativos.length>0 && <div style={{marginTop:6,color:"var(--red)",fontWeight:700}}>⚠ {opsNegativos.length} operador(es) con saldo negativo (vendieron más de lo que tenían): {opsNegativos.map(o=>o.nombre).join(", ")}</div>}
             {faltanteMaqTokens===0 && opsNegativos.length===0 && <div style={{marginTop:8,color:"var(--green)",fontWeight:700}}>✓ Tokens cuadran</div>}
           </div>
+
+          {liqs.length>0 && (()=>{
+            // Descuentos de quincena: por operador, lo que faltó en efectivo y en tokens en este ciclo
+            const ops=[...new Set(liqs.map(l=>String(l.operador||'').trim()).filter(Boolean))];
+            const filas=ops.map(nombre=>{ const mias=liqs.filter(l=>String(l.operador||'').trim()===nombre);
+              const descEf=mias.reduce((a,l)=>a+descuadreDe(l),0);                       // negativo = faltó efectivo
+              const rect=opsRect.find(c=>c.nombre===nombre); const tokFalt=(rect&&rect.diferencia<0)?-rect.diferencia:0;
+              const sugerido=Math.max(0,-descEf)+tokFalt*VALOR_TOKEN;
+              const d=(reparto.descuentos||{})[nombre]||{};
+              return {nombre,descEf,tokFalt,sugerido,valor:d.valor!=null?d.valor:"",motivo:d.motivo||""}; });
+            const setD=(nombre,patch)=>setReparto(r=>({...r,descuentos:{...(r.descuentos||{}),[nombre]:{...((r.descuentos||{})[nombre]||{}),...patch}}}));
+            const total=filas.reduce((a,f)=>a+(Number(f.valor)||0),0);
+            return (
+          <div className="card">
+            <div className="card-t">💸 Descuentos de quincena por descuadre</div>
+            <div className="muted" style={{fontSize:12,marginBottom:8}}>Lo que se le descuenta a cada operador en la nómina de la quincena. El sistema sugiere el faltante de efectivo más los tokens perdidos (a {fmt(VALOR_TOKEN)}); tú decides el valor. No cambia el recaudo: solo queda guardado para nómina y en el historial.</div>
+            <div style={{overflowX:"auto"}}>
+              <table className="tbl">
+                <thead><tr><th>Operador</th><th className="num">Descuadre efectivo</th><th className="num">Tokens perdidos</th><th className="num">Sugerido</th><th className="num">A descontar</th><th>Motivo</th></tr></thead>
+                <tbody>{filas.map(f=>(
+                  <tr key={f.nombre}>
+                    <td className="row-name">{f.nombre}</td>
+                    <td className="num" style={{color:f.descEf<0?"var(--red)":f.descEf>0?"var(--amber)":"var(--green)"}}>{f.descEf===0?"✓ 0":fmt(f.descEf)}</td>
+                    <td className="num" style={{color:f.tokFalt>0?"var(--red)":"var(--td)"}}>{f.tokFalt>0?(f.tokFalt+" (≈ "+fmt(f.tokFalt*VALOR_TOKEN)+")"):"—"}</td>
+                    <td className="num">{f.sugerido>0?<button className="btn btn-ghost btn-sm" title="Usar el sugerido" onClick={()=>setD(f.nombre,{valor:String(f.sugerido)})}>{fmt(f.sugerido)} ↵</button>:<span className="muted">—</span>}</td>
+                    <td className="num"><input className="input" style={{margin:0,width:120,textAlign:"right"}} type="number" placeholder="0" value={f.valor} onChange={e=>setD(f.nombre,{valor:e.target.value})}/></td>
+                    <td><input className="input" style={{margin:0,minWidth:180}} placeholder={f.tokFalt>0&&f.descEf<0?"Faltante de efectivo y tokens":f.tokFalt>0?"Tokens perdidos":f.descEf<0?"Faltante de efectivo":"Motivo"} value={f.motivo} onChange={e=>setD(f.nombre,{motivo:e.target.value})}/></td>
+                  </tr>))}</tbody>
+              </table>
+            </div>
+            <div className="card" style={{marginTop:10,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+              <span>Total a descontar en la {quincenaLbl(quincenaDe(fLocalDia(new Date())))}</span><span style={{color:total>0?"var(--red)":"var(--green)"}}>{fmt(total)}</span>
+            </div>
+          </div>); })()}
 
           <div className="card">
             <div className="card-t">🪙 Tokens que quedan para el próximo ciclo</div>
@@ -9699,6 +9811,12 @@ function Recaudo({showToast, quien, rol}){
                   {conNuevo && <td className="num muted">{o.saldoNuevo!=null?o.saldoNuevo:"—"}</td>}
                 </tr>); })}</tbody></table></div>
               ); })()}
+            </div>}
+
+            {(rep.descuentos||[]).length>0 && <div>
+              <div className="card-t" style={{marginTop:14}}>💸 Descuentos de quincena ({quincenaLbl(quincenaDe(c.fecha))})</div>
+              {rep.descuentos.map((d,i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid var(--bd)"}}><span className="row-name">{d.operador}{d.motivo && <span className="muted" style={{fontWeight:400}}> · {d.motivo}</span>}</span><b style={{color:"var(--red)"}}>{fmt(d.valor)}</b></div>))}
+              <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontWeight:800}}><span>Total</span><span style={{color:"var(--red)"}}>{fmt(rep.descuentos.reduce((a,d)=>a+(Number(d.valor)||0),0))}</span></div>
             </div>}
 
             {detalle.gastos.length>0 && <div>

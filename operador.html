@@ -298,6 +298,22 @@ const db = {
       });
     }catch(e){ /* no bloquea: Sheets es el respaldo */ }
   },
+  // Último cierre de este cajero en esta sede (para avisar si cierra dos veces y sugerir la base de tokens)
+  async ultimoCierre(sede, operador){
+    if(DEMO_MODE || !sb) return null;
+    const { data, error } = await sb.from('recaudo_liquidaciones').select('id,created_at,valor,tokens_base,tokens_vendidos,tokens_restantes,num_recibo,estado,ciclo_id')
+      .eq('sede',sede).eq('operador',operador).neq('estado','anulada').order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if(error) return null; return data||null;
+  },
+  // Corrección del último cierre: ventas desde el turno original (las calcula el servidor) y reemplazo de la liquidación
+  async ventasParaCorreccion(liqId){
+    if(DEMO_MODE || !sb) return null;
+    const { data, error } = await sb.rpc('ventas_para_correccion',{ p_liq_id:liqId }); if(error) return null; return data;
+  },
+  async corregirLiquidacion(liqId, operador, payload){
+    const { data, error } = await sb.rpc('corregir_liquidacion',{ p_id:liqId, p_operador:operador, p_datos:payload });
+    if(error) throw new Error("Sin conexión con el sistema. Intenta de nuevo."); return data;
+  },
   async enviarLiquidacion(payload){
     const liquidacion = { ...payload,
       fecha: new Date().toLocaleDateString('es-CO'),
@@ -1265,9 +1281,9 @@ function PrecioSheet({producto,onClose,onConfirm}){
 // Auto: sede, operador, Nº recibo, valor total, QR/tarjeta, efectivo esperado.
 // Manual: control de tokens, devoluciones $, observaciones.
 // ============================================================
-function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
+function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPend}){
   // Nº de recibo = el de la última venta del turno (el mismo que se ve en el back office)
-  const numRecibo = ventas.length ? (ventas[ventas.length-1].recibo || '—') : '—';
+  const numReciboTurno = ventas.length ? (ventas[ventas.length-1].recibo || '—') : '—';
   // manuales (control de tokens + devoluciones + observaciones)
   const [tokensBase,setTokensBase]=useState("");
   const [tokensVendidos,setTokensVendidos]=useState("");
@@ -1278,6 +1294,36 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   const [sending,setSending]=useState(false);
   const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
   const [abonosTurno,setAbonosTurno]=useState(null);   // pagos QR que este cajero verificó en el turno
+  // Protecciones (2026-10-18): cierres vacíos y cierres repetidos
+  const [ultimo,setUltimo]=useState(null);        // último cierre de este cajero en esta sede
+  const [baseAuto,setBaseAuto]=useState(false);   // la base se sugirió desde el último cierre
+  const [confirmo,setConfirmo]=useState(false);   // "entiendo y quiero cerrar igual"
+  const [modo,setModo]=useState('nuevo');         // 'nuevo' | 'corregir' (reemplaza el último cierre)
+  const [corr,setCorr]=useState(null);            // ventas desde el turno original (servidor), cuando se corrige
+  useEffect(()=>{ if(DEMO_MODE) return;
+    db.ultimoCierre(sede,operador).then(u=>{ setUltimo(u);
+      // base sugerida = lo que quedó en el último cierre, si fue hace menos de 20 h
+      if(u && u.tokens_restantes!=null && (Date.now()-new Date(u.created_at))<20*3600*1000){
+        setTokensBase(prev=> prev===""? String(Math.max(0,Number(u.tokens_restantes)||0)) : prev); setBaseAuto(true); }
+    }).catch(()=>{}); },[]);
+  // ¿se puede corregir el último cierre? suyo, pendiente, sin ciclo y de hace menos de 1 h
+  const corregible=!!(ultimo && ultimo.estado==='pendiente' && !ultimo.ciclo_id && (Date.now()-new Date(ultimo.created_at))<60*60000);
+  const elegirModo=async(m)=>{
+    setModo(m); setConfirmo(false);
+    if(m==='corregir'){
+      const c=await db.ventasParaCorreccion(ultimo.id);
+      if(!c||!c.ok){ showToast((c&&c.error)||"No se pudo cargar el cierre anterior","err"); setModo('nuevo'); return; }
+      setCorr(c); setBaseAuto(false);
+      setTokensBase(String(ultimo.tokens_base!=null?ultimo.tokens_base:""));   // la base del turno original
+      try{ setAbonosTurno(await db.misAbonos(operador, c.desde)); }catch(e){}
+    } else {
+      setCorr(null);
+      // de vuelta a "otro cierre": base sugerida = lo que quedó en el anterior, y abonos solo de este turno
+      if(ultimo && ultimo.tokens_restantes!=null){ setTokensBase(String(Math.max(0,Number(ultimo.tokens_restantes)||0))); setBaseAuto(true); }
+      const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+      try{ setAbonosTurno(await db.misAbonos(operador,d)); }catch(e){}
+    }
+  };
   useEffect(()=>{ if(DEMO_MODE) return;
     const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
     db.misAbonos(operador,d).then(setAbonosTurno).catch(()=>setAbonosTurno([])); },[]);
@@ -1295,19 +1341,30 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   },[]);
 
   // automáticos desde las ventas del turno
-  const productosVal=ventas.reduce((s,v)=>s+(v.productos||0),0);  // productos (NO tokens, NO membresías)
-  const tokensVal=ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens (fichas)
-  const membresiasVal=ventas.reduce((s,v)=>s+(v.membresias||0),0); // membresías VIP vendidas
+  // En modo "corregir" los totales vienen del servidor: TODAS las ventas desde el turno original
+  const usaCorr=modo==='corregir' && corr;
+  const nVentas=usaCorr?Number(corr.n)||0:ventas.length;
+  const productosVal=usaCorr?Number(corr.productos)||0:ventas.reduce((s,v)=>s+(v.productos||0),0);  // productos (NO tokens, NO membresías)
+  const tokensVal=usaCorr?Number(corr.tokens)||0:ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens (fichas)
+  const membresiasVal=usaCorr?Number(corr.membresias)||0:ventas.reduce((s,v)=>s+(v.membresias||0),0); // membresías VIP vendidas
   const valor=productosVal+tokensVal+membresiasVal;                // total
-  const qr=ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
-  const efectivo=ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
-  const qrSolo=ventas.reduce((s,v)=>s+(v.pago.qr||0),0);          // solo QR/transferencia (sin tarjeta)
+  const qr=usaCorr?Number(corr.qr)||0:ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
+  const efectivo=usaCorr?Number(corr.efectivo)||0:ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
+  const qrSolo=usaCorr?Number(corr.qr_solo)||0:ventas.reduce((s,v)=>s+(v.pago.qr||0),0);          // solo QR/transferencia (sin tarjeta)
   const qrVerificado=(abonosTurno||[]).reduce((s,a)=>s+Number(a.valor||0),0);
   const qrSinVerificar=Math.max(0,qrSolo-qrVerificado);
   const dev=Number(devoluciones)||0;
   const efectivoEsperado=efectivo-dev;
   const tokensRestantes=(Number(tokensBase)||0)-(Number(tokensVendidos)||0)-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
-  const listo=tokensBase!=="" && tokensVendidos!=="";
+  const numRecibo = usaCorr ? (corr.ultimo_recibo||numReciboTurno) : numReciboTurno;
+  const sinVentas=nVentas===0;
+  const haceMin=ultimo?Math.round((Date.now()-new Date(ultimo.created_at))/60000):null;
+  const reciente=ultimo && haceMin!=null && haceMin<180;     // cerró hace menos de 3 h
+  const tokensRepetidos=!!(!usaCorr && ultimo && tokensBase!=="" && tokensVendidos!=="" && Number(tokensVendidos)>0 &&
+    Number(tokensBase)===Number(ultimo.tokens_base) && Number(tokensVendidos)===Number(ultimo.tokens_vendidos));
+  const hayAlerta=sinVentas||tokensRepetidos;
+  const listo=tokensBase!=="" && tokensVendidos!=="" && (!hayAlerta||confirmo);
+  const horaDe=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
 
   const payload=()=>({
     sede, operador, numRecibo,
@@ -1322,7 +1379,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
 
   const mensajeWA=()=>{
     const p=payload();
-    return '*Liquidación Panzer — '+sede+'*\n'+
+    return '*Liquidación Panzer — '+sede+'*'+(usaCorr?' (CORREGIDA)':'')+'\n'+
       'Operador: '+operador+'\n'+
       'Recibo: '+numRecibo+'\n'+
       'Fecha: '+new Date().toLocaleString('es-CO')+'\n'+
@@ -1343,6 +1400,13 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
   };
   // Registra la liquidación (Supabase + Sheets) y devuelve el resultado. Usado por ambos botones.
   const registrarLiq=async()=>{
+    if(usaCorr){
+      const r=await db.corregirLiquidacion(ultimo.id, operador, payload());
+      if(!r||!r.ok){ showToast((r&&r.error)||"No se pudo corregir el cierre","err"); throw new Error('no-corregido'); }
+      if(onPend){ onPend(); setTimeout(onPend,3000); }
+      showToast("Cierre corregido ✓ (reemplazó el de las "+horaDe(ultimo.created_at)+")","ok");
+      return;
+    }
     try{ await db.enviarLiquidacion(payload()); }catch(e){}
     if(onPend){ onPend(); setTimeout(onPend,3000); }   // refresca el banner ahora y tras el envío en segundo plano
     showToast("Liquidación guardada ✓","ok");
@@ -1353,13 +1417,13 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
     if(sending) return;
     setSending(true);
     try{ window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(mensajeWA()),'_blank'); }catch(e){}
-    try{ await registrarLiq(); }catch(e){}
+    try{ await registrarLiq(); }catch(e){ setSending(false); return; }   // si la corrección falla, no cierra caja
     onCerrar();
   };
   const registrarYCerrar=async()=>{
     if(sending) return;
     setSending(true);
-    try{ await registrarLiq(); }catch(e){}
+    try{ await registrarLiq(); }catch(e){ setSending(false); return; }   // si la corrección falla, no cierra caja
     onCerrar();   // cierra caja igual — la liquidación no se pierde (queda en cola)
   };
 
@@ -1378,8 +1442,26 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
         <div className="card-t">🧾 Liquidación de turno</div>
         <div className="header-sub" style={{marginBottom:6}}>{sede} · {operador} · Recibo {numRecibo}</div>
 
+        {reciente && (
+          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--amber)",background:"var(--amber-d)",fontSize:13}}>
+            <b>⚠ Ya cerraste caja a las {horaDe(ultimo.created_at)}</b> (hace {haceMin<60?(haceMin+" min"):(Math.round(haceMin/60)+" h")}) con {fmt(ultimo.valor)} vendidos{ultimo.tokens_restantes!=null?(" y te quedaron "+ultimo.tokens_restantes+" tokens"):""}. Si ese cierre ya quedó bien, no hace falta otro.
+            {corregible && (<div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
+              <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:700}}><input type="radio" name="modoCierre" checked={modo==='corregir'} onChange={()=>elegirModo('corregir')}/> ✏️ Corregir mi cierre de las {horaDe(ultimo.created_at)} (lo reemplaza)</label>
+              <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:700}}><input type="radio" name="modoCierre" checked={modo==='nuevo'} onChange={()=>elegirModo('nuevo')}/> Es otro cierre distinto</label>
+            </div>)}
+            {!corregible && ultimo.estado!=='pendiente' && <div style={{marginTop:6,fontSize:12}}>Ese cierre ya lo tomó el recaudo: si está mal, pídele la corrección al administrador.</div>}
+          </div>)}
+        {usaCorr && (
+          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--green)",background:"var(--green-d)",fontSize:13}}>
+            <b>✏️ Corrigiendo el cierre de las {horaDe(ultimo.created_at)}</b> · Las ventas de abajo son <b>todas</b> las tuyas en {sede} desde {horaDe(corr.desde)} ({nVentas} ventas). Revisa los tokens y registra: se reemplaza el cierre anterior, no se crea otro.
+          </div>)}
+        {sinVentas && (
+          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
+            <b>⛔ No has registrado ventas en este turno.</b> Si vendiste, toca <b>Seguir vendiendo</b>, registra las ventas y luego cierra. Un cierre en $0 queda en el recaudo como si no hubieras vendido nada.
+          </div>)}
+
         {/* Desglose automático */}
-        <div className="result-row"><span className="result-label">Nº de ventas</span><span className="result-value">{ventas.length}</span></div>
+        <div className="result-row"><span className="result-label">Nº de ventas</span><span className="result-value">{nVentas}</span></div>
         {row("Productos", productosVal)}
         {row("Tokens", tokensVal, "var(--amber)")}
         {membresiasVal>0 && row("Membresías", membresiasVal, "var(--amber)")}
@@ -1408,6 +1490,15 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
           {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
         </div>
         {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
+        {baseAuto && ultimo && <div style={{fontSize:11,color:"var(--amber)",marginBottom:6}}>🪙 Base sugerida: los {ultimo.tokens_restantes} tokens que quedaron en tu último cierre ({horaDe(ultimo.created_at)}). Corrígela si no coincide con lo que recibiste.</div>}
+        {tokensRepetidos && (
+          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
+            <b>⛔ Base {ultimo.tokens_base} y vendidos {ultimo.tokens_vendidos} son los mismos de tu cierre anterior.</b> Si los repites, esos tokens quedan contados dos veces. Revisa: la base de este turno debería ser lo que te quedó ({ultimo.tokens_restantes}).
+          </div>)}
+        {hayAlerta && (
+          <label style={{display:"flex",alignItems:"center",gap:9,padding:"8px 0",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            <input type="checkbox" checked={confirmo} onChange={e=>setConfirmo(e.target.checked)} style={{width:18,height:18}}/> Revisé la advertencia y quiero cerrar de todas formas
+          </label>)}
         <div style={{fontSize:12,color:"var(--amber)",fontWeight:700,marginBottom:10}}>🪙 Tokens restantes: {tokensRestantes}</div>
 
         {/* Devoluciones + observaciones (manual) */}
@@ -1424,11 +1515,11 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar}){
 
         {/* Acción principal: registra la liquidación Y la envía por WhatsApp (no se pierde) */}
         <button className="btn-primary" style={{marginTop:14,background:"#25D366",border:"none"}} disabled={!listo||sending} onClick={registrarYWhatsApp}>
-          {sending?"Registrando…":(listo?"📲 Registrar y enviar por WhatsApp":"Completa el control de tokens")}
+          {sending?"Registrando…":(listo?"📲 Registrar y enviar por WhatsApp":(hayAlerta&&tokensBase!==""&&tokensVendidos!==""?"Revisa la advertencia para cerrar":"Completa el control de tokens"))}
         </button>
         {/* Alternativa: registrar sin enviar WhatsApp */}
         <button className="btn-secondary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
-          {listo?"Registrar y cerrar caja (sin WhatsApp)":"Completa el control de tokens"}
+          {listo?"Registrar y cerrar caja (sin WhatsApp)":(hayAlerta&&tokensBase!==""&&tokensVendidos!==""?"Revisa la advertencia para cerrar":"Completa el control de tokens")}
         </button>
         <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Seguir vendiendo</button>
       </div>

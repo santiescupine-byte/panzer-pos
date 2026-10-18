@@ -1519,6 +1519,14 @@ const db = {
     if(DEMO_MODE) return;
     const {error}=await sb.from('recaudo_descuentos').update(aplicado?{aplicado:true,aplicado_en:new Date().toISOString(),aplicado_por:quien||null}:{aplicado:false,aplicado_en:null,aplicado_por:null}).eq('id',id); if(error) throw error;
   },
+  async asignarAbono(id, operador, sede, admin, motivo, liquidacionId){
+    if(DEMO_MODE) return {ok:true};
+    const {data,error}=await sb.rpc('asignar_abono',{p_id:id, p_operador:operador, p_sede:sede, p_admin:admin||'admin', p_motivo:motivo||null, p_liquidacion_id:liquidacionId||null}); if(error) throw error; return data;
+  },
+  async liquidacionesCerca(operador, fechaISO){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('liquidaciones_cerca',{p_operador:operador, p_fecha:fechaISO}); if(error) return []; return data||[];
+  },
   async liberarAbono(id, admin){
     if(DEMO_MODE) return {ok:true};
     const {data,error}=await sb.rpc('liberar_abono',{p_id:id, p_admin:admin||'admin'}); if(error) throw error; return data;
@@ -8322,6 +8330,24 @@ function AbonosQR({showToast, quien, rol}){
   const opsRows=Object.values(porOp).sort((a,b)=>b.v-a.v);
 
   const liberar=a=>setConf({a});
+  // asignar un abono sin reclamar a un cajero (admin)
+  const [asig,setAsig]=useState(null);           // {a, operador, sede, motivo, liqId, liqs}
+  const [emps,setEmps]=useState(null);
+  const [todasSedes,setTodasSedes]=useState([]);
+  const abrirAsignar=async(a)=>{
+    setAsig({a, operador:"", sede:a.reclamado_sede||"", motivo:"", liqId:"", liqs:[]});
+    if(emps===null){ try{ const [e,sd]=await Promise.all([db.listEmpleados(), db.listSedes()]); setEmps(e.filter(x=>x.activo && !x.archivado)); setTodasSedes(sd.filter(x=>!x.es_bodega).map(x=>x.nombre)); }catch(e){ setEmps([]); } }
+  };
+  const elegirCajero=async(nombre)=>{
+    const e=(emps||[]).find(x=>x.nombre===nombre);
+    setAsig(x=>({...x, operador:nombre, sede:x.sede||((e&&e.sedes&&e.sedes[0])||""), liqId:"", liqs:[]}));
+    if(nombre){ const l=await db.liquidacionesCerca(nombre, asig.a.fecha_pago||asig.a.recibido_en); setAsig(x=>x&&x.operador===nombre?{...x,liqs:l}:x); }
+  };
+  const confirmarAsignar=async()=>{ if(!asig.operador||!asig.sede) return; setBusy(true);
+    try{ const r=await db.asignarAbono(asig.a.id, asig.operador, asig.sede, quien, asig.motivo, asig.liqId||null);
+      if(r&&r.ok){ showToast(r.liquidacion?("Abono asignado y liquidación corregida ✓"):(r.aviso||"Abono asignado ✓"),"ok"); setAsig(null); await cargar(); }
+      else showToast((r&&r.error)||"No se pudo asignar","err"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
   const confirmarLiberar=async()=>{ setBusy(true);
     try{ await db.liberarAbono(conf.a.id,quien); setConf(null); await cargar(); showToast("Abono liberado: vuelve a la lista del POS ✓","ok"); }
     catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
@@ -8404,13 +8430,49 @@ function AbonosQR({showToast, quien, rol}){
                   <td>{a.reclamado_en ? <span className="pill pill-prod">✓ {a.reclamado_por} · {a.reclamado_sede}</span> : <span className="pill pill-off" style={{color:"var(--red)"}}>Sin reclamar</span>}</td>
                   <td className="muted" style={{whiteSpace:"nowrap"}}>{a.reclamado_en?hora(a.reclamado_en):"—"}</td>
                   <td className="num muted" title="Tiempo entre que entró el pago y que el cajero lo verificó">{dem===null?"—":dem<60?(dem+" min"):(Math.round(dem/60)+" h")}</td>
-                  <td>{a.reclamado_en && rol==='admin' && <button className="btn btn-ghost btn-sm" onClick={()=>liberar(a)}>Liberar</button>}</td>
+                  <td>{rol==='admin' && (a.reclamado_en ? <button className="btn btn-ghost btn-sm" onClick={()=>liberar(a)}>Liberar</button> : <button className="btn btn-amber btn-sm" onClick={()=>abrirAsignar(a)}>Asignar</button>)}</td>
                 </tr>);})}
             </tbody>
           </table>
           {vis.length>400 && <div className="muted" style={{padding:12}}>Mostrando 400 de {vis.length}.</div>}
         </div>
       </div>)}
+
+      {asig && (
+        <div className="modal-bg" onClick={()=>!busy&&setAsig(null)}>
+          <div className="modal" style={{maxWidth:520}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Asignar abono de {fmt(asig.a.valor)}</div>
+            <div className="muted" style={{fontSize:13,marginBottom:10}}>{asig.a.pagador?("👤 "+asig.a.pagador+" · "):""}{hora(asig.a.fecha_pago)}{asig.a.banco?(" · "+asig.a.banco):""}. Queda a nombre del cajero como si él lo hubiera verificado, con la nota de que lo asignaste tú.</div>
+            {emps===null ? <div className="empty">Cargando cajeros…</div> : (<div>
+              <label className="label">Cajero</label>
+              <select className="select" value={asig.operador} onChange={e=>elegirCajero(e.target.value)}>
+                <option value="">— Elige el cajero —</option>
+                {emps.map(e=><option key={e.id} value={e.nombre}>{e.nombre}{e.rol!=='cajero'?(" ("+e.rol+")"):""}</option>)}
+              </select>
+              <label className="label">Sede</label>
+              <select className="select" value={asig.sede} onChange={e=>setAsig(x=>({...x,sede:e.target.value}))}>
+                <option value="">— Elige la sede —</option>
+                {todasSedes.map(sd=><option key={sd} value={sd}>{sd}</option>)}
+              </select>
+              {asig.operador && (<div>
+                <label className="label">Liquidación a la que pertenece <span className="muted">(opcional: corrige su QR verificado)</span></label>
+                {asig.liqs.length===0 ? <div className="muted" style={{marginBottom:10}}>Ese cajero no tiene liquidaciones cerca de la fecha del pago.</div> : (
+                  <div style={{marginBottom:10}}>
+                    <label className="check"><input type="radio" name="liq" checked={!asig.liqId} onChange={()=>setAsig(x=>({...x,liqId:""}))}/> Ninguna (solo asignar el abono)</label>
+                    {asig.liqs.map(l=>(<label key={l.id} className="check"><input type="radio" name="liq" checked={asig.liqId===l.id} onChange={()=>setAsig(x=>({...x,liqId:l.id}))}/>
+                      <span>{l.num_recibo||"—"} · {l.fecha} · {l.sede} · QR {fmt(l.qr)}{l.qr_verificado!=null?(" · sin verificar "+fmt(l.qr_sin_verificar||0)):""}{l.estado==='conciliada'?" · conciliada":""}</span></label>))}
+                  </div>)}
+              </div>)}
+              <label className="label">Motivo (opcional)</label>
+              <input className="input" placeholder="Ej: el cajero olvidó reclamarlo" value={asig.motivo} onChange={e=>setAsig(x=>({...x,motivo:e.target.value}))}/>
+            </div>)}
+            <div className="modal-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={()=>setAsig(null)}>Cancelar</button>
+              <button className="btn btn-amber" disabled={busy||!asig.operador||!asig.sede} onClick={confirmarAsignar}>{busy?"Asignando…":"Asignar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {conf && (
         <div className="modal-bg" onClick={()=>!busy&&setConf(null)}>

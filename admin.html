@@ -1515,6 +1515,11 @@ const db = {
     if(f.desde) q=q.gte('fecha',f.desde);
     const {data,error}=await q; if(error) throw error; return data||[];
   },
+  async borrarDescuento(id){
+    if(DEMO_MODE) return;
+    // solo descuentos manuales (sin ciclo) que no se hayan aplicado en nómina
+    const {error}=await sb.from('recaudo_descuentos').delete().eq('id',id).is('ciclo_id',null).eq('aplicado',false); if(error) throw error;
+  },
   async marcarDescuento(id, aplicado, quien){
     if(DEMO_MODE) return;
     const {error}=await sb.from('recaudo_descuentos').update(aplicado?{aplicado:true,aplicado_en:new Date().toISOString(),aplicado_por:quien||null}:{aplicado:false,aplicado_en:null,aplicado_por:null}).eq('id',id); if(error) throw error;
@@ -8233,6 +8238,9 @@ function DescuentosQuincena({showToast, quien, sedes}){
   const [fSede,setFSede]=useState("");
   const [fQ,setFQ]=useState("");
   const [busy,setBusy]=useState(false);
+  const [nuevo,setNuevo]=useState(null);          // descuento manual en edición: {operador, sede, fecha, valor, motivo}
+  const [emps,setEmps]=useState(null);            // empleados activos (para elegir el operador)
+  const [borrar,setBorrar]=useState(null);        // descuento manual a eliminar (confirmación)
   const load=async()=>{ try{ const d=new Date(); d.setMonth(d.getMonth()-6); setRows(await db.listDescuentos({desde:fLocalDia(d)})); }catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
   useEffect(()=>{ load(); },[]);
   if(!rows) return <div className="empty">Cargando…</div>;
@@ -8244,12 +8252,28 @@ function DescuentosQuincena({showToast, quien, sedes}){
   const total=vis.reduce((a,r)=>a+(Number(r.valor)||0),0), pend=vis.filter(r=>!r.aplicado).reduce((a,r)=>a+(Number(r.valor)||0),0);
   const marcar=async(r,ap)=>{ if(busy) return; setBusy(true); try{ await db.marcarDescuento(r.id,ap,quien); await load(); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
   const marcarTodos=async(g)=>{ if(busy) return; setBusy(true); try{ for(const r of g.items.filter(x=>!x.aplicado)) await db.marcarDescuento(r.id,true,quien); await load(); showToast("Marcados como aplicados en nómina ✓"); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
+  // ---- descuento manual (2026-10-20): el admin lo asigna directo, sin pasar por el reparto ----
+  const sedesOp=(sedes||[]).filter(x=>!x.es_bodega).map(x=>x.nombre);
+  const abrirNuevo=async()=>{
+    setNuevo({operador:"", sede:fSede||"", fecha:fLocalDia(new Date()), valor:"", motivo:""});
+    if(emps===null){ try{ const e=await db.listEmpleados(); setEmps(e.filter(x=>x.activo)); }catch(e){ setEmps([]); } }
+  };
+  const elegirOp=(nombre)=>{ const e=(emps||[]).find(x=>x.nombre===nombre); setNuevo(n=>({...n, operador:nombre, sede:n.sede||((e&&e.sedes&&e.sedes[0])||"")})); };
+  const nuevoOk=nuevo && nuevo.operador && nuevo.sede && nuevo.fecha && Number(nuevo.valor)>0 && nuevo.motivo.trim();
+  const guardarNuevo=async()=>{ if(!nuevoOk||busy) return; setBusy(true);
+    try{ const qn=quincenaDe(nuevo.fecha);
+      await db.guardarDescuentos([{ciclo_id:null, sede:nuevo.sede, operador:nuevo.operador, valor:Number(nuevo.valor), motivo:nuevo.motivo.trim(), fecha:nuevo.fecha, quincena:qn, tesorero:quien||null}]);
+      setNuevo(null); await load(); setFQ(qn); showToast("Descuento asignado a "+nuevo.operador+" ✓","ok"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
+  const confirmarBorrar=async()=>{ if(busy) return; setBusy(true);
+    try{ await db.borrarDescuento(borrar.id); setBorrar(null); await load(); showToast("Descuento eliminado","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>💸 Descuentos de quincena por descuadre.</b> <span className="muted">Los asigna el tesorero en el paso Reparto de cada ciclo. Aquí se ve cuánto descontarle a cada operador en la nómina y se marca cuando ya se aplicó.</span>
+        <b style={{color:"var(--amber)"}}>💸 Descuentos de quincena por descuadre.</b> <span className="muted">Los asigna el tesorero en el paso Reparto de cada ciclo, o el administrador a mano con "Descuento manual". Aquí se ve cuánto descontarle a cada operador en la nómina y se marca cuando ya se aplicó.</span>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <button className="btn btn-amber btn-sm" disabled={busy||!!nuevo} onClick={abrirNuevo}>➕ Descuento manual</button>
         <select className="select" style={{maxWidth:220,margin:0}} value={q} onChange={e=>setFQ(e.target.value)}>
           {quincenas.length===0 && <option value="">Sin descuentos todavía</option>}{quincenas.map(x=><option key={x} value={x}>{quincenaLbl(x)}</option>)}
         </select>
@@ -8258,6 +8282,38 @@ function DescuentosQuincena({showToast, quien, sedes}){
         </select>
         <button className="btn btn-ghost btn-sm" onClick={load}>↻ Actualizar</button>
       </div>
+      {nuevo && (
+        <div className="card" style={{marginBottom:12,border:"1px solid var(--amber)"}}>
+          <div style={{fontWeight:800,marginBottom:8}}>➕ Descuento manual</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <div style={{flex:"1 1 180px"}}><div className="muted" style={{fontSize:11}}>Operador</div>
+              <select className="select" style={{margin:0}} value={nuevo.operador} onChange={e=>elegirOp(e.target.value)}>
+                <option value="">{emps===null?"Cargando…":"Elige el operador"}</option>{(emps||[]).map(e=><option key={e.id||e.nombre} value={e.nombre}>{e.nombre}</option>)}
+              </select></div>
+            <div style={{flex:"1 1 150px"}}><div className="muted" style={{fontSize:11}}>Sede</div>
+              <select className="select" style={{margin:0}} value={nuevo.sede} onChange={e=>setNuevo(n=>({...n,sede:e.target.value}))}>
+                <option value="">Elige la sede</option>{sedesOp.map(x=><option key={x} value={x}>{x}</option>)}
+              </select></div>
+            <div style={{flex:"1 1 150px"}}><div className="muted" style={{fontSize:11}}>Fecha · {quincenaLbl(quincenaDe(nuevo.fecha||fLocalDia(new Date())))}</div>
+              <input type="date" className="input" style={{margin:0}} value={nuevo.fecha} onChange={e=>setNuevo(n=>({...n,fecha:e.target.value}))}/></div>
+            <div style={{flex:"1 1 120px"}}><div className="muted" style={{fontSize:11}}>Valor a descontar</div>
+              <input type="number" className="input" style={{margin:0}} inputMode="numeric" placeholder="$" value={nuevo.valor} onChange={e=>setNuevo(n=>({...n,valor:e.target.value}))}/></div>
+          </div>
+          <div style={{marginTop:8}}><div className="muted" style={{fontSize:11}}>Motivo (obligatorio)</div>
+            <input className="input" style={{margin:0}} placeholder="Ej: faltante de efectivo del 15/10, tokens perdidos…" value={nuevo.motivo} onChange={e=>setNuevo(n=>({...n,motivo:e.target.value}))}/></div>
+          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>setNuevo(null)}>Cancelar</button>
+            <button className="btn btn-amber btn-sm" disabled={busy||!nuevoOk} onClick={guardarNuevo}>{busy?"Guardando…":("Asignar "+(Number(nuevo.valor)>0?fmt(Number(nuevo.valor)):"descuento"))}</button>
+          </div>
+        </div>)}
+      {borrar && (
+        <div className="card" style={{marginBottom:12,border:"1px solid var(--red)"}}>
+          <b>¿Eliminar el descuento manual de {fmt(borrar.valor)} a {borrar.operador}?</b> <span className="muted">({borrar.motivo||"sin motivo"})</span>
+          <div style={{display:"flex",gap:8,marginTop:8,justifyContent:"flex-end"}}>
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>setBorrar(null)}>Cancelar</button>
+            <button className="btn btn-danger btn-sm" disabled={busy} onClick={confirmarBorrar}>Sí, eliminar</button>
+          </div>
+        </div>)}
       <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}}>
         <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Total de la quincena</div><div style={{fontSize:24,fontWeight:800,color:"var(--red)"}}>{fmt(total)}</div><div className="muted" style={{fontSize:11}}>{vis.length} descuentos · {grupos.length} operadores</div></div>
         <div className="card" style={{flex:"1 1 170px"}}><div className="muted">Pendiente de aplicar en nómina</div><div style={{fontSize:24,fontWeight:800,color:pend>0?"var(--amber)":"var(--green)"}}>{fmt(pend)}</div></div>
@@ -8271,8 +8327,8 @@ function DescuentosQuincena({showToast, quien, sedes}){
             {g.pend>0 ? <button className="btn btn-amber btn-sm" disabled={busy} onClick={()=>marcarTodos(g)}>✓ Aplicado en nómina</button> : <span className="pill pill-prod">✓ Aplicado</span>}
           </div>
           <table className="tbl" style={{marginTop:6}}><tbody>{g.items.map(r=>(
-            <tr key={r.id}><td className="muted" style={{whiteSpace:"nowrap"}}>{r.fecha}</td><td style={{fontSize:13}}>{r.motivo||<span className="muted">sin motivo</span>}{r.tesorero && <span className="muted" style={{fontSize:11}}> · {r.tesorero}</span>}</td><td className="num" style={{fontWeight:700}}>{fmt(r.valor)}</td>
-              <td style={{textAlign:"right"}}>{r.aplicado?<button className="btn btn-ghost btn-sm" disabled={busy} title={"Aplicado por "+(r.aplicado_por||"—")} onClick={()=>marcar(r,false)}>✓ aplicado</button>:<button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>marcar(r,true)}>marcar aplicado</button>}</td></tr>))}</tbody></table>
+            <tr key={r.id}><td className="muted" style={{whiteSpace:"nowrap"}}>{r.fecha}</td><td style={{fontSize:13}}>{!r.ciclo_id && <span className="pill pill-token" style={{marginRight:6}}>manual</span>}{r.motivo||<span className="muted">sin motivo</span>}{r.tesorero && <span className="muted" style={{fontSize:11}}> · {r.tesorero}</span>}</td><td className="num" style={{fontWeight:700}}>{fmt(r.valor)}</td>
+              <td style={{textAlign:"right"}}>{r.aplicado?<button className="btn btn-ghost btn-sm" disabled={busy} title={"Aplicado por "+(r.aplicado_por||"—")} onClick={()=>marcar(r,false)}>✓ aplicado</button>:<button className="btn btn-ghost btn-sm" disabled={busy} onClick={()=>marcar(r,true)}>marcar aplicado</button>}{!r.ciclo_id && !r.aplicado && <button className="btn btn-ghost btn-sm" disabled={busy} title="Eliminar descuento manual" onClick={()=>setBorrar(r)}>🗑</button>}</td></tr>))}</tbody></table>
         </div>))}
     </div>
   );

@@ -7843,8 +7843,9 @@ const MAQ_DEFAULT=['Máquina 1','Máquina 2','Máquina 3','Máquina 4','Máquina
 // ============================================================
 // ============ GRÁFICA DE LÍNEAS POR CICLO (la usan Saldos y Devoluciones) ============
 // pts: [{fecha,...}] en orden · series: [{nombre,color,vals:[n|null]}] · abajo(p): texto rojo bajo la fecha
-function GraficaCiclos({pts, series, porOp, abajo, desdeCero, paso}){
-  const W=760,H=230,padL=46,padR=16,padT=22,padB=30, st=paso||50;
+function GraficaCiclos({pts, series, porOp, abajo, desdeCero, paso, fmtV, padLeft}){
+  const W=760,H=230,padL=padLeft||46,padR=16,padT=22,padB=30, st=paso||50;
+  const fv=fmtV||(v=>v);   // cómo mostrar los valores (tokens: tal cual; dinero: compacto)
   const todos=series.flatMap(sr=>sr.vals).filter(v=>v!=null);
   const vMax=Math.max(...todos,1), vMin=desdeCero?0:Math.min(...todos);
   const lo=Math.max(0,Math.floor((vMin-(vMax-vMin)*0.15)/st)*st), hi=Math.ceil((vMax+(vMax-vMin)*0.15+1)/st)*st;
@@ -7856,14 +7857,14 @@ function GraficaCiclos({pts, series, porOp, abajo, desdeCero, paso}){
       <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}>
         {ticks.map(t=>(<g key={t}>
           <line x1={padL} y1={cy(t)} x2={W-padR} y2={cy(t)} style={{stroke:"var(--bd)"}} strokeDasharray="3 4"/>
-          <text x={padL-6} y={cy(t)+3} textAnchor="end" fontSize="10" style={{fill:"var(--td)"}}>{t}</text>
+          <text x={padL-6} y={cy(t)+3} textAnchor="end" fontSize="10" style={{fill:"var(--td)"}}>{fv(t)}</text>
         </g>))}
         {series.map(sr=>{ const seg=sr.vals.map((v,i)=>v==null?null:cx(i)+','+cy(v)).filter(Boolean).join(' ');
           return (<g key={sr.nombre}>
             {pts.length>1 && <polyline points={seg} fill="none" style={{stroke:sr.color}} strokeWidth={porOp?2:3} strokeDasharray={sr.punteada?"6 4":undefined}/>}
             {sr.vals.map((v,i)=>v==null?null:(<g key={i}>
               <circle cx={cx(i)} cy={cy(v)} r={porOp?3:4.5} style={{fill:sr.color}}/>
-              {(!porOp || pts.length<=12) && <text x={cx(i)} y={cy(v)-9} textAnchor="middle" fontSize="10" fontWeight="700" style={{fill:sr.color}}>{v}</text>}
+              {(!porOp || pts.length<=12) && <text x={cx(i)} y={cy(v)-9} textAnchor="middle" fontSize="10" fontWeight="700" style={{fill:sr.color}}>{fv(v)}</text>}
             </g>))}
           </g>); })}
         {pts.map((p,i)=>{ const b=abajo?abajo(p):null; return (<g key={p.fecha}>
@@ -8013,6 +8014,68 @@ function SaldosTendencia({sede}){
             </tr>); })}</tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ============ TENDENCIA DEL DINERO A CONSIGNAR (Recaudo → Historial) ============
+// Un punto por ciclo cerrado de la sede: lo que quedó para consignar (recaudo − gastos).
+const fmtCompacto = v => { const n=Number(v)||0, a=Math.abs(n); const t=a>=1e6?((a/1e6).toFixed(1).replace('.',',')+' M'):a>=1000?(Math.round(a/1000)+' k'):String(a); return (n<0?'-$':'$')+t; };
+function ConsignarTendencia({sedes}){
+  const lista=(sedes||[]).filter(x=>!x.es_bodega).map(x=>x.nombre);
+  const [sede,setSede]=useState(lista[0]||"");
+  const [ciclos,setCiclos]=useState(null);
+  const [n,setN]=useState(12);
+  const [conRecaudo,setConRecaudo]=useState(true);
+  useEffect(()=>{ if(!sede && lista[0]) setSede(lista[0]); },[lista.join('|')]);
+  useEffect(()=>{ if(!sede) return; let vivo=true; setCiclos(null);
+    db.recCiclos({sede}).then(cs=>{ if(vivo) setCiclos((cs||[]).filter(c=>c.estado==='cerrado')); }).catch(()=>{ if(vivo) setCiclos([]); });
+    return ()=>{ vivo=false; }; },[sede]);
+  const pts=(ciclos||[]).map(c=>({ fecha:c.fecha, consignar:Number(c.a_consignar)||0, recaudo:Number(c.total_recaudo)||0, gastos:Number(c.total_gastos)||0, descuadre:Number(c.total_descuadre)||0, tesorero:c.tesorero }))
+    .sort((a,b)=>a.fecha<b.fecha?-1:(a.fecha>b.fecha?1:0)).slice(-n);
+  const series=[{nombre:"A consignar",color:"var(--green)",vals:pts.map(p=>p.consignar)}]
+    .concat(conRecaudo?[{nombre:"Total recaudo",color:"var(--blue)",punteada:true,vals:pts.map(p=>p.recaudo)}]:[]);
+  const ult=pts[pts.length-1], prev=pts.length>1?pts[pts.length-2]:null;
+  const delta=prev?ult.consignar-prev.consignar:null;
+  const suma=pts.reduce((a,p)=>a+p.consignar,0), prom=pts.length?suma/pts.length:0;
+  return (
+    <div className="card" style={{marginBottom:12}}>
+      <div className="toolbar" style={{marginBottom:6,gap:8,flexWrap:"wrap"}}>
+        <div className="sec-title" style={{fontSize:14,marginRight:"auto"}}>📈 Cómo se mueve el dinero a consignar <span className="muted">· por ciclo</span></div>
+        <select className="select" style={{maxWidth:170,margin:0}} value={sede} onChange={e=>setSede(e.target.value)}>{lista.map(x=><option key={x} value={x}>{x}</option>)}</select>
+        <select className="select" style={{maxWidth:150,margin:0}} value={n} onChange={e=>setN(Number(e.target.value))}>
+          <option value={8}>Últimos 8 ciclos</option><option value={12}>Últimos 12 ciclos</option><option value={20}>Últimos 20 ciclos</option><option value={300}>Todos</option>
+        </select>
+        <button className={"btn btn-sm "+(conRecaudo?'btn-amber':'btn-ghost')} onClick={()=>setConRecaudo(v=>!v)}>{conRecaudo?"Ocultar recaudo":"Ver total recaudo"}</button>
+      </div>
+      {ciclos===null && <div className="empty">Cargando ciclos…</div>}
+      {ciclos!==null && pts.length===0 && <div className="empty">Esta sede aún no tiene ciclos cerrados.</div>}
+      {pts.length>0 && (<div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:8}}>
+          <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Último ciclo</div><div style={{fontSize:20,fontWeight:800,color:"var(--green)"}}>{fmt(ult.consignar)}</div><div className="muted" style={{fontSize:11}}>{ult.fecha} · {ult.tesorero||"—"}</div></div>
+          <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Frente al ciclo anterior</div><div style={{fontSize:20,fontWeight:800,color:delta==null?"var(--td)":delta<0?"var(--red)":"var(--green)"}}>{delta==null?"—":(delta>0?"+":"")+fmt(delta)}</div><div className="muted" style={{fontSize:11}}>{prev?("antes "+fmt(prev.consignar)):"sin ciclo anterior"}</div></div>
+          <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Promedio por ciclo</div><div style={{fontSize:20,fontWeight:800}}>{fmt(Math.round(prom))}</div><div className="muted" style={{fontSize:11}}>{pts.length} ciclos</div></div>
+          <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Consignado en el rango</div><div style={{fontSize:20,fontWeight:800}}>{fmt(suma)}</div><div className="muted" style={{fontSize:11}}>gastos {fmt(pts.reduce((a,p)=>a+p.gastos,0))}</div></div>
+        </div>
+        <GraficaCiclos pts={pts} series={series} porOp={conRecaudo} paso={100000} padLeft={58} fmtV={fmtCompacto} abajo={p=>p.descuadre<0?fmtCompacto(p.descuadre):null}/>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:6}}>{series.map(sr=>(<span key={sr.nombre} style={{fontSize:12,display:"flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:5,background:sr.color,display:"inline-block"}}/>{sr.nombre}</span>))}</div>
+        <div className="muted" style={{fontSize:11,marginTop:6}}>Cada punto es lo que quedó para consignar al cerrar ese ciclo (total recaudo menos gastos). En rojo, debajo de la fecha, el descuadre en contra de ese ciclo.</div>
+        <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
+          <table className="tbl">
+            <thead><tr><th>Ciclo</th><th>Tesorero</th><th className="num">Total recaudo</th><th className="num">Gastos</th><th className="num">Descuadre</th><th className="num">A consignar</th><th className="num">Cambio</th></tr></thead>
+            <tbody>{[...pts].reverse().map((p,i,arr)=>{ const ant=arr[i+1]; const d=ant?p.consignar-ant.consignar:null; return (
+              <tr key={p.fecha}>
+                <td className="muted" style={{whiteSpace:"nowrap"}}>{p.fecha}</td>
+                <td className="muted">{p.tesorero||"—"}</td>
+                <td className="num">{fmt(p.recaudo)}</td>
+                <td className="num">{p.gastos?fmt(p.gastos):"—"}</td>
+                <td className="num" style={{color:p.descuadre?"var(--red)":"var(--green)"}}>{p.descuadre?fmt(p.descuadre):"—"}</td>
+                <td className="num" style={{fontWeight:800}}>{fmt(p.consignar)}</td>
+                <td className="num" style={{color:d==null?"var(--td)":d<0?"var(--red)":d>0?"var(--green)":"var(--td)"}}>{d==null?"—":(d>0?"+":"")+fmt(d)}</td>
+              </tr>); })}</tbody>
+          </table>
+        </div>
+      </div>)}
     </div>
   );
 }
@@ -9753,6 +9816,7 @@ function Recaudo({showToast, quien, rol}){
         </div>
       )}
 
+      {paso==='historial' && <ConsignarTendencia sedes={sedes}/>}
       {paso==='historial' && (
         <div className="card" style={{padding:0,overflowX:"auto"}}>
           <table className="tbl">

@@ -1741,7 +1741,7 @@ function App(){
         const NAV = auth.rol==='tesorero'
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
-          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
+          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["celdas","🚿","Lavado de celdas"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
           : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (

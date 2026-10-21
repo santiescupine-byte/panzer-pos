@@ -1407,9 +1407,11 @@ const db = {
     const {data,error}=await q; if(error) throw error; return data||[];
   },
   // ---- Arqueos por supervisor ----
-  async guardarArqueo(reg){
-    if(DEMO_MODE) return {id:uid()};
-    const {data,error}=await sb.from('arqueos_inventario').insert(reg).select('id').single(); if(error) throw error; return data;
+  // Arqueo directo: guarda y aplica las diferencias al stock de la sede en una sola transacción
+  async registrarArqueo(reg){
+    if(DEMO_MODE) return {ok:true, id:uid(), ajustes:0};
+    const {data,error}=await sb.rpc('registrar_arqueo',{p_sede:reg.sede, p_supervisor:reg.supervisor, p_testigo:reg.testigo, p_items:reg.items, p_nota:reg.nota||null});
+    if(error) throw new Error("Sin conexión con el sistema. Intenta de nuevo."); return data;
   },
   async listArqueos(f={}){
     if(DEMO_MODE) return [];
@@ -1433,12 +1435,12 @@ const db = {
   // último arqueo APROBADO por sede → {sede: aprobado_en}
   async ultimosArqueos(){
     if(DEMO_MODE) return {};
-    const {data,error}=await sb.from('arqueos_inventario').select('sede,aprobado_en,created_at').eq('estado','aprobado').order('aprobado_en',{ascending:false}).limit(500);
+    const {data,error}=await sb.from('arqueos_inventario').select('sede,aprobado_en,created_at').in('estado',['aprobado','aplicado']).order('aprobado_en',{ascending:false}).limit(500);
     if(error) return {}; const m={}; (data||[]).forEach(a=>{ if(!m[a.sede]) m[a.sede]=a.aprobado_en||a.created_at; }); return m;
   },
   async listAjustesDesde(desdeISO, sede){
     if(DEMO_MODE) return [];
-    let q=sb.from('movimientos_inventario').select('producto_id,sede,cantidad,created_at,operador,nota').eq('tipo','ajuste').gte('created_at',desdeISO).order('created_at',{ascending:true}).limit(3000);
+    let q=sb.from('movimientos_inventario').select('producto_id,sede,tipo,cantidad,created_at,operador,nota').in('tipo',['ajuste','transferencia','reabastecimiento']).gte('created_at',desdeISO).order('created_at',{ascending:true}).limit(5000);
     if(sede) q=q.eq('sede',sede);
     const {data,error}=await q; if(error) return []; return data||[];
   },
@@ -4854,11 +4856,9 @@ function Arqueo({showToast, quien, onGuardado}){
     try{
       const items=inv.map(p=>{ const sistema=Number(p.stock)||0, contado=Number(counts[p.id])||0; return {producto_id:p.id, nombre:p.nombre, categoria:p.categoria||null, sistema, contado, diferencia:contado-sistema, costo:costos[p.id]||0}; });
       const falt=items.filter(i=>i.diferencia<0), sobr=items.filter(i=>i.diferencia>0);
-      const reg={sede, supervisor:quien, testigo, estado:'pendiente', items, total_items:items.length, n_diferencias:items.filter(i=>i.diferencia!==0).length,
-        unidades_faltantes:falt.reduce((a,i)=>a-i.diferencia,0), unidades_sobrantes:sobr.reduce((a,i)=>a+i.diferencia,0),
-        valor_faltante:falt.reduce((a,i)=>a+(-i.diferencia)*(i.costo||0),0), nota:nota.trim()||null};
-      const r=await db.guardarArqueo(reg);
-      setHecho({id:r&&r.id, n:items.length, sede, testigo}); setCounts({}); setSede("");
+      const r=await db.registrarArqueo({sede, supervisor:quien, testigo, items, nota:nota.trim()||null});
+      if(!r||!r.ok){ showToast((r&&r.error)||"No se pudo guardar el arqueo","err"); setBusy(false); return; }
+      setHecho({id:r.id, n:items.length, ajustes:r.ajustes, sede, testigo}); setCounts({}); setSede("");
       if(onGuardado) onGuardado();
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false); };
@@ -4867,14 +4867,14 @@ function Arqueo({showToast, quien, onGuardado}){
     <div className="card" style={{textAlign:"center",padding:28}}>
       <div style={{fontSize:40}}>📋</div>
       <div style={{fontSize:18,fontWeight:800,marginTop:6}}>Arqueo de {hecho.sede} guardado</div>
-      <div className="muted" style={{marginTop:6}}>{hecho.n} productos contados · testigo: {hecho.testigo}. Queda pendiente de aprobación del administrador; el stock no cambia hasta entonces.</div>
+      <div className="muted" style={{marginTop:6}}>{hecho.n} productos contados · testigo: {hecho.testigo}. El stock de {hecho.sede} ya quedó como se contó ({hecho.ajustes} producto(s) ajustados). Desde este arqueo arrancan los controles de la sede.</div>
       <button className="btn btn-amber" style={{marginTop:16}} onClick={()=>setHecho(null)}>Hacer otro arqueo</button>
     </div>);
 
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>📋 Arqueo de inventario.</b> <span className="muted">Cuenta físicamente TODOS los productos de la sede con el cajero de turno al lado (queda como testigo). No verás el stock del sistema: el administrador compara y aprueba. Nada cambia hasta que apruebe.</span>
+        <b style={{color:"var(--amber)"}}>📋 Arqueo de inventario.</b> <span className="muted">Cuenta físicamente TODOS los productos de la sede con el cajero de turno al lado (queda como testigo). No verás el stock del sistema mientras cuentas. Al guardar, el stock de la sede queda exactamente como lo contaste, así que cuenta con calma y recuenta lo que dude.</span>
       </div>
       <div className="filterbar">
         <div className="fld"><label className="label">Sede</label>
@@ -4902,7 +4902,7 @@ function Arqueo({showToast, quien, onGuardado}){
           </div>
           <div style={{marginTop:10}}><input className="input" placeholder="Nota (opcional): novedades del conteo…" value={nota} onChange={e=>setNota(e.target.value)}/></div>
           <div style={{display:"flex",justifyContent:"flex-end",marginTop:10}}>
-            <button className="btn btn-amber" disabled={!listo||busy} onClick={guardar}>{busy?"Guardando…":!testigo?"Elige el cajero testigo":contados<total?("Faltan "+(total-contados)+" por contar"):"💾 Guardar arqueo"}</button>
+            <button className="btn btn-amber" disabled={!listo||busy} onClick={guardar}>{busy?"Guardando…":!testigo?"Elige el cajero testigo":contados<total?("Faltan "+(total-contados)+" por contar"):"💾 Guardar arqueo y actualizar stock"}</button>
           </div>
         </div>)}
     </div>
@@ -4925,12 +4925,12 @@ function Arqueos({showToast, admin}){
   const [cruce,setCruce]=useState(null);   // {desde, porProd:{NOMBRE:{perdida, ops:{op:unidades}}}, totalTurnos}
   const cargarCruce=async(a)=>{ setCruce(null);
     try{
-      const ant=(rows||[]).filter(x=>x.sede===a.sede && x.estado==='aprobado' && x.id!==a.id && x.created_at<a.created_at).sort((x,y)=>y.created_at.localeCompare(x.created_at))[0];
+      const ant=(rows||[]).filter(x=>x.sede===a.sede && (x.estado==='aprobado'||x.estado==='aplicado') && x.id!==a.id && x.created_at<a.created_at).sort((x,y)=>y.created_at.localeCompare(x.created_at))[0];
       const desde=ant?(ant.aprobado_en||ant.created_at):new Date(new Date(a.created_at).getTime()-30*86400000).toISOString();
       const d0=new Date(new Date(desde).getTime()-10*86400000).toISOString();
       const [cs,aj,ps]=await Promise.all([db.listChequeosDesde(d0,a.sede), db.listAjustesDesde(d0,a.sede), db.listProductos()]);
       const idNombre={}; (ps||[]).forEach(p=>{ idNombre[p.id]=p.nombre; });
-      const turnos=calcularFaltantes(cs.filter(c=>c.created_at<=a.created_at), aj, idNombre, ()=>0, 0).filter(t=>t.fin>desde && t.fin<=a.created_at);
+      const turnos=calcularFaltantes(cs.filter(c=>c.created_at<=a.created_at), aj, idNombre, ()=>0, 0, (rows||[]).filter(x=>(x.estado==='aprobado'||x.estado==='aplicado') && x.id!==a.id)).filter(t=>t.fin>desde && t.fin<=a.created_at);
       const porProd={}; let totalTurnos=0;
       turnos.forEach(t=>t.perdidos.forEach(i=>{ const k=String(i.nombre).trim().toUpperCase(); const p=porProd[k]||(porProd[k]={perdida:0,ops:{}}); p.perdida+=i.perdida; p.ops[t.operador]=(p.ops[t.operador]||0)+i.perdida; totalTurnos+=i.perdida; }));
       setCruce({desde, porProd, totalTurnos, nTurnos:turnos.length, primero:!ant});
@@ -4944,7 +4944,7 @@ function Arqueos({showToast, admin}){
     catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); setConf(null); };
   const anular=async()=>{ if(busy) return; setBusy(true);
     try{ await db.anularArqueo(det.a.id, admin); showToast("Arqueo anulado","ok"); setDet(null); await load(); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); setConf(null); };
-  const pillEstado=e=>e==='aprobado'?<span className="pill pill-prod">aprobado</span>:e==='anulado'?<span className="pill pill-off">anulado</span>:<span className="pill pill-token">pendiente</span>;
+  const pillEstado=e=>e==='aplicado'?<span className="pill pill-prod">aplicado</span>:e==='aprobado'?<span className="pill pill-prod">aprobado</span>:e==='anulado'?<span className="pill pill-off">anulado</span>:<span className="pill pill-token">pendiente</span>;
   if(hacer) return <div><button className="btn btn-ghost" style={{marginBottom:10}} onClick={()=>{ setHacer(false); load(); }}>← Volver a arqueos</button><Arqueo showToast={showToast} quien={admin} onGuardado={load}/></div>;
   if(rows===null) return <div className="empty">Cargando arqueos…</div>;
   const pend=rows.filter(r=>r.estado==='pendiente').length;
@@ -4954,11 +4954,11 @@ function Arqueos({showToast, admin}){
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>📋 Arqueos por supervisor.</b> <span className="muted">Conteo ciego de toda la sede con cajero testigo. Al aprobarlo, el stock queda como se contó y ese arqueo es el punto de partida: lo anterior se da por liquidado y cada turno se mide desde una base limpia. Quien cuenta no aprueba.</span>
+        <b style={{color:"var(--amber)"}}>📋 Arqueos por supervisor.</b> <span className="muted">Conteo ciego de toda la sede con cajero testigo. Al guardarlo, el stock queda como se contó y ese arqueo es el punto de partida: lo anterior se da por liquidado y cada turno se mide desde una base limpia. Aquí ves qué encontró cada arqueo y cuánto de eso ya lo explicaban los turnos.</span>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <button className="btn btn-amber btn-sm" onClick={()=>setHacer(true)}>➕ Hacer arqueo</button>
-        {pend>0 && <span className="pill pill-token">{pend} pendiente(s) de aprobar</span>}
+        {pend>0 && <span className="pill pill-token">{pend} pendiente(s) de aprobar (arqueos viejos)</span>}
         <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={load}>↻ Actualizar</button>
       </div>
       <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
@@ -4985,7 +4985,7 @@ function Arqueos({showToast, admin}){
         <div className="modal-bg" onClick={()=>setDet(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:820}}>
             <div className="modal-t">📋 Arqueo — {det.a.sede} {pillEstado(det.a.estado)}</div>
-            <div className="muted" style={{marginBottom:10}}>{fLocalDia(det.a.created_at)} {fLocalHora(det.a.created_at)} · contó <b>{det.a.supervisor}</b> · testigo <b>{det.a.testigo}</b>{det.a.nota?(" · "+det.a.nota):""}{det.a.estado==='aprobado'?(" · aprobado por "+det.a.aprobado_por+" el "+fLocalDia(det.a.aprobado_en)+" ("+(det.a.ajustes||0)+" ajustes)"):""}</div>
+            <div className="muted" style={{marginBottom:10}}>{fLocalDia(det.a.created_at)} {fLocalHora(det.a.created_at)} · contó <b>{det.a.supervisor}</b> · testigo <b>{det.a.testigo}</b>{det.a.nota?(" · "+det.a.nota):""}{det.a.estado==='aprobado'?(" · aprobado por "+det.a.aprobado_por+" el "+fLocalDia(det.a.aprobado_en)+" ("+(det.a.ajustes||0)+" ajustes)"):det.a.estado==='aplicado'?(" · stock actualizado al guardar ("+(det.a.ajustes||0)+" ajustes)"):""}</div>
             <div className="kpis">
               <div className="kpi"><div className="kpi-label">Productos</div><div className="kpi-value">{det.a.total_items}</div></div>
               <div className="kpi"><div className="kpi-label">Con diferencia</div><div className="kpi-value" style={{color:det.a.n_diferencias>0?"var(--red)":"var(--green)"}}>{det.a.n_diferencias}</div></div>
@@ -5039,14 +5039,16 @@ function Arqueos({showToast, admin}){
 // se perdió en el turno de quien hizo el chequeo anterior (el chequeo es al iniciar turno).
 // Un faltante que se "recupera" en el chequeo siguiente se marca como probable error de conteo.
 // Los ajustes que hace el admin entre chequeos se descuentan para no leerlos como pérdida/recuperación.
-function calcularFaltantes(chequeos, ajustes, idNombre, costoDe, tol){
+function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos){
   const norm=x=>String(x||'').trim().toUpperCase();
+  const DIA=86400000, TOPE=7*DIA, ahora=Date.now();
   const porSede={}; chequeos.forEach(c=>{ (porSede[c.sede]=porSede[c.sede]||[]).push(c); });
-  const turnos=[];
+  const salida=[];
   Object.entries(porSede).forEach(([sede,cs])=>{
     cs.sort((a,b)=>a.created_at.localeCompare(b.created_at));
-    const ajSede=ajustes.filter(a=>a.sede===sede);
-    const prevTurnoDe={};   // producto → última entrada (para detectar reversos)
+    const ajSede=(movs||[]).filter(m=>m.sede===sede && (m.tipo||'ajuste')==='ajuste');
+    const entSede=(movs||[]).filter(m=>m.sede===sede && (m.tipo==='transferencia'||m.tipo==='reabastecimiento') && Number(m.cantidad)>0);
+    const turnos=[]; const prevTurnoDe={};
     for(let i=1;i<cs.length;i++){
       const prev=cs[i-1], cur=cs[i];
       const dPrev={}, dCur={};
@@ -5056,12 +5058,12 @@ function calcularFaltantes(chequeos, ajustes, idNombre, costoDe, tol){
       const t={id:cur.id, sede, operador:String(prev.operador||'').trim(), inicio:prev.created_at, fin:cur.created_at, contadoPor:String(cur.operador||'').trim(), ultimo:i===cs.length-1, items:[]};
       const claves=new Set([...Object.keys(dPrev),...Object.keys(dCur),...Object.keys(aj)]);
       claves.forEach(k=>{
-        const antes=dPrev[k]?dPrev[k].dif:0, ahora=dCur[k]?dCur[k].dif:0, a=aj[k]||0;
-        const delta=ahora-antes+a;           // + a: si el admin ajustó −2, el sistema ya bajó y no es "recuperado"
+        const antes=dPrev[k]?dPrev[k].dif:0, ahoraD=dCur[k]?dCur[k].dif:0, a=aj[k]||0;
+        const delta=ahoraD-antes+a;           // + a: si el admin ajustó −2, el sistema ya bajó y no es "recuperado"
         if(delta===0) return;
         const nombre=(dCur[k]||dPrev[k]||{}).nombre||k;
-        const it={nombre, antes, ahora, ajuste:a, delta, err:0, estado:'', costo:costoDe(k)};
-        // reverso contra el turno inmediatamente anterior (mismo producto, misma sede) → error de conteo
+        const it={nombre, antes, ahora:ahoraD, ajuste:a, delta, err:0, estado:'', costo:costoDe(k)};
+        // reverso contra el turno inmediatamente anterior (mismo producto) → error de conteo
         const pv=prevTurnoDe[k];
         if(pv && pv.turnoIdx===turnos.length-1 && Math.sign(pv.it.delta)===-Math.sign(delta)){
           const neto=Math.min(Math.abs(pv.it.delta)-pv.it.err, Math.abs(delta));
@@ -5071,25 +5073,64 @@ function calcularFaltantes(chequeos, ajustes, idNombre, costoDe, tol){
       });
       turnos.push(t);
     }
+    // unidades reales (lo que no explica un error de conteo)
+    turnos.forEach(t=>t.items.forEach(it=>{ const real=Math.abs(it.delta)-it.err; it.perdida=it.delta<0?real:0; it.recuperado=it.delta>0?real:0; it.subsanado=0; it.usado=0; }));
+    // Ventana de subsanación: una pérdida se puede subsanar con reapariciones posteriores del mismo producto
+    // hasta que el responsable vuelva a contar la sede (su siguiente chequeo), con tope de 7 días.
+    // Si entre la pérdida y la reaparición entró una transferencia/reabastecimiento del producto → "revisar".
+    turnos.forEach((t,ti)=>{ t.items.filter(it=>it.perdida>0).forEach(it=>{
+      const k=norm(it.nombre), tFin=new Date(t.fin).getTime();
+      const vuelve=turnos.slice(ti+1).find(t2=>t2.contadoPor===t.operador);
+      // un arqueo aprobado posterior a la pérdida cierra la ventana: es un conteo con supervisor y testigo
+      const arq=(arqueos||[]).filter(a=>a.sede===sede && (a.estado==='aprobado'||a.estado==='aplicado') && a.created_at>t.fin).sort((a,b)=>a.created_at.localeCompare(b.created_at))[0];
+      const tArq=arq?new Date(arq.created_at).getTime():Infinity;
+      const finVentana=Math.min(vuelve?new Date(vuelve.fin).getTime():Infinity, tFin+TOPE, tArq);
+      it.vuelveEn=vuelve?vuelve.fin:null; it.ventanaCerrada=finVentana<=ahora;
+      it.porArqueo=arq && finVentana===tArq; it.arqueoEn=arq?arq.created_at:null;
+      it.porTope=!it.porArqueo && (!vuelve||new Date(vuelve.fin).getTime()>tFin+TOPE);
+      let restante=it.perdida;
+      for(let j=ti+1;j<turnos.length && restante>0;j++){
+        const t2=turnos[j]; if(new Date(t2.fin).getTime()>finVentana) break;
+        const r=t2.items.find(x=>norm(x.nombre)===k && (x.recuperado-x.usado)>0);
+        if(!r) continue;
+        const hayEntrada=entSede.some(m=>norm(idNombre[m.producto_id]||'')===k && m.created_at>t.fin && m.created_at<=t2.fin);
+        if(hayEntrada){ it.revisar=true; it.revisarNota='reapareció el '+String(t2.fin).slice(5,10).replace('-','/')+' pero entró transferencia de este producto en el medio'; break; }
+        const u=Math.min(restante, r.recuperado-r.usado); r.usado+=u; (r.subsana=r.subsana||[]).push({fecha:t.fin,operador:t.operador,u}); restante-=u; it.subsanado+=u; it.subsanadoEn=t2.fin;
+      }
+      it.perdida=restante;
+    }); });
+    const fch=iso=>String(iso).slice(5,10).replace('-','/');
+    turnos.forEach((t,ti)=>{ t.items.forEach(it=>{
+      it.valor=it.perdida*(it.costo||0);
+      const real=Math.abs(it.delta)-it.err;
+      if(real===0) it.estado='error';
+      else if(Math.abs(it.delta)<=tol) it.estado='tolerancia';
+      else if(it.delta>0) it.estado=it.usado>0?'subsana':'recuperado';
+      else if(it.perdida===0) it.estado='subsanado';
+      else if(it.revisar) it.estado='revisar';
+      else if(ti===turnos.length-1) it.estado='pendiente';
+      else if(it.ventanaCerrada) it.estado='definitivo';
+      else it.estado='confirmado';
+      const notas=[];
+      if(it.err>0 && real>0) notas.push('parte fue error de conteo ('+it.err+')');
+      if(it.estado==='subsana') notas.push('subsana '+it.usado+' de '+it.subsana.map(x=>x.operador.split(' ')[0]+' ('+fch(x.fecha)+')').join(', '));
+      if(it.estado==='subsanado') notas.push('reapareció el '+fch(it.subsanadoEn)+', antes de que volviera a contar');
+      if(it.subsanado>0 && it.perdida>0) notas.push('se subsanaron '+it.subsanado+', quedan '+it.perdida);
+      if(it.estado==='revisar') notas.push(it.revisarNota);
+      if(it.estado==='definitivo') notas.push(it.porArqueo?('lo confirmó el arqueo del '+fch(it.arqueoEn)):it.porTope?'pasaron 7 días sin reaparecer':('él mismo lo volvió a contar de menos el '+fch(it.vuelveEn)));
+      if(it.estado==='confirmado') notas.push(it.vuelveEn?('se puede subsanar hasta que vuelva a contar'):('se puede subsanar hasta que vuelva a contar, máximo 7 días'));
+      it.estadoNota=notas.join(' · ');
+    });
+      t.perdidos=t.items.filter(i=>i.estado==='pendiente'||i.estado==='confirmado'||i.estado==='definitivo');
+      t.unidades=t.perdidos.reduce((a,i)=>a+i.perdida,0);
+      t.valor=t.perdidos.reduce((a,i)=>a+i.valor,0);
+      t.errores=t.items.filter(i=>i.estado==='error').length;
+      t.subsanados=t.items.filter(i=>i.estado==='subsanado').length;
+      t.revisar=t.items.filter(i=>i.estado==='revisar').length;
+    });
+    salida.push(...turnos);
   });
-  // estados y cifras por ítem
-  turnos.forEach(t=>{ t.items.forEach(it=>{
-    const real=Math.abs(it.delta)-it.err;        // unidades que no se explican por un error de conteo
-    it.perdida = it.delta<0 ? real : 0;
-    it.recuperado = it.delta>0 ? real : 0;
-    it.valor = it.perdida*(it.costo||0);
-    if(real===0) it.estado='error';
-    else if(Math.abs(it.delta)<=tol) it.estado='tolerancia';
-    else if(it.delta>0) it.estado='recuperado';
-    else it.estado = t.ultimo ? 'pendiente' : 'confirmado';
-    if(it.err>0 && real>0) it.estadoNota='parte fue error de conteo ('+it.err+')';
-  });
-    t.perdidos=t.items.filter(i=>i.estado==='pendiente'||i.estado==='confirmado');
-    t.unidades=t.perdidos.reduce((a,i)=>a+i.perdida,0);
-    t.valor=t.perdidos.reduce((a,i)=>a+i.valor,0);
-    t.errores=t.items.filter(i=>i.estado==='error').length;
-  });
-  return turnos.sort((a,b)=>b.fin.localeCompare(a.fin));
+  return salida.sort((a,b)=>b.fin.localeCompare(a.fin));
 }
 
 function FaltantesTurno({showToast, foco}){
@@ -5113,25 +5154,27 @@ function FaltantesTurno({showToast, foco}){
     try{
       const d0=new Date(desde+'T00:00:00'); d0.setDate(d0.getDate()-10);   // 10 días más atrás para tener el chequeo anterior al rango
       const dISO=d0.toISOString();
-      const [cs,aj,ps]=await Promise.all([db.listChequeosDesde(dISO, sede||undefined), db.listAjustesDesde(dISO, sede||undefined), db.listProductos()]);
+      const [cs,aj,ps,arqs]=await Promise.all([db.listChequeosDesde(dISO, sede||undefined), db.listAjustesDesde(dISO, sede||undefined), db.listProductos(), db.listArqueos({}).catch(()=>[])]);
       const idNombre={}, costo={}; (ps||[]).forEach(p=>{ idNombre[p.id]=p.nombre; costo[String(p.nombre).trim().toUpperCase()]=Number(p.costo)||0; });
-      setData({cs, aj, idNombre, costo});
+      setData({cs, aj, idNombre, costo, arqs});
     }catch(e){ showToast(""+(e.message||e),"err"); setData({cs:[],aj:[],idNombre:{},costo:{}}); } };
   useEffect(()=>{ cargar(); },[desde,sede]);
   const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='14') d.setDate(d.getDate()-13); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
 
   if(data===null) return <div className="empty">Comparando chequeos…</div>;
   const hastaISO=new Date(hasta+'T23:59:59.999').toISOString(), desdeISO=new Date(desde+'T00:00:00').toISOString();
-  const todos=calcularFaltantes(data.cs, data.aj, data.idNombre, k=>data.costo[k]||0, tol);
+  const todos=calcularFaltantes(data.cs, data.aj, data.idNombre, k=>data.costo[k]||0, tol, data.arqs);
   const turnos=todos.filter(t=>t.fin>=desdeISO && t.fin<=hastaISO);
   const qn=q.trim().toUpperCase();
-  const colorEstado={pendiente:"var(--amber)",confirmado:"var(--red)",error:"var(--td)",tolerancia:"var(--td)",recuperado:"var(--green)"};
-  const lblEstado={pendiente:"pendiente de confirmar",confirmado:"confirmado",error:"error de conteo",tolerancia:"dentro de tolerancia",recuperado:"recuperado"};
-  const Estado=({it})=><span className="pill" style={{background:"transparent",border:"1px solid "+colorEstado[it.estado],color:colorEstado[it.estado]}} title={it.estadoNota||""}>{lblEstado[it.estado]}{it.estadoNota?" *":""}</span>;
+  const colorEstado={pendiente:"var(--amber)",confirmado:"var(--red)",definitivo:"var(--red)",error:"var(--td)",tolerancia:"var(--td)",recuperado:"var(--green)",subsanado:"var(--green)",subsana:"var(--green)",revisar:"var(--amber)"};
+  const lblEstado={pendiente:"pendiente de confirmar",confirmado:"confirmado",definitivo:"definitivo",error:"error de conteo",tolerancia:"dentro de tolerancia",recuperado:"recuperado",subsanado:"subsanado",subsana:"subsana una pérdida",revisar:"revisar"};
+  const Estado=({it})=><span><span className="pill" style={{background:it.estado==='definitivo'?"var(--red-d)":"transparent",border:"1px solid "+colorEstado[it.estado],color:colorEstado[it.estado]}} title={it.estadoNota||""}>{lblEstado[it.estado]}</span>{it.estadoNota && <div className="muted" style={{fontSize:10,marginTop:2,maxWidth:260,whiteSpace:"normal"}}>{it.estadoNota}</div>}</span>;
+  const dim=it=>(it.estado==='error'||it.estado==='tolerancia'||it.estado==='subsanado'||it.estado==='subsana');
   const horaT=t=>fLocalDia(t.inicio)+" "+fLocalHora(t.inicio)+" → "+(fLocalDia(t.fin)!==fLocalDia(t.inicio)?fLocalDia(t.fin)+" ":"")+fLocalHora(t.fin);
 
   // ---- agregados ----
   const totalU=turnos.reduce((a,t)=>a+t.unidades,0), totalV=turnos.reduce((a,t)=>a+t.valor,0), totalErr=turnos.reduce((a,t)=>a+t.errores,0);
+  const totalSub=turnos.reduce((a,t)=>a+t.subsanados,0), totalRev=turnos.reduce((a,t)=>a+t.revisar,0);
   const porOp={}; turnos.forEach(t=>{ const o=porOp[t.operador]||(porOp[t.operador]={operador:t.operador,turnos:0,conPerdida:0,unidades:0,pend:0,valor:0,productos:{},errores:0});
     o.turnos++; if(t.perdidos.length) o.conPerdida++; o.errores+=t.errores;
     t.perdidos.forEach(i=>{ o.unidades+=i.perdida; o.valor+=i.valor; if(i.estado==='pendiente') o.pend+=i.perdida; o.productos[i.nombre]=(o.productos[i.nombre]||0)+i.perdida; }); });
@@ -5144,7 +5187,7 @@ function FaltantesTurno({showToast, foco}){
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>🕵️ Qué se perdió en cada turno.</b> <span className="muted">Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdió en el turno de quien hizo el chequeo anterior. Un faltante que el siguiente chequeo "recupera" se marca como error de conteo. Los ajustes del back office no cuentan como pérdida ni recuperación.</span>
+        <b style={{color:"var(--amber)"}}>🕵️ Qué se perdió en cada turno.</b> <span className="muted">Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdió en el turno de quien hizo el chequeo anterior. Si el siguiente chequeo lo "recupera" es error de conteo. Si reaparece después, pero antes de que el responsable vuelva a contar la sede (máximo 7 días), queda subsanado; si en el medio entró una transferencia de ese producto, queda para revisar. Cuando el responsable vuelve a contar y sigue faltando, es definitivo. Los ajustes del back office no cuentan.</span>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
@@ -5159,6 +5202,8 @@ function FaltantesTurno({showToast, foco}){
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Unidades perdidas</div><div style={{fontSize:22,fontWeight:800,color:totalU>0?"var(--red)":"var(--green)"}}>{totalU}</div><div className="muted" style={{fontSize:11}}>{turnos.length} turnos comparados</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Valor al costo</div><div style={{fontSize:22,fontWeight:800,color:totalV>0?"var(--red)":"var(--green)"}}>{fmt(totalV)}</div><div className="muted" style={{fontSize:11}}>productos sin costo valen $0</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Errores de conteo detectados</div><div style={{fontSize:22,fontWeight:800}}>{totalErr}</div><div className="muted" style={{fontSize:11}}>faltante que el siguiente chequeo recuperó</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Subsanados</div><div style={{fontSize:22,fontWeight:800,color:"var(--green)"}}>{totalSub}</div><div className="muted" style={{fontSize:11}}>reaparecieron antes de que el responsable volviera a contar</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Para revisar</div><div style={{fontSize:22,fontWeight:800,color:totalRev>0?"var(--amber)":"var(--td)"}}>{totalRev}</div><div className="muted" style={{fontSize:11}}>reaparecieron, pero entró transferencia en el medio</div></div>
       </div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
         {[['turnos','Por turno'],['operadores','Por operador'],['productos','Por producto']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
@@ -5185,7 +5230,7 @@ function FaltantesTurno({showToast, foco}){
                 {t.items.length===0 ? <div className="muted">Nada cambió frente al chequeo anterior.</div> : (
                 <table className="tbl"><thead><tr><th>Producto</th><th className="num">Dif. antes</th><th className="num">Dif. ahora</th><th className="num">Ajuste admin</th><th className="num">Lo nuevo</th><th className="num">Valor</th><th>Estado</th></tr></thead>
                   <tbody>{[...t.items].sort((a,b)=>a.delta-b.delta).map((it,i)=>(
-                    <tr key={i} style={{opacity:(it.estado==='error'||it.estado==='tolerancia')?0.6:1}}>
+                    <tr key={i} style={{opacity:dim(it)?0.6:1}}>
                       <td className="row-name">{it.nombre}</td><td className="num muted">{it.antes}</td><td className="num muted">{it.ahora}</td><td className="num muted">{it.ajuste?((it.ajuste>0?"+":"")+it.ajuste):"—"}</td>
                       <td className="num" style={{fontWeight:800,color:it.delta<0?"var(--red)":"var(--green)"}}>{it.delta>0?"+":""}{it.delta}</td>
                       <td className="num">{it.valor>0?fmt(it.valor):"—"}</td><td><Estado it={it}/></td>
@@ -5207,7 +5252,7 @@ function FaltantesTurno({showToast, foco}){
                 <td className="muted" style={{fontSize:12}}>{Object.entries(o.productos).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([n,u])=>n+" ("+u+")").join(" · ")||"—"}</td>
               </tr>))}</tbody>
           </table>
-          <div className="muted" style={{fontSize:11,padding:"8px 12px"}}>Solo cuenta lo que se perdió en el turno de cada operador (no el arrastre de chequeos anteriores). "Pendientes" son faltantes del último chequeo, que todavía no confirma un chequeo siguiente.</div>
+          <div className="muted" style={{fontSize:11,padding:"8px 12px"}}>Solo cuenta lo que se perdió en el turno de cada operador (no el arrastre de chequeos anteriores) y que no se ha subsanado. "Pendientes" son faltantes del último chequeo, que todavía no confirma un chequeo siguiente. Los marcados "revisar" no se suman.</div>
         </div>)}
 
       {vista==='productos' && turnos.length>0 && (
@@ -5224,7 +5269,7 @@ function FaltantesTurno({showToast, foco}){
               {abierto[k] && <tr><td colSpan="6" style={{padding:"4px 10px 10px"}}>
                 <table className="tbl"><thead><tr><th>Turno de</th><th>Horario</th><th>Contó</th><th className="num">Dif. antes</th><th className="num">Dif. ahora</th><th className="num">Lo nuevo</th><th>Estado</th></tr></thead>
                   <tbody>{p.turnos.map(({t,i},j)=>(
-                    <tr key={j} style={{opacity:(i.estado==='error'||i.estado==='tolerancia')?0.6:1}}>
+                    <tr key={j} style={{opacity:dim(i)?0.6:1}}>
                       <td className="row-name">{t.operador}</td><td className="muted" style={{whiteSpace:"nowrap"}}>{horaT(t)}</td><td className="muted">{t.contadoPor}</td>
                       <td className="num muted">{i.antes}</td><td className="num muted">{i.ahora}</td>
                       <td className="num" style={{fontWeight:800,color:i.delta<0?"var(--red)":"var(--green)"}}>{i.delta>0?"+":""}{i.delta}</td><td><Estado it={i}/></td>

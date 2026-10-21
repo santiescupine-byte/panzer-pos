@@ -1394,10 +1394,53 @@ const db = {
   },
   // Ajuste manual de stock desde el back office: cambia el stock Y deja rastro (movimiento 'ajuste').
   // delta = nuevo - actual. Usa ajustar_inventario (atómico: suma delta + registra el movimiento).
-  async ajustarStock(producto_id, sede, delta, nuevo, operador){
+  async ajustarStock(producto_id, sede, delta, nuevo, operador, nota){
     if(DEMO_MODE){ const p=DEMO.productos.find(x=>x.id===producto_id); if(p){ p.stock=p.stock||{}; p.stock[sede]=nuevo; } return; }
-    const {error}=await sb.rpc('ajustar_inventario',{p_producto_id:producto_id,p_sede:sede,p_tipo:'ajuste',p_cantidad:delta,p_operador:operador||null,p_nota:'Ajuste manual (back office)'});
+    const {error}=await sb.rpc('ajustar_inventario',{p_producto_id:producto_id,p_sede:sede,p_tipo:'ajuste',p_cantidad:delta,p_operador:operador||null,p_nota:nota||'Ajuste manual (back office)'});
     if(error) throw error;
+  },
+  // Faltantes por turno: chequeos y ajustes desde una fecha (para comparar cada chequeo con el anterior de su sede)
+  async listChequeosDesde(desdeISO, sede){
+    if(DEMO_MODE) return demoChequeosAll().filter(c=>c.created_at>=desdeISO && (!sede||c.sede===sede)).sort((a,b)=>a.created_at.localeCompare(b.created_at));
+    let q=sb.from('chequeos_inventario').select('id,sede,operador,created_at,n_descuadres,total_items,descuadres').gte('created_at',desdeISO).order('created_at',{ascending:true}).limit(3000);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) throw error; return data||[];
+  },
+  // ---- Arqueos por supervisor ----
+  async guardarArqueo(reg){
+    if(DEMO_MODE) return {id:uid()};
+    const {data,error}=await sb.from('arqueos_inventario').insert(reg).select('id').single(); if(error) throw error; return data;
+  },
+  async listArqueos(f={}){
+    if(DEMO_MODE) return [];
+    let q=sb.from('arqueos_inventario').select('id,sede,supervisor,testigo,estado,total_items,n_diferencias,unidades_faltantes,unidades_sobrantes,valor_faltante,nota,created_at,aprobado_por,aprobado_en,ajustes,recontar').order('created_at',{ascending:false}).limit(f.limit||200);
+    if(f.sede) q=q.eq('sede',f.sede);
+    if(f.estado) q=q.eq('estado',f.estado);
+    const {data,error}=await q; if(error) throw error; return data||[];
+  },
+  async arqueoItems(id){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('arqueos_inventario').select('items').eq('id',id).single(); if(error) throw error; return (data&&data.items)||[];
+  },
+  async aprobarArqueo(id, admin, excluir){
+    const {data,error}=await sb.rpc('aprobar_arqueo',{p_id:id, p_admin:admin, p_excluir:excluir||[]});
+    if(error) throw new Error("Sin conexión con el sistema. Intenta de nuevo."); return data;
+  },
+  async anularArqueo(id, admin){
+    if(DEMO_MODE) return;
+    const {error}=await sb.from('arqueos_inventario').update({estado:'anulado', aprobado_por:admin||null, aprobado_en:new Date().toISOString()}).eq('id',id).eq('estado','pendiente'); if(error) throw error;
+  },
+  // último arqueo APROBADO por sede → {sede: aprobado_en}
+  async ultimosArqueos(){
+    if(DEMO_MODE) return {};
+    const {data,error}=await sb.from('arqueos_inventario').select('sede,aprobado_en,created_at').eq('estado','aprobado').order('aprobado_en',{ascending:false}).limit(500);
+    if(error) return {}; const m={}; (data||[]).forEach(a=>{ if(!m[a.sede]) m[a.sede]=a.aprobado_en||a.created_at; }); return m;
+  },
+  async listAjustesDesde(desdeISO, sede){
+    if(DEMO_MODE) return [];
+    let q=sb.from('movimientos_inventario').select('producto_id,sede,cantidad,created_at,operador,nota').eq('tipo','ajuste').gte('created_at',desdeISO).order('created_at',{ascending:true}).limit(3000);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) return []; return data||[];
   },
   // Trazabilidad: todos los movimientos de un producto (entradas/ventas/salidas/transferencias/muestras…)
   async listMovimientos({producto_id, sede, desde, hasta}={}){
@@ -1698,8 +1741,8 @@ function App(){
         const NAV = auth.rol==='tesorero'
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
-          ? [["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["chequeos","✔️","Chequeos"],["celdas","🚿","Lavado de celdas"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1726,7 +1769,8 @@ function App(){
               </div>
               <div className="page">
                 {tab==="informes"   && <Informes showToast={showToast} admin={auth.nombre}/>}
-                {tab==="inventario" && <Inventario showToast={showToast} admin={auth.nombre}/>}
+                {tab==="inventario" && <InventarioHub showToast={showToast} admin={auth.nombre}/>}
+                {tab==="arqueo"     && <Arqueo showToast={showToast} quien={auth.nombre}/>}
                 {tab==="pedidos"    && <Pedidos showToast={showToast} quien={auth.nombre}/>}
                 {tab==="remisiones" && <Remisiones showToast={showToast} admin={auth.nombre}/>}
                 {tab==="produccion" && <Produccion showToast={showToast} quien={auth.nombre}/>}
@@ -1736,7 +1780,6 @@ function App(){
                 {tab==="repuestos"  && <Repuestos showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="metas"      && <Metas showToast={showToast} quien={auth.nombre}/>}
-                {tab==="chequeos"   && <Chequeos showToast={showToast}/>}
                 {tab==="celdas"     && <LavadosCelda showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
@@ -4388,13 +4431,31 @@ function Turnos({showToast, quien, sedes, emps}){
 // ============================================================
 // SECCIÓN: CHEQUEOS DE INVENTARIO (historial + ranking de descuadres)
 // ============================================================
-function Chequeos({showToast}){
+function Chequeos({showToast, admin}){
   const [sedes,setSedes]=useState([]);
   const [emps,setEmps]=useState([]);
   const [sede,setSede]=useState("");
   const [operador,setOperador]=useState("");
   const [lista,setLista]=useState(null);
   const [detalle,setDetalle]=useState(null);
+  // "Ajustar al conteo": el admin decide producto por producto; el conteo del cajero nunca mueve el stock solo
+  const [prods,setProds]=useState(null);
+  const [ajustados,setAjustados]=useState({});      // chequeoId|nombre → true
+  const [confAj,setConfAj]=useState(null);          // {d} fila a ajustar
+  const [busyAj,setBusyAj]=useState(false);
+  const ajustarAlConteo=async(d)=>{
+    if(busyAj) return; setBusyAj(true);
+    try{
+      let ps=prods; if(!ps){ ps=await db.listProductos(); setProds(ps); }
+      const p=ps.find(x=>String(x.nombre).trim().toUpperCase()===String(d.nombre).trim().toUpperCase());
+      if(!p){ showToast("No encontré el producto \""+d.nombre+"\" en el catálogo","err"); setBusyAj(false); return; }
+      const nota='Ajuste al conteo del '+fLocalDia(detalle.created_at)+' '+fLocalHora(detalle.created_at)+' por '+detalle.operador+' (sistema '+d.sistema+' → contado '+d.contado+')';
+      await db.ajustarStock(p.id, detalle.sede, d.diferencia, d.contado, admin, nota);
+      setAjustados(a=>({...a,[detalle.id+'|'+d.nombre]:true})); setConfAj(null);
+      showToast("Stock de "+d.nombre+" ajustado ("+(d.diferencia>0?"+":"")+d.diferencia+") en "+detalle.sede,"ok");
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusyAj(false);
+  };
 
   useEffect(()=>{ db.listSedes().then(setSedes).catch(()=>{}); db.listEmpleados().then(setEmps).catch(()=>{}); },[]);
   const cargar=async()=>{ setLista(null); try{ setLista(await db.listChequeos({sede,operador})); }catch(e){ showToast(""+(e.message||e),"err"); setLista([]); } };
@@ -4471,13 +4532,17 @@ function Chequeos({showToast}){
             {detalle.n_descuadres>0 ? (
               <div className="card" style={{padding:0,overflowX:"auto",marginTop:6}}>
                 <table className="tbl">
-                  <thead><tr><th>Producto</th><th className="num">Sistema</th><th className="num">Contado</th><th className="num">Dif.</th></tr></thead>
-                  <tbody>{(detalle.descuadres||[]).map((d,i)=>(
-                    <tr key={i}><td className="row-name">{d.nombre}</td><td className="num">{d.sistema}</td><td className="num">{d.contado}</td><td className="num" style={{color:d.diferencia<0?"var(--red)":"var(--green)",fontWeight:800}}>{d.diferencia>0?"+":""}{d.diferencia}</td></tr>
-                  ))}</tbody>
+                  <thead><tr><th>Producto</th><th className="num">Sistema</th><th className="num">Contado</th><th className="num">Dif.</th>{admin && <th></th>}</tr></thead>
+                  <tbody>{(detalle.descuadres||[]).map((d,i)=>{ const k=detalle.id+'|'+d.nombre; const ya=!!ajustados[k]; return (
+                    <tr key={i}><td className="row-name">{d.nombre}</td><td className="num">{d.sistema}</td><td className="num">{d.contado}</td><td className="num" style={{color:d.diferencia<0?"var(--red)":"var(--green)",fontWeight:800}}>{d.diferencia>0?"+":""}{d.diferencia}</td>
+                      {admin && <td style={{textAlign:"right",whiteSpace:"nowrap"}}>{ya ? <span className="pill pill-prod">✓ ajustado</span>
+                        : (confAj&&confAj.nombre===d.nombre) ? <span><button className="btn btn-danger btn-sm" disabled={busyAj} onClick={()=>ajustarAlConteo(d)}>{busyAj?"…":"Sí, ajustar "+(d.diferencia>0?"+":"")+d.diferencia}</button> <button className="btn btn-ghost btn-sm" onClick={()=>setConfAj(null)}>No</button></span>
+                        : <button className="btn btn-ghost btn-sm" title="Deja el stock del sistema como lo contó el cajero (crea un movimiento de ajuste con la nota del chequeo)" onClick={()=>setConfAj(d)}>Ajustar al conteo</button>}</td>}
+                    </tr>); })}</tbody>
                 </table>
               </div>
             ) : <div className="empty">Todo cuadró en este chequeo.</div>}
+            {admin && detalle.n_descuadres>0 && <div className="muted" style={{fontSize:11,marginTop:8}}>"Ajustar al conteo" aplica la diferencia al stock actual de {detalle.sede} y queda en la trazabilidad con la nota del chequeo. Úsalo solo cuando la pérdida ya esté confirmada; así el siguiente chequeo arranca en cero para ese producto.</div>}
             <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDetalle(null)}>Cerrar</button></div>
           </div>
         </div>
@@ -4489,8 +4554,11 @@ function Chequeos({showToast}){
 // ============================================================
 // SECCIÓN: INVENTARIO (stock por sede, alertas, transferencias)
 // ============================================================
-function Inventario({showToast, admin}){
+function Inventario({showToast, admin, onVerFaltantes}){
   const [sedes,setSedes]=useState([]);
+  const [descVig,setDescVig]=useState({});     // nombre → {diferencia, fecha, operador} del último chequeo de la sede
+  const [ultArq,setUltArq]=useState({});       // sede → fecha del último arqueo aprobado
+  useEffect(()=>{ if(DEMO_MODE) return; db.ultimosArqueos().then(setUltArq).catch(()=>{}); },[]);
   const [cats,setCats]=useState([]);
   const [sede,setSede]=useState("");
   const [inv,setInv]=useState(null);
@@ -4513,6 +4581,17 @@ function Inventario({showToast, admin}){
   useEffect(()=>{ cargarTransitos(); },[]);
   const cargar=async()=>{ if(!sede) return; setInv(null); try{ setInv(await db.getInventario(sede)); }catch(e){ showToast(""+(e.message||e),"err"); setInv([]); } };
   useEffect(()=>{ cargar(); },[sede]);
+  // descuadre vigente = lo que dijo el ÚLTIMO chequeo de esta sede (el conteo no mueve el stock, así que sigue pendiente)
+  useEffect(()=>{ if(!sede||DEMO_MODE){ setDescVig({}); return; } let vivo=true;
+    db.listChequeos({sede}).then(cs=>{ if(!vivo) return; const u=cs&&cs[0]; const m={};
+      if(u) (u.descuadres||[]).forEach(d=>{ m[String(d.nombre).trim().toUpperCase()]={diferencia:Number(d.diferencia)||0, fecha:u.created_at, operador:u.operador}; });
+      setDescVig(m); }).catch(()=>{});
+    return ()=>{ vivo=false; }; },[sede]);
+  // si el último chequeo es anterior al último arqueo aprobado, su diferencia ya quedó liquidada: no se muestra
+  const arqSede=ultArq[sede];
+  const chequeoVigente=!arqSede || !Object.values(descVig)[0] || Object.values(descVig)[0].fecha>arqSede;
+  const diasArq=arqSede?Math.floor((Date.now()-new Date(arqSede))/86400000):null;
+  const descDe=r=>descVig[String(r.nombre).trim().toUpperCase()];
 
   const bodega = sedes.find(s=>s.es_bodega);
   const estado = r => r.stock<=0 ? "agotado" : (r.minimo>0 && r.stock<=r.minimo) ? "bajo" : "ok";
@@ -4675,21 +4754,27 @@ function Inventario({showToast, admin}){
         {bodega && <button className="btn btn-amber" style={{alignSelf:"flex-end"}} onClick={abrirTransfer}>⇄ Enviar desde {bodega.nombre}</button>}
       </div>
 
+      {!DEMO_MODE && sede && !(bodega&&sede===bodega.nombre) && <div style={{marginBottom:10}}>
+        <span className={"pill "+(diasArq==null?"pill-off":diasArq<=7?"pill-prod":diasArq<=15?"pill-token":"pill-off")} title="Arqueo por supervisor aprobado">📋 {diasArq==null?"Sin arqueo aprobado en "+sede:(diasArq===0?"Arqueo hoy":"Último arqueo hace "+diasArq+" día"+(diasArq===1?"":"s"))}</span>
+        {diasArq!=null && diasArq>7 && <span className="muted" style={{fontSize:11,marginLeft:8}}>toca hacer arqueo (meta: semanal)</span>}
+      </div>}
       {nBajo>0 && !soloBajo && <div className="muted" style={{marginBottom:12}}>⚠ {nBajo} producto(s) en o por debajo del mínimo en {sede}. <a style={{color:"var(--amber)",cursor:"pointer"}} onClick={()=>setSoloBajo(true)}>Ver solo esos</a></div>}
 
       <div className="card" style={{padding:0,overflowX:"auto"}}>
         <table className="tbl">
-          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num">Mínimo</th><th className="num">Ideal</th><th className="num">Transferir</th><th>Estado</th><th></th></tr></thead>
+          <thead><tr><th>Producto</th><th>Categoría</th><th className="num">Stock</th><th className="num" title="Diferencia del último chequeo de la sede (contado − sistema)">Chequeo</th><th className="num">Mínimo</th><th className="num">Ideal</th><th className="num">Transferir</th><th>Estado</th><th></th></tr></thead>
           <tbody>
-            {rows.length===0 && <tr><td colSpan="8"><div className="empty">Sin productos.</div></td></tr>}
+            {rows.length===0 && <tr><td colSpan="9"><div className="empty">Sin productos.</div></td></tr>}
             {rows.map(r=>{
               const st=estado(r);
               const falta=faltante(r);
+              const dv=chequeoVigente?descDe(r):null;
               return (
                 <tr key={r.id}>
                   <td className="row-name">{r.nombre}</td>
                   <td className="muted">{r.categoria}</td>
                   <td className="num"><StockCell value={r.stock} color={st==="agotado"?"var(--red)":st==="bajo"?"var(--amber)":"var(--tb)"} onCommit={v=>guardarStock(r,v)}/></td>
+                  <td className="num">{dv && dv.diferencia!==0 ? <button className="btn btn-ghost btn-sm" style={{color:dv.diferencia<0?"var(--red)":"var(--green)",fontWeight:800,padding:"2px 8px"}} title={"Último chequeo "+fLocalDia(dv.fecha)+" "+fLocalHora(dv.fecha)+" por "+dv.operador+". Clic: ver en qué turnos se perdió"} onClick={()=>onVerFaltantes&&onVerFaltantes(r.nombre)}>{dv.diferencia>0?"+":""}{dv.diferencia}</button> : <span className="muted" style={{fontSize:11}}>{Object.keys(descVig).length?"✓":"—"}</span>}</td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.minimo} onChange={e=>guardarMin(r,e.target.value)}/></td>
                   <td className="num"><input className="input" type="number" style={{margin:0,width:72,textAlign:"right",padding:"6px 8px"}} value={r.ideal} placeholder="—" onChange={e=>guardarIdeal(r,e.target.value)}/></td>
                   <td className="num">{Number(r.ideal)>0 ? (falta>0 ? <b style={{color:"var(--amber)"}}>{falta}</b> : <span className="pill pill-prod">✓</span>) : <span className="muted">—</span>}</td>
@@ -4719,6 +4804,439 @@ function StockCell({value,color,onCommit}){
 }
 
 // Modal de trazabilidad: historial de movimientos de un producto.
+// ============================================================
+// INVENTARIO: hub con Stock · Chequeos · Faltantes por turno
+// ============================================================
+function InventarioHub({showToast, admin}){
+  const [sub,setSub]=useState('stock');
+  const [foco,setFoco]=useState("");     // producto que se quiere ver en Faltantes (desde la tabla de Stock)
+  const verFaltantes=nombre=>{ setFoco(nombre||""); setSub('faltantes'); };
+  return (
+    <div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+        {[['stock','📦 Stock'],['chequeos','✔️ Chequeos'],['faltantes','🕵️ Faltantes por turno'],['arqueos','📋 Arqueos']].map(([k,l])=>(
+          <button key={k} className={"btn btn-sm "+(sub===k?'btn-amber':'btn-ghost')} onClick={()=>{ setSub(k); if(k!=='faltantes') setFoco(""); }}>{l}</button>))}
+      </div>
+      {sub==='stock' && <Inventario showToast={showToast} admin={admin} onVerFaltantes={verFaltantes}/>}
+      {sub==='chequeos' && <Chequeos showToast={showToast} admin={admin}/>}
+      {sub==='faltantes' && <FaltantesTurno showToast={showToast} foco={foco}/>}
+      {sub==='arqueos' && <Arqueos showToast={showToast} admin={admin}/>}
+    </div>
+  );
+}
+
+// ============================================================
+// ARQUEO POR SUPERVISOR: conteo ciego de toda la sede con testigo obligatorio.
+// No toca el stock: queda pendiente hasta que el administrador lo aprueba.
+// ============================================================
+function Arqueo({showToast, quien, onGuardado}){
+  const [sedes,setSedes]=useState([]);
+  const [emps,setEmps]=useState([]);
+  const [sede,setSede]=useState("");
+  const [testigo,setTestigo]=useState("");
+  const [inv,setInv]=useState(null);
+  const [costos,setCostos]=useState({});
+  const [counts,setCounts]=useState({});
+  const [q,setQ]=useState("");
+  const [nota,setNota]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [hecho,setHecho]=useState(null);
+  useEffect(()=>{ db.listSedes().then(s=>setSedes(s.filter(x=>!x.es_bodega))).catch(()=>{}); db.listEmpleados().then(setEmps).catch(()=>{});
+    db.listProductos().then(ps=>{ const m={}; (ps||[]).forEach(p=>{ m[p.id]=Number(p.costo)||0; }); setCostos(m); }).catch(()=>{}); },[]);
+  useEffect(()=>{ if(!sede){ setInv(null); return; } setInv(null); setCounts({}); setTestigo("");
+    db.getInventario(sede).then(r=>setInv((r||[]).slice().sort((a,b)=>a.nombre.localeCompare(b.nombre)))).catch(e=>{ showToast(""+(e.message||e),"err"); setInv([]); }); },[sede]);
+  const testigos=emps.filter(e=>e.activo!==false && (e.rol==='cajero'||e.rol==='supervisor') && e.nombre!==quien && (!sede||(e.sedes||[]).includes(sede)));
+  const set=(id,v)=>setCounts(prev=>({...prev,[id]:v.replace(/[^0-9]/g,"")}));
+  const total=(inv||[]).length, contados=(inv||[]).filter(p=>counts[p.id]!==undefined&&counts[p.id]!=="").length;
+  const visibles=(inv||[]).filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
+  const listo=inv&&total>0&&contados===total&&!!testigo;
+  const guardar=async()=>{ if(!listo||busy) return; setBusy(true);
+    try{
+      const items=inv.map(p=>{ const sistema=Number(p.stock)||0, contado=Number(counts[p.id])||0; return {producto_id:p.id, nombre:p.nombre, categoria:p.categoria||null, sistema, contado, diferencia:contado-sistema, costo:costos[p.id]||0}; });
+      const falt=items.filter(i=>i.diferencia<0), sobr=items.filter(i=>i.diferencia>0);
+      const reg={sede, supervisor:quien, testigo, estado:'pendiente', items, total_items:items.length, n_diferencias:items.filter(i=>i.diferencia!==0).length,
+        unidades_faltantes:falt.reduce((a,i)=>a-i.diferencia,0), unidades_sobrantes:sobr.reduce((a,i)=>a+i.diferencia,0),
+        valor_faltante:falt.reduce((a,i)=>a+(-i.diferencia)*(i.costo||0),0), nota:nota.trim()||null};
+      const r=await db.guardarArqueo(reg);
+      setHecho({id:r&&r.id, n:items.length, sede, testigo}); setCounts({}); setSede("");
+      if(onGuardado) onGuardado();
+    }catch(e){ showToast(""+(e.message||e),"err"); }
+    setBusy(false); };
+
+  if(hecho) return (
+    <div className="card" style={{textAlign:"center",padding:28}}>
+      <div style={{fontSize:40}}>📋</div>
+      <div style={{fontSize:18,fontWeight:800,marginTop:6}}>Arqueo de {hecho.sede} guardado</div>
+      <div className="muted" style={{marginTop:6}}>{hecho.n} productos contados · testigo: {hecho.testigo}. Queda pendiente de aprobación del administrador; el stock no cambia hasta entonces.</div>
+      <button className="btn btn-amber" style={{marginTop:16}} onClick={()=>setHecho(null)}>Hacer otro arqueo</button>
+    </div>);
+
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>📋 Arqueo de inventario.</b> <span className="muted">Cuenta físicamente TODOS los productos de la sede con el cajero de turno al lado (queda como testigo). No verás el stock del sistema: el administrador compara y aprueba. Nada cambia hasta que apruebe.</span>
+      </div>
+      <div className="filterbar">
+        <div className="fld"><label className="label">Sede</label>
+          <select className="select" value={sede} onChange={e=>setSede(e.target.value)}><option value="">Elige la sede</option>{sedes.map(x=><option key={x.id} value={x.nombre}>{x.nombre}</option>)}</select></div>
+        <div className="fld"><label className="label">Cajero testigo (obligatorio)</label>
+          <select className="select" value={testigo} onChange={e=>setTestigo(e.target.value)} disabled={!sede}><option value="">{sede?"¿Quién está de turno?":"Primero la sede"}</option>{testigos.map(e=><option key={e.id||e.nombre} value={e.nombre}>{e.nombre}</option>)}</select></div>
+        {inv && <div className="fld" style={{flex:1,minWidth:160}}><label className="label">Buscar</label><input className="input" placeholder="Producto…" value={q} onChange={e=>setQ(e.target.value)}/></div>}
+      </div>
+      {sede && inv===null && <div className="empty">Cargando productos de {sede}…</div>}
+      {inv && (
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+            <b>{contados} / {total} contados</b>
+            <div style={{flex:1,minWidth:120,height:8,background:"var(--sf2)",borderRadius:4,overflow:"hidden"}}><div style={{width:(total?Math.round(contados*100/total):0)+"%",height:"100%",background:"var(--green)"}}/></div>
+          </div>
+          <div className="card" style={{padding:0,overflowX:"auto",maxHeight:"60vh",overflowY:"auto"}}>
+            <table className="tbl">
+              <thead><tr><th>Producto</th><th>Categoría</th><th className="num" style={{width:120}}>Contado</th></tr></thead>
+              <tbody>{visibles.map(p=>(
+                <tr key={p.id} style={{background:(counts[p.id]!==undefined&&counts[p.id]!=="")?undefined:"var(--amber-d)"}}>
+                  <td className="row-name">{p.nombre}</td><td className="muted">{p.categoria}</td>
+                  <td className="num"><input className="input" type="text" inputMode="numeric" placeholder="—" style={{margin:0,width:90,textAlign:"right",padding:"6px 8px"}} value={counts[p.id]||""} onChange={e=>set(p.id,e.target.value)}/></td>
+                </tr>))}</tbody>
+            </table>
+          </div>
+          <div style={{marginTop:10}}><input className="input" placeholder="Nota (opcional): novedades del conteo…" value={nota} onChange={e=>setNota(e.target.value)}/></div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:10}}>
+            <button className="btn btn-amber" disabled={!listo||busy} onClick={guardar}>{busy?"Guardando…":!testigo?"Elige el cajero testigo":contados<total?("Faltan "+(total-contados)+" por contar"):"💾 Guardar arqueo"}</button>
+          </div>
+        </div>)}
+    </div>
+  );
+}
+
+// Admin: lista de arqueos, detalle (sistema vs contado) y aprobación → el stock queda como se contó
+function Arqueos({showToast, admin}){
+  const [rows,setRows]=useState(null);
+  const [det,setDet]=useState(null);        // {a, items}
+  const [verTodos,setVerTodos]=useState(false);
+  const [excluir,setExcluir]=useState({});  // producto_id → true (recontar)
+  const [conf,setConf]=useState(null);      // 'aprobar' | 'anular'
+  const [busy,setBusy]=useState(false);
+  const [hacer,setHacer]=useState(false);
+  const load=async()=>{ try{ setRows(await db.listArqueos({})); }catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  useEffect(()=>{ load(); },[]);
+  // Cruce con los chequeos de los cajeros: cuánto de lo que falta en el arqueo lo explican los turnos
+  // desde el arqueo aprobado anterior de la sede (o 30 días atrás si es el primero).
+  const [cruce,setCruce]=useState(null);   // {desde, porProd:{NOMBRE:{perdida, ops:{op:unidades}}}, totalTurnos}
+  const cargarCruce=async(a)=>{ setCruce(null);
+    try{
+      const ant=(rows||[]).filter(x=>x.sede===a.sede && x.estado==='aprobado' && x.id!==a.id && x.created_at<a.created_at).sort((x,y)=>y.created_at.localeCompare(x.created_at))[0];
+      const desde=ant?(ant.aprobado_en||ant.created_at):new Date(new Date(a.created_at).getTime()-30*86400000).toISOString();
+      const d0=new Date(new Date(desde).getTime()-10*86400000).toISOString();
+      const [cs,aj,ps]=await Promise.all([db.listChequeosDesde(d0,a.sede), db.listAjustesDesde(d0,a.sede), db.listProductos()]);
+      const idNombre={}; (ps||[]).forEach(p=>{ idNombre[p.id]=p.nombre; });
+      const turnos=calcularFaltantes(cs.filter(c=>c.created_at<=a.created_at), aj, idNombre, ()=>0, 0).filter(t=>t.fin>desde && t.fin<=a.created_at);
+      const porProd={}; let totalTurnos=0;
+      turnos.forEach(t=>t.perdidos.forEach(i=>{ const k=String(i.nombre).trim().toUpperCase(); const p=porProd[k]||(porProd[k]={perdida:0,ops:{}}); p.perdida+=i.perdida; p.ops[t.operador]=(p.ops[t.operador]||0)+i.perdida; totalTurnos+=i.perdida; }));
+      setCruce({desde, porProd, totalTurnos, nTurnos:turnos.length, primero:!ant});
+    }catch(e){ setCruce({desde:null, porProd:{}, totalTurnos:0, nTurnos:0, error:true}); } };
+  const abrir=async(a)=>{ setDet({a, items:null}); setVerTodos(false); setExcluir({}); setConf(null); cargarCruce(a); try{ setDet({a, items:await db.arqueoItems(a.id)}); }catch(e){ showToast(""+(e.message||e),"err"); setDet(null); } };
+  const explicaDe=i=>{ if(!cruce) return null; const p=cruce.porProd[String(i.nombre).trim().toUpperCase()]; return p?p:{perdida:0,ops:{}}; };
+  const aprobar=async()=>{ if(busy) return; setBusy(true);
+    try{ const r=await db.aprobarArqueo(det.a.id, admin, Object.keys(excluir).filter(k=>excluir[k]));
+      if(r&&r.ok){ showToast("Arqueo aprobado: "+r.ajustes+" producto(s) ajustados en "+det.a.sede+" ✓","ok"); setDet(null); await load(); }
+      else showToast((r&&r.error)||"No se pudo aprobar","err"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); setConf(null); };
+  const anular=async()=>{ if(busy) return; setBusy(true);
+    try{ await db.anularArqueo(det.a.id, admin); showToast("Arqueo anulado","ok"); setDet(null); await load(); }catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); setConf(null); };
+  const pillEstado=e=>e==='aprobado'?<span className="pill pill-prod">aprobado</span>:e==='anulado'?<span className="pill pill-off">anulado</span>:<span className="pill pill-token">pendiente</span>;
+  if(hacer) return <div><button className="btn btn-ghost" style={{marginBottom:10}} onClick={()=>{ setHacer(false); load(); }}>← Volver a arqueos</button><Arqueo showToast={showToast} quien={admin} onGuardado={load}/></div>;
+  if(rows===null) return <div className="empty">Cargando arqueos…</div>;
+  const pend=rows.filter(r=>r.estado==='pendiente').length;
+  const dif=(det&&det.items)?det.items.filter(i=>Number(i.diferencia)!==0):[];
+  const lista=(det&&det.items)?(verTodos?det.items:dif):[];
+  const excl=Object.keys(excluir).filter(k=>excluir[k]).length;
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>📋 Arqueos por supervisor.</b> <span className="muted">Conteo ciego de toda la sede con cajero testigo. Al aprobarlo, el stock queda como se contó y ese arqueo es el punto de partida: lo anterior se da por liquidado y cada turno se mide desde una base limpia. Quien cuenta no aprueba.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <button className="btn btn-amber btn-sm" onClick={()=>setHacer(true)}>➕ Hacer arqueo</button>
+        {pend>0 && <span className="pill pill-token">{pend} pendiente(s) de aprobar</span>}
+        <button className="btn btn-ghost btn-sm" style={{marginLeft:"auto"}} onClick={load}>↻ Actualizar</button>
+      </div>
+      <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
+        <table className="tbl">
+          <thead><tr><th>Fecha</th><th>Sede</th><th>Supervisor</th><th>Testigo</th><th className="num">Productos</th><th className="num">Con diferencia</th><th className="num">Faltan</th><th className="num">Sobran</th><th className="num">Valor faltante</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {rows.length===0 && <tr><td colSpan="11"><div className="empty">Todavía no hay arqueos. El supervisor los hace desde su menú "Arqueo de inventario", o tú con "Hacer arqueo".</div></td></tr>}
+            {rows.map(a=>(
+              <tr key={a.id} style={{cursor:"pointer"}} onClick={()=>abrir(a)}>
+                <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(a.created_at)} {fLocalHora(a.created_at)}</td>
+                <td className="row-name">{a.sede}</td><td>{a.supervisor}</td><td className="muted">{a.testigo}</td>
+                <td className="num">{a.total_items}</td><td className="num">{a.n_diferencias}</td>
+                <td className="num" style={{color:Number(a.unidades_faltantes)>0?"var(--red)":"var(--td)",fontWeight:700}}>{Number(a.unidades_faltantes)||"—"}</td>
+                <td className="num" style={{color:Number(a.unidades_sobrantes)>0?"var(--green)":"var(--td)"}}>{Number(a.unidades_sobrantes)||"—"}</td>
+                <td className="num">{Number(a.valor_faltante)>0?fmt(a.valor_faltante):"—"}</td>
+                <td>{pillEstado(a.estado)}</td>
+                <td><button className="btn btn-ghost btn-sm" onClick={e=>{e.stopPropagation();abrir(a);}}>Ver</button></td>
+              </tr>))}
+          </tbody>
+        </table>
+      </div>
+
+      {det && (
+        <div className="modal-bg" onClick={()=>setDet(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:820}}>
+            <div className="modal-t">📋 Arqueo — {det.a.sede} {pillEstado(det.a.estado)}</div>
+            <div className="muted" style={{marginBottom:10}}>{fLocalDia(det.a.created_at)} {fLocalHora(det.a.created_at)} · contó <b>{det.a.supervisor}</b> · testigo <b>{det.a.testigo}</b>{det.a.nota?(" · "+det.a.nota):""}{det.a.estado==='aprobado'?(" · aprobado por "+det.a.aprobado_por+" el "+fLocalDia(det.a.aprobado_en)+" ("+(det.a.ajustes||0)+" ajustes)"):""}</div>
+            <div className="kpis">
+              <div className="kpi"><div className="kpi-label">Productos</div><div className="kpi-value">{det.a.total_items}</div></div>
+              <div className="kpi"><div className="kpi-label">Con diferencia</div><div className="kpi-value" style={{color:det.a.n_diferencias>0?"var(--red)":"var(--green)"}}>{det.a.n_diferencias}</div></div>
+              <div className="kpi"><div className="kpi-label">Faltan / sobran</div><div className="kpi-value"><span style={{color:"var(--red)"}}>{Number(det.a.unidades_faltantes)||0}</span> <span className="muted">/</span> <span style={{color:"var(--green)"}}>{Number(det.a.unidades_sobrantes)||0}</span></div></div>
+              <div className="kpi"><div className="kpi-label">Valor faltante</div><div className="kpi-value" style={{color:"var(--red)"}}>{fmt(det.a.valor_faltante)}</div></div>
+              <div className="kpi" title="Faltantes que los chequeos de los cajeros ya habían atribuido a un turno en este periodo"><div className="kpi-label">Explicado por turnos</div>
+                <div className="kpi-value" style={{color:cruce&&Number(det.a.unidades_faltantes)>0?(cruce.totalTurnos>=Number(det.a.unidades_faltantes)?"var(--green)":"var(--amber)"):"var(--td)"}}>{cruce?(Math.min(cruce.totalTurnos,Number(det.a.unidades_faltantes)||0)+" / "+(Number(det.a.unidades_faltantes)||0)):"…"}</div></div>
+            </div>
+            {cruce && !cruce.error && <div className="muted" style={{fontSize:11,margin:"4px 0 6px"}}>Cruce con los chequeos de los cajeros desde {cruce.primero?"30 días antes (primer arqueo de la sede)":("el arqueo anterior, "+fLocalDia(cruce.desde))}: {cruce.nTurnos} turnos comparados. Lo que el arqueo encuentra de más que los turnos es pérdida que nadie reportó en su conteo (queda sin dueño).</div>}
+            {det.items===null ? <div className="empty">Cargando…</div> : (
+              <div>
+                <div style={{display:"flex",gap:8,alignItems:"center",margin:"6px 0"}}>
+                  <label className="check"><input type="checkbox" checked={verTodos} onChange={e=>setVerTodos(e.target.checked)}/> Ver también los que cuadraron</label>
+                  {det.a.estado==='pendiente' && <span className="muted" style={{fontSize:11,marginLeft:"auto"}}>Marca "recontar" en lo que no te convenza: esos no se ajustan.</span>}
+                </div>
+                <div className="card" style={{padding:0,overflowX:"auto",maxHeight:"45vh",overflowY:"auto"}}>
+                  <table className="tbl">
+                    <thead><tr><th>Producto</th><th className="num">Sistema</th><th className="num">Contado</th><th className="num">Dif.</th><th className="num">Valor</th><th title="Cuánto de lo que falta ya estaba atribuido a turnos de cajeros">Turnos explican</th>{det.a.estado==='pendiente' && <th>Recontar</th>}</tr></thead>
+                    <tbody>{lista.length===0 && <tr><td colSpan="7"><div className="empty">Todo cuadró. 🎉</div></td></tr>}
+                      {[...lista].sort((a,b)=>Number(a.diferencia)-Number(b.diferencia)).map((i,k)=>(
+                        <tr key={k} style={{opacity:excluir[i.producto_id]?0.5:1}}>
+                          <td className="row-name">{i.nombre}</td><td className="num muted">{i.sistema}</td><td className="num">{i.contado}</td>
+                          <td className="num" style={{fontWeight:800,color:Number(i.diferencia)<0?"var(--red)":Number(i.diferencia)>0?"var(--green)":"var(--td)"}}>{Number(i.diferencia)>0?"+":""}{i.diferencia}</td>
+                          <td className="num">{Number(i.diferencia)<0&&i.costo?fmt(-Number(i.diferencia)*Number(i.costo)):"—"}</td>
+                          <td style={{fontSize:12,whiteSpace:"nowrap"}}>{(()=>{ if(Number(i.diferencia)>=0) return <span className="muted">—</span>; const ex=explicaDe(i); if(!ex) return <span className="muted">…</span>; const falta=-Number(i.diferencia), e=Math.min(ex.perdida,falta), ops=Object.entries(ex.ops).sort((a,b)=>b[1]-a[1]).map(([o,u])=>o.split(' ')[0]+" "+u).join(", ");
+                            return <span><b style={{color:e>=falta?"var(--green)":e>0?"var(--amber)":"var(--red)"}}>{e} de {falta}</b>{ops&&<span className="muted"> · {ops}</span>}{e<falta&&<span className="muted"> · {falta-e} sin dueño</span>}</span>; })()}</td>
+                          {det.a.estado==='pendiente' && <td>{Number(i.diferencia)!==0 && <input type="checkbox" checked={!!excluir[i.producto_id]} onChange={e=>setExcluir(x=>({...x,[i.producto_id]:e.target.checked}))}/>}</td>}
+                        </tr>))}</tbody>
+                  </table>
+                </div>
+                {det.a.estado==='aprobado' && det.a.recontar && det.a.recontar.length>0 && <div className="muted" style={{fontSize:11,marginTop:6}}>Quedaron para recontar: {det.a.recontar.length} producto(s).</div>}
+              </div>)}
+            {det.a.estado==='pendiente' && det.items && (
+              <div style={{marginTop:12}}>
+                {conf==='aprobar' && <div className="card" style={{border:"1px solid var(--amber)",marginBottom:8}}><b>¿Aprobar el arqueo?</b> Se ajustan {dif.length-excl} producto(s) en {det.a.sede} para dejar el stock como se contó{excl>0?(" ("+excl+" quedan para recontar)"):""}. Desde este arqueo arrancan los controles de la sede.</div>}
+                {conf==='anular' && <div className="card" style={{border:"1px solid var(--red)",marginBottom:8}}><b>¿Anular el arqueo?</b> No se ajusta nada y queda marcado como anulado.</div>}
+                <div className="modal-actions">
+                  <button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button>
+                  {conf?(<span><button className="btn btn-ghost" disabled={busy} onClick={()=>setConf(null)}>No</button> <button className={"btn "+(conf==='aprobar'?'btn-amber':'btn-danger')} disabled={busy} onClick={conf==='aprobar'?aprobar:anular}>{busy?"…":(conf==='aprobar'?"Sí, aprobar y ajustar":"Sí, anular")}</button></span>)
+                    :(<span><button className="btn btn-danger" onClick={()=>setConf('anular')}>✕ Anular</button> <button className="btn btn-amber" disabled={det.a.supervisor===admin} title={det.a.supervisor===admin?"Quien contó no puede aprobar":""} onClick={()=>setConf('aprobar')}>✅ Aprobar y ajustar stock</button></span>)}
+                </div>
+              </div>)}
+            {det.a.estado!=='pendiente' && <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDet(null)}>Cerrar</button></div>}
+          </div>
+        </div>)}
+    </div>
+  );
+}
+
+// Faltantes por turno: compara cada chequeo con el ANTERIOR de la misma sede. Lo que aparece de nuevo
+// se perdió en el turno de quien hizo el chequeo anterior (el chequeo es al iniciar turno).
+// Un faltante que se "recupera" en el chequeo siguiente se marca como probable error de conteo.
+// Los ajustes que hace el admin entre chequeos se descuentan para no leerlos como pérdida/recuperación.
+function calcularFaltantes(chequeos, ajustes, idNombre, costoDe, tol){
+  const norm=x=>String(x||'').trim().toUpperCase();
+  const porSede={}; chequeos.forEach(c=>{ (porSede[c.sede]=porSede[c.sede]||[]).push(c); });
+  const turnos=[];
+  Object.entries(porSede).forEach(([sede,cs])=>{
+    cs.sort((a,b)=>a.created_at.localeCompare(b.created_at));
+    const ajSede=ajustes.filter(a=>a.sede===sede);
+    const prevTurnoDe={};   // producto → última entrada (para detectar reversos)
+    for(let i=1;i<cs.length;i++){
+      const prev=cs[i-1], cur=cs[i];
+      const dPrev={}, dCur={};
+      (prev.descuadres||[]).forEach(d=>{ dPrev[norm(d.nombre)]={nombre:d.nombre,dif:Number(d.diferencia)||0}; });
+      (cur.descuadres||[]).forEach(d=>{ dCur[norm(d.nombre)]={nombre:d.nombre,dif:Number(d.diferencia)||0}; });
+      const aj={}; ajSede.filter(a=>a.created_at>prev.created_at && a.created_at<=cur.created_at).forEach(a=>{ const n=norm(idNombre[a.producto_id]||''); if(n) aj[n]=(aj[n]||0)+(Number(a.cantidad)||0); });
+      const t={id:cur.id, sede, operador:String(prev.operador||'').trim(), inicio:prev.created_at, fin:cur.created_at, contadoPor:String(cur.operador||'').trim(), ultimo:i===cs.length-1, items:[]};
+      const claves=new Set([...Object.keys(dPrev),...Object.keys(dCur),...Object.keys(aj)]);
+      claves.forEach(k=>{
+        const antes=dPrev[k]?dPrev[k].dif:0, ahora=dCur[k]?dCur[k].dif:0, a=aj[k]||0;
+        const delta=ahora-antes+a;           // + a: si el admin ajustó −2, el sistema ya bajó y no es "recuperado"
+        if(delta===0) return;
+        const nombre=(dCur[k]||dPrev[k]||{}).nombre||k;
+        const it={nombre, antes, ahora, ajuste:a, delta, err:0, estado:'', costo:costoDe(k)};
+        // reverso contra el turno inmediatamente anterior (mismo producto, misma sede) → error de conteo
+        const pv=prevTurnoDe[k];
+        if(pv && pv.turnoIdx===turnos.length-1 && Math.sign(pv.it.delta)===-Math.sign(delta)){
+          const neto=Math.min(Math.abs(pv.it.delta)-pv.it.err, Math.abs(delta));
+          if(neto>0){ pv.it.err+=neto; it.err+=neto; }
+        }
+        t.items.push(it); prevTurnoDe[k]={it, turnoIdx:turnos.length};
+      });
+      turnos.push(t);
+    }
+  });
+  // estados y cifras por ítem
+  turnos.forEach(t=>{ t.items.forEach(it=>{
+    const real=Math.abs(it.delta)-it.err;        // unidades que no se explican por un error de conteo
+    it.perdida = it.delta<0 ? real : 0;
+    it.recuperado = it.delta>0 ? real : 0;
+    it.valor = it.perdida*(it.costo||0);
+    if(real===0) it.estado='error';
+    else if(Math.abs(it.delta)<=tol) it.estado='tolerancia';
+    else if(it.delta>0) it.estado='recuperado';
+    else it.estado = t.ultimo ? 'pendiente' : 'confirmado';
+    if(it.err>0 && real>0) it.estadoNota='parte fue error de conteo ('+it.err+')';
+  });
+    t.perdidos=t.items.filter(i=>i.estado==='pendiente'||i.estado==='confirmado');
+    t.unidades=t.perdidos.reduce((a,i)=>a+i.perdida,0);
+    t.valor=t.perdidos.reduce((a,i)=>a+i.valor,0);
+    t.errores=t.items.filter(i=>i.estado==='error').length;
+  });
+  return turnos.sort((a,b)=>b.fin.localeCompare(a.fin));
+}
+
+function FaltantesTurno({showToast, foco}){
+  const hoy=fLocalDia(new Date());
+  const [desde,setDesde]=useState(()=>{ const d=new Date(); d.setDate(d.getDate()-13); return fLocalDia(d); });
+  const [hasta,setHasta]=useState(hoy);
+  const [sede,setSede]=useState("");
+  const [sedes,setSedes]=useState([]);
+  const [vista,setVista]=useState(foco?'productos':'turnos');
+  const [tol,setTol]=useState(0);
+  const [q,setQ]=useState(foco||"");
+  const [data,setData]=useState(null);
+  const [abierto,setAbierto]=useState({});
+  const [ultArq,setUltArq]=useState({});
+  useEffect(()=>{ db.listSedes().then(s=>setSedes(s.filter(x=>!x.es_bodega))).catch(()=>{}); if(!DEMO_MODE) db.ultimosArqueos().then(setUltArq).catch(()=>{}); },[]);
+  // punto de partida: el último arqueo aprobado de la sede (o el más viejo de los últimos, si es "todas")
+  const arqRef=sede?ultArq[sede]:(Object.values(ultArq).sort()[0]||null);
+  const desdeArqueo=()=>{ if(!arqRef) return; setDesde(fLocalDia(arqRef)); setHasta(fLocalDia(new Date())); };
+  useEffect(()=>{ if(foco){ setQ(foco); setVista('productos'); } },[foco]);
+  const cargar=async()=>{ setData(null);
+    try{
+      const d0=new Date(desde+'T00:00:00'); d0.setDate(d0.getDate()-10);   // 10 días más atrás para tener el chequeo anterior al rango
+      const dISO=d0.toISOString();
+      const [cs,aj,ps]=await Promise.all([db.listChequeosDesde(dISO, sede||undefined), db.listAjustesDesde(dISO, sede||undefined), db.listProductos()]);
+      const idNombre={}, costo={}; (ps||[]).forEach(p=>{ idNombre[p.id]=p.nombre; costo[String(p.nombre).trim().toUpperCase()]=Number(p.costo)||0; });
+      setData({cs, aj, idNombre, costo});
+    }catch(e){ showToast(""+(e.message||e),"err"); setData({cs:[],aj:[],idNombre:{},costo:{}}); } };
+  useEffect(()=>{ cargar(); },[desde,sede]);
+  const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='14') d.setDate(d.getDate()-13); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
+
+  if(data===null) return <div className="empty">Comparando chequeos…</div>;
+  const hastaISO=new Date(hasta+'T23:59:59.999').toISOString(), desdeISO=new Date(desde+'T00:00:00').toISOString();
+  const todos=calcularFaltantes(data.cs, data.aj, data.idNombre, k=>data.costo[k]||0, tol);
+  const turnos=todos.filter(t=>t.fin>=desdeISO && t.fin<=hastaISO);
+  const qn=q.trim().toUpperCase();
+  const colorEstado={pendiente:"var(--amber)",confirmado:"var(--red)",error:"var(--td)",tolerancia:"var(--td)",recuperado:"var(--green)"};
+  const lblEstado={pendiente:"pendiente de confirmar",confirmado:"confirmado",error:"error de conteo",tolerancia:"dentro de tolerancia",recuperado:"recuperado"};
+  const Estado=({it})=><span className="pill" style={{background:"transparent",border:"1px solid "+colorEstado[it.estado],color:colorEstado[it.estado]}} title={it.estadoNota||""}>{lblEstado[it.estado]}{it.estadoNota?" *":""}</span>;
+  const horaT=t=>fLocalDia(t.inicio)+" "+fLocalHora(t.inicio)+" → "+(fLocalDia(t.fin)!==fLocalDia(t.inicio)?fLocalDia(t.fin)+" ":"")+fLocalHora(t.fin);
+
+  // ---- agregados ----
+  const totalU=turnos.reduce((a,t)=>a+t.unidades,0), totalV=turnos.reduce((a,t)=>a+t.valor,0), totalErr=turnos.reduce((a,t)=>a+t.errores,0);
+  const porOp={}; turnos.forEach(t=>{ const o=porOp[t.operador]||(porOp[t.operador]={operador:t.operador,turnos:0,conPerdida:0,unidades:0,pend:0,valor:0,productos:{},errores:0});
+    o.turnos++; if(t.perdidos.length) o.conPerdida++; o.errores+=t.errores;
+    t.perdidos.forEach(i=>{ o.unidades+=i.perdida; o.valor+=i.valor; if(i.estado==='pendiente') o.pend+=i.perdida; o.productos[i.nombre]=(o.productos[i.nombre]||0)+i.perdida; }); });
+  const ranking=Object.values(porOp).sort((a,b)=>b.valor-a.valor||b.unidades-a.unidades);
+  const porProd={}; turnos.forEach(t=>{ t.items.forEach(i=>{ const k=i.nombre+'|'+t.sede; const p=porProd[k]||(porProd[k]={nombre:i.nombre,sede:t.sede,unidades:0,valor:0,errores:0,turnos:[]});
+    if(i.estado==='pendiente'||i.estado==='confirmado'){ p.unidades+=i.perdida; p.valor+=i.valor; } if(i.estado==='error') p.errores++; p.turnos.push({t,i}); }); });
+  const productos=Object.values(porProd).filter(p=>!qn||p.nombre.toUpperCase().includes(qn)).sort((a,b)=>b.valor-a.valor||b.unidades-a.unidades);
+  const tog=k=>setAbierto(a=>({...a,[k]:!a[k]}));
+
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>🕵️ Qué se perdió en cada turno.</b> <span className="muted">Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdió en el turno de quien hizo el chequeo anterior. Un faltante que el siguiente chequeo "recupera" se marca como error de conteo. Los ajustes del back office no cuentan como pérdida ni recuperación.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+        <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+        <div style={{display:"flex",gap:4,alignSelf:"flex-end",flexWrap:"wrap"}}>{[['7','7 días'],['14','14 días'],['30','30 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}
+          <button className="btn btn-ghost btn-sm" disabled={!arqRef} title={arqRef?("Último arqueo aprobado: "+fLocalDia(arqRef)):"Esta sede no tiene arqueo aprobado"} onClick={desdeArqueo}>📋 Desde el último arqueo</button></div>
+        <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={sede} onChange={e=>setSede(e.target.value)}><option value="">Todas</option>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}</select></div>
+        <div className="fld"><label className="label">Tolerancia</label><select className="select" style={{margin:0}} value={tol} onChange={e=>setTol(Number(e.target.value))}><option value={0}>Ninguna</option><option value={1}>±1 unidad</option><option value={2}>±2 unidades</option><option value={3}>±3 unidades</option></select></div>
+        <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Unidades perdidas</div><div style={{fontSize:22,fontWeight:800,color:totalU>0?"var(--red)":"var(--green)"}}>{totalU}</div><div className="muted" style={{fontSize:11}}>{turnos.length} turnos comparados</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Valor al costo</div><div style={{fontSize:22,fontWeight:800,color:totalV>0?"var(--red)":"var(--green)"}}>{fmt(totalV)}</div><div className="muted" style={{fontSize:11}}>productos sin costo valen $0</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Errores de conteo detectados</div><div style={{fontSize:22,fontWeight:800}}>{totalErr}</div><div className="muted" style={{fontSize:11}}>faltante que el siguiente chequeo recuperó</div></div>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
+        {[['turnos','Por turno'],['operadores','Por operador'],['productos','Por producto']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
+        {vista==='productos' && <input className="input" style={{margin:0,maxWidth:240,marginLeft:"auto"}} placeholder="Buscar producto…" value={q} onChange={e=>setQ(e.target.value)}/>}
+      </div>
+
+      {turnos.length===0 && <div className="empty">No hay dos chequeos seguidos de una misma sede en ese rango.</div>}
+
+      {vista==='turnos' && turnos.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Sede</th><th>Turno de</th><th>Horario</th><th>Contó</th><th className="num">Productos</th><th className="num">Unidades</th><th className="num">Valor</th><th className="num">Err. conteo</th><th></th></tr></thead>
+            <tbody>{turnos.map(t=>(<React.Fragment key={t.id}>
+              <tr style={{cursor:"pointer",background:t.unidades>0?"var(--red-d)":undefined}} onClick={()=>tog(t.id)}>
+                <td>{t.sede}</td><td className="row-name">{t.operador}{t.ultimo && <span className="pill pill-token" style={{marginLeft:6}}>último</span>}</td>
+                <td className="muted" style={{whiteSpace:"nowrap"}}>{horaT(t)}</td><td className="muted">{t.contadoPor}</td>
+                <td className="num">{t.perdidos.length||"—"}</td>
+                <td className="num" style={{fontWeight:800,color:t.unidades>0?"var(--red)":"var(--green)"}}>{t.unidades>0?("-"+t.unidades):"0"}</td>
+                <td className="num">{t.valor>0?fmt(t.valor):"—"}</td>
+                <td className="num muted">{t.errores||"—"}</td>
+                <td className="muted">{abierto[t.id]?"▲":"▼"}</td>
+              </tr>
+              {abierto[t.id] && <tr><td colSpan="9" style={{padding:"4px 10px 10px"}}>
+                {t.items.length===0 ? <div className="muted">Nada cambió frente al chequeo anterior.</div> : (
+                <table className="tbl"><thead><tr><th>Producto</th><th className="num">Dif. antes</th><th className="num">Dif. ahora</th><th className="num">Ajuste admin</th><th className="num">Lo nuevo</th><th className="num">Valor</th><th>Estado</th></tr></thead>
+                  <tbody>{[...t.items].sort((a,b)=>a.delta-b.delta).map((it,i)=>(
+                    <tr key={i} style={{opacity:(it.estado==='error'||it.estado==='tolerancia')?0.6:1}}>
+                      <td className="row-name">{it.nombre}</td><td className="num muted">{it.antes}</td><td className="num muted">{it.ahora}</td><td className="num muted">{it.ajuste?((it.ajuste>0?"+":"")+it.ajuste):"—"}</td>
+                      <td className="num" style={{fontWeight:800,color:it.delta<0?"var(--red)":"var(--green)"}}>{it.delta>0?"+":""}{it.delta}</td>
+                      <td className="num">{it.valor>0?fmt(it.valor):"—"}</td><td><Estado it={it}/></td>
+                    </tr>))}</tbody></table>)}
+              </td></tr>}
+            </React.Fragment>))}</tbody>
+          </table>
+        </div>)}
+
+      {vista==='operadores' && turnos.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>#</th><th>Operador</th><th className="num">Turnos</th><th className="num">Con pérdida</th><th className="num">Unidades perdidas</th><th className="num">Pendientes</th><th className="num">Valor al costo</th><th className="num">Err. conteo</th><th>Productos más perdidos</th></tr></thead>
+            <tbody>{ranking.map((o,i)=>(
+              <tr key={o.operador}>
+                <td className="muted">{i+1}</td><td className="row-name">{o.operador}</td><td className="num">{o.turnos}</td><td className="num">{o.conPerdida}</td>
+                <td className="num" style={{fontWeight:800,color:o.unidades>0?"var(--red)":"var(--green)"}}>{o.unidades}</td>
+                <td className="num muted">{o.pend||"—"}</td><td className="num" style={{fontWeight:700}}>{o.valor>0?fmt(o.valor):"—"}</td><td className="num muted">{o.errores||"—"}</td>
+                <td className="muted" style={{fontSize:12}}>{Object.entries(o.productos).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([n,u])=>n+" ("+u+")").join(" · ")||"—"}</td>
+              </tr>))}</tbody>
+          </table>
+          <div className="muted" style={{fontSize:11,padding:"8px 12px"}}>Solo cuenta lo que se perdió en el turno de cada operador (no el arrastre de chequeos anteriores). "Pendientes" son faltantes del último chequeo, que todavía no confirma un chequeo siguiente.</div>
+        </div>)}
+
+      {vista==='productos' && turnos.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}>
+          <table className="tbl">
+            <thead><tr><th>Producto</th><th>Sede</th><th className="num">Unidades perdidas</th><th className="num">Valor</th><th className="num">Err. conteo</th><th></th></tr></thead>
+            <tbody>{productos.length===0 && <tr><td colSpan="6"><div className="empty">Ningún producto cambió en ese rango.</div></td></tr>}
+              {productos.map(p=>{ const k=p.nombre+'|'+p.sede; return (<React.Fragment key={k}>
+              <tr style={{cursor:"pointer"}} onClick={()=>tog(k)}>
+                <td className="row-name">{p.nombre}</td><td className="muted">{p.sede}</td>
+                <td className="num" style={{fontWeight:800,color:p.unidades>0?"var(--red)":"var(--green)"}}>{p.unidades>0?("-"+p.unidades):"0"}</td>
+                <td className="num">{p.valor>0?fmt(p.valor):"—"}</td><td className="num muted">{p.errores||"—"}</td><td className="muted">{abierto[k]?"▲":"▼"}</td>
+              </tr>
+              {abierto[k] && <tr><td colSpan="6" style={{padding:"4px 10px 10px"}}>
+                <table className="tbl"><thead><tr><th>Turno de</th><th>Horario</th><th>Contó</th><th className="num">Dif. antes</th><th className="num">Dif. ahora</th><th className="num">Lo nuevo</th><th>Estado</th></tr></thead>
+                  <tbody>{p.turnos.map(({t,i},j)=>(
+                    <tr key={j} style={{opacity:(i.estado==='error'||i.estado==='tolerancia')?0.6:1}}>
+                      <td className="row-name">{t.operador}</td><td className="muted" style={{whiteSpace:"nowrap"}}>{horaT(t)}</td><td className="muted">{t.contadoPor}</td>
+                      <td className="num muted">{i.antes}</td><td className="num muted">{i.ahora}</td>
+                      <td className="num" style={{fontWeight:800,color:i.delta<0?"var(--red)":"var(--green)"}}>{i.delta>0?"+":""}{i.delta}</td><td><Estado it={i}/></td>
+                    </tr>))}</tbody></table>
+              </td></tr>}
+            </React.Fragment>); })}</tbody>
+          </table>
+        </div>)}
+    </div>
+  );
+}
+
 function TrazaModal({producto,sede,sedes,onClose}){
   const [movs,setMovs]=useState(null);
   const [filtroSede,setFiltroSede]=useState("");   // "" = todas

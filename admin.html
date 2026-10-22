@@ -195,6 +195,7 @@ const uid = () => "tmp-"+Math.random().toString(36).slice(2,9);
 // ---- VIP / Membresías ----
 const VIP_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyoTaC9iB1fm4s3hM4QQ9-1Zbo5cCzJQIn68YlczTTAXrYHBJK1rQsZmiIMo4CL9-S8Bg/exec';
 const VIP_BACKEND = 'supabase';   // 'supabase' (nuevo) | 'google' (respaldo)
+const VIP_CLAVE_POS = 'bc0b473e66b8f3bc0f02d1a23573baa1';   // clave de aplicación de las funciones VIP de empleados (2026-10-22)
 async function vipApiGoogle(params, timeoutMs=45000){
   const url = VIP_APPS_SCRIPT_URL + '?' + new URLSearchParams(params).toString();
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
@@ -227,8 +228,8 @@ async function vipApiSupabase(params){
     const map={
       consultar_cliente:['vip_consultar',{p_id_vip:params.id_vip}],
       buscar_por_telefono:['vip_buscar_telefono',{p_tel:params.telefono}],
-      descontar_saldo:['vip_descontar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens||0),p_sede:params.sede||'Admin',p_operador:params.operador||'Admin',p_metodo:params.metodo||'AjusteAdmin'}],
-      recargar_saldo:['vip_recargar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador||'Admin',p_sede:params.sede||'Admin',p_membresia:params.membresia||null}],
+      descontar_saldo:['vip_descontar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens||0),p_sede:params.sede||'Admin',p_operador:params.operador||'Admin',p_metodo:params.metodo||'AjusteAdmin',p_clave:VIP_CLAVE_POS}],
+      recargar_saldo:['vip_recargar',{p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador||'Admin',p_sede:params.sede||'Admin',p_membresia:params.membresia||null,p_clave:VIP_CLAVE_POS}],
     };
     const m=map[a]; if(!m) return {ok:false,error:'acción no soportada: '+a};
     const {data,error}=await sb.rpc(m[0],m[1]); if(error) return {ok:false,error:error.message}; return data;

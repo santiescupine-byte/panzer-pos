@@ -689,6 +689,9 @@ const VIP_SEDE_MAP = {
 const vipSedeNombre = sede => VIP_SEDE_MAP[sede] || sede;
 // Interruptor del backend VIP: 'supabase' (nuevo, rápido) | 'google' (Apps Script viejo, respaldo)
 const VIP_BACKEND = 'supabase';
+// Clave de aplicación (2026-10-22): las funciones VIP de empleados (crear, recargar, canjear, cupón) solo
+// aceptan llamadas que la traigan. La app vieja de vip.panzercarwash.com no la manda y queda retirada.
+const VIP_CLAVE_POS = 'bc0b473e66b8f3bc0f02d1a23573baa1';
 async function vipApiGoogle(params, timeoutMs=45000){
   const url = VIP_APPS_SCRIPT_URL + '?' + new URLSearchParams(params).toString();
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
@@ -702,11 +705,11 @@ async function vipApiSupabase(params){
   const map={
     consultar_cliente:   ['vip_consultar',       {p_id_vip:params.id_vip}],
     buscar_por_telefono: ['vip_buscar_telefono',  {p_tel:params.telefono}],
-    descontar_saldo:     ['vip_descontar',        {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens),p_sede:params.sede,p_operador:params.operador,p_metodo:params.metodo||'QR'}],
-    recargar_saldo:      ['vip_recargar',         {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador,p_sede:params.sede,p_membresia:params.membresia||null}],
-    crear_cliente:       ['vip_crear',            {p_nombre:params.nombre,p_telefono:params.telefono,p_membresia:params.membresia,p_operador:params.operador,p_sede:params.sede}],
+    descontar_saldo:     ['vip_descontar',        {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_tokens:Number(params.tokens),p_sede:params.sede,p_operador:params.operador,p_metodo:params.metodo||'QR',p_clave:VIP_CLAVE_POS}],
+    recargar_saldo:      ['vip_recargar',         {p_id_vip:params.id_vip,p_monto:Number(params.monto),p_operador:params.operador,p_sede:params.sede,p_membresia:params.membresia||null,p_clave:VIP_CLAVE_POS}],
+    crear_cliente:       ['vip_crear',            {p_nombre:params.nombre,p_telefono:params.telefono,p_membresia:params.membresia,p_operador:params.operador,p_sede:params.sede,p_clave:VIP_CLAVE_POS}],
     verificar_cupon:     ['vip_verificar_cupon',  {p_id_cupon:params.id_cupon,p_id_cliente:params.id_cliente}],
-    canjear_cupon:       ['vip_canjear_cupon',    {p_id_cupon:params.id_cupon,p_id_cliente:params.id_cliente,p_sede:params.sede,p_operador:params.operador}],
+    canjear_cupon:       ['vip_canjear_cupon',    {p_id_cupon:params.id_cupon,p_id_cliente:params.id_cliente,p_sede:params.sede,p_operador:params.operador,p_clave:VIP_CLAVE_POS}],
     reporte_turno:       ['vip_reporte_turno',    {p_operador:params.operador,p_sede:params.sede,p_desde:(params.fecha_desde? new Date(Number(params.fecha_desde)).toISOString() : null)}],
   };
   const m=map[a]; if(!m) return { ok:false, error:'acción no soportada: '+a };

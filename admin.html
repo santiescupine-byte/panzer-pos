@@ -1567,6 +1567,17 @@ const db = {
     // solo descuentos manuales (sin ciclo) que no se hayan aplicado en nómina
     const {error}=await sb.from('recaudo_descuentos').delete().eq('id',id).is('ciclo_id',null).eq('aplicado',false); if(error) throw error;
   },
+  // ---- Membresías por cobrar (cobro obligatorio en el POS) ----
+  async listMembresiasPorCobrar(dias){
+    if(DEMO_MODE) return [];
+    const d=new Date(); d.setDate(d.getDate()-(dias||30));
+    const {data,error}=await sb.from('membresias_por_cobrar').select('*').gte('created_at',d.toISOString()).order('created_at',{ascending:false}).limit(1000);
+    if(error) throw error; return data||[];
+  },
+  async descartarMembresiaPendiente(id, admin, motivo){
+    const {data,error}=await sb.rpc('membresia_pendiente_descartar',{p_id:id, p_admin:admin, p_motivo:motivo});
+    if(error) throw new Error("Sin conexión con el sistema. Intenta de nuevo."); return data;
+  },
   async marcarDescuento(id, aplicado, quien){
     if(DEMO_MODE) return;
     const {error}=await sb.from('recaudo_descuentos').update(aplicado?{aplicado:true,aplicado_en:new Date().toISOString(),aplicado_por:quien||null}:{aplicado:false,aplicado_en:null,aplicado_por:null}).eq('id',id); if(error) throw error;
@@ -11131,6 +11142,68 @@ function Tareas({showToast, quien, rol, onTareasChange}){
 // ============================================================
 // SECCIÓN: MEMBRESÍAS VIP (solo lectura) — lee del backend VIP (Sheets)
 // ============================================================
+// Cobro obligatorio de membresías: cada venta/recarga VIP hecha en el POS queda aquí hasta que el cajero la cobre en un recibo
+function MembresiasPorCobrar({showToast, admin}){
+  const [rows,setRows]=useState(null);
+  const [dias,setDias]=useState(30);
+  const [f,setF]=useState('pendiente');
+  const [desc,setDesc]=useState(null);   // {r, motivo}
+  const [busy,setBusy]=useState(false);
+  const load=async()=>{ setRows(null); try{ setRows(await db.listMembresiasPorCobrar(dias)); }catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  useEffect(()=>{ load(); },[dias]);
+  if(rows===null) return <div className="empty">Cargando…</div>;
+  const vis=rows.filter(r=>f==='todas'||r.estado===f);
+  const nPend=rows.filter(r=>r.estado==='pendiente').length;
+  const pill=e=>e==='cobrada'?<span className="pill pill-prod">cobrada</span>:e==='descartada'?<span className="pill pill-off">descartada</span>:<span className="pill pill-token">pendiente</span>;
+  const horas=r=>Math.round((Date.now()-new Date(r.created_at))/3600000);
+  const descartar=async()=>{ if(busy||!desc) return; setBusy(true);
+    try{ const r=await db.descartarMembresiaPendiente(desc.r.id, admin, desc.motivo);
+      if(r&&r.ok){ showToast("Descartada: ya no se exige el cobro","ok"); setDesc(null); await load(); } else showToast((r&&r.error)||"No se pudo","err"); }
+    catch(e){ showToast(""+(e.message||e),"err"); } setBusy(false); };
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>🛒 Cobro obligatorio.</b> <span className="muted">Cada membresía vendida o recargada desde el POS entra al carrito del cajero como línea fija y no sale hasta que la cobre en un recibo. Si el recibo se anula, vuelve al carrito. Descarta solo las que de verdad no se van a cobrar (la recarga se deshizo, el cliente no pagó): queda el rastro con tu nombre y el motivo.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <select className="select" style={{maxWidth:170,margin:0}} value={f} onChange={e=>setF(e.target.value)}><option value="pendiente">Pendientes ({nPend})</option><option value="cobrada">Cobradas</option><option value="descartada">Descartadas</option><option value="todas">Todas</option></select>
+        <select className="select" style={{maxWidth:150,margin:0}} value={dias} onChange={e=>setDias(Number(e.target.value))}><option value={7}>7 días</option><option value={30}>30 días</option><option value={90}>90 días</option></select>
+        <button className="btn btn-ghost btn-sm" onClick={load}>↻ Actualizar</button>
+      </div>
+      <div className="card" style={{padding:0,overflowX:"auto",marginTop:10}}>
+        <table className="tbl">
+          <thead><tr><th>Fecha</th><th>Sede</th><th>Cajero</th><th>Cliente</th><th>Membresía</th><th className="num">Precio</th><th>Origen</th><th>Estado</th><th>Recibo</th><th></th></tr></thead>
+          <tbody>
+            {vis.length===0 && <tr><td colSpan="10"><div className="empty">Nada en este filtro.</div></td></tr>}
+            {vis.map(r=>(
+              <tr key={r.id} style={{background:r.estado==='pendiente'&&horas(r)>=12?"var(--red-d)":undefined}}>
+                <td className="muted" style={{whiteSpace:"nowrap"}}>{fLocalDia(r.created_at)} {fLocalHora(r.created_at)}{r.estado==='pendiente'&&horas(r)>=12?<span className="pill pill-off" style={{marginLeft:6}}>{horas(r)} h</span>:null}</td>
+                <td>{r.sede}</td><td className="row-name">{r.operador}</td>
+                <td>{r.cliente||"—"}{r.id_vip?<span className="muted" style={{fontSize:11}}> · {r.id_vip}</span>:null}</td>
+                <td>{r.membresia}</td><td className="num">{fmt(r.precio)}</td>
+                <td className="muted">{r.origen==='venta'?'venta':'recarga'}</td>
+                <td>{pill(r.estado)}</td>
+                <td className="muted" style={{fontSize:12}}>{r.numero_recibo||(r.estado==='descartada'?("por "+(r.descartada_por||"—")+": "+(r.descartada_motivo||"")):"—")}</td>
+                <td>{r.estado==='pendiente' && <button className="btn btn-ghost btn-sm" onClick={()=>setDesc({r,motivo:""})}>Descartar</button>}</td>
+              </tr>))}
+          </tbody>
+        </table>
+      </div>
+      {desc && (
+        <div className="modal-bg" onClick={()=>setDesc(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal-t">Descartar cobro pendiente</div>
+            <div className="muted" style={{marginBottom:10}}>{desc.r.operador} · {desc.r.sede} · {desc.r.membresia} {fmt(desc.r.precio)} · {desc.r.cliente||""}</div>
+            <div className="muted" style={{fontSize:12,marginBottom:8}}>Solo si esa membresía no se va a cobrar (la recarga no quedó, el cliente se arrepintió). Si el cajero sí recibió la plata, NO la descartes: que la cobre.</div>
+            <label className="label">Motivo (obligatorio)</label>
+            <input className="input" value={desc.motivo} onChange={e=>setDesc(d=>({...d,motivo:e.target.value}))} placeholder="Ej: la recarga se anuló en el sistema VIP"/>
+            <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setDesc(null)}>Cancelar</button><button className="btn btn-danger" disabled={busy||!desc.motivo.trim()} onClick={descartar}>{busy?"…":"Descartar"}</button></div>
+          </div>
+        </div>)}
+    </div>
+  );
+}
+
 function Membresias({showToast, admin}){
   const [clientes,setClientes]=useState(null);
   const [q,setQ]=useState("");
@@ -11298,6 +11371,7 @@ function Membresias({showToast, admin}){
           <button className={"btn btn-sm "+(vista==='clientes'?'btn-amber':'btn-ghost')} onClick={()=>setVista('clientes')}>👥 Clientes</button>
           <button className={"btn btn-sm "+(vista==='cupones'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cupones')}>🎁 Cupones</button>
           <button className={"btn btn-sm "+(vista==='bitacora'?'btn-amber':'btn-ghost')} onClick={()=>setVista('bitacora')}>📋 Bitácora</button>
+          <button className={"btn btn-sm "+(vista==='porcobrar'?'btn-amber':'btn-ghost')} onClick={()=>setVista('porcobrar')}>🛒 Por cobrar</button>
           <button className={"btn btn-sm "+(vista==='movimientos'?'btn-amber':'btn-ghost')} onClick={()=>setVista('movimientos')}>📍 Por sede</button>
           <button className={"btn btn-sm "+(vista==='origen'?'btn-amber':'btn-ghost')} onClick={()=>setVista('origen')}>🗺️ Origen</button>
           <button className={"btn btn-sm "+(vista==='cortesias'?'btn-amber':'btn-ghost')} onClick={()=>setVista('cortesias')}>🎟️ Cortesías</button>
@@ -11338,6 +11412,7 @@ function Membresias({showToast, admin}){
       </div>)}
 
       {/* ===== CUPONES ===== */}
+      {vista==='porcobrar' && <MembresiasPorCobrar showToast={showToast} admin={admin}/>}
       {vista==='cupones' && (
         <div>
           <div className="toolbar">

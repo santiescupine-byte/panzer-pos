@@ -866,7 +866,7 @@ function App(){
 
   const agregarAlCarrito=(p,precio)=>{
     setCart(prev=>{
-      const ex=prev.find(c=>c.producto_id===p.id && !p.precio_variable);
+      const ex=prev.find(c=>c.producto_id===p.id && !c.fijo && !p.precio_variable);   // nunca sumar a una membresía por cobrar (línea fija)
       if(ex) return prev.map(c=>c===ex?{...c,cantidad:c.cantidad+1}:c);
       const key = p.precio_variable ? p.id+"-"+Date.now() : p.id;
       return [...prev,{producto_id:p.id,key,nombre:p.nombre,tipo:p.tipo,precio,controla_stock:p.controla_stock,cantidad:1}];

@@ -1219,7 +1219,7 @@ const db = {
       else { DEMO.empleados.push({...e,id:uid()}); }
       return;
     }
-    const row={nombre:e.nombre,rol:e.rol,activo:e.activo,pin:e.pin||null,fecha_ingreso:e.fecha_ingreso||null};
+    const row={nombre:e.nombre,rol:e.rol,rol_admin:(e.rol==='cajero'&&(e.rol_admin==='supervisor'||e.rol_admin==='tesorero'))?e.rol_admin:null,activo:e.activo,pin:e.pin||null,fecha_ingreso:e.fecha_ingreso||null};
     let empId=e.id;
     if(empId){ const {error}=await sb.from('empleados').update(row).eq('id',empId); if(error) throw error; }
     else { const {data,error}=await sb.from('empleados').insert(row).select('id').single(); if(error) throw error; empId=data.id; }
@@ -1672,9 +1672,9 @@ const db = {
       const e=DEMO.empleados.find(x=>x.pin===pin && x.activo);
       return e ? {nombre:e.nombre, rol:e.rol} : null;
     }
-    const {data,error}=await sb.from('empleados').select('nombre,rol').eq('pin',pin).eq('activo',true).maybeSingle();
+    const {data,error}=await sb.from('empleados').select('nombre,rol,rol_admin').eq('pin',pin).eq('activo',true).maybeSingle();
     if(error||!data) return null;
-    return {nombre:data.nombre, rol:data.rol};
+    return {nombre:data.nombre, rol:data.rol, rol_admin:data.rol_admin||null};
   },
 };
 
@@ -1704,8 +1704,12 @@ function App(){
     try{
       const u=await db.loginAdmin(p);
       if(!u){ showToast("PIN incorrecto","err"); setPin(""); }
-      else if(u.rol!=='admin' && u.rol!=='supervisor' && u.rol!=='tesorero'){ showToast("Sin acceso al back office","err"); setPin(""); }
-      else { setAuth(u); setTab(u.rol==='supervisor'?'mantenimiento':(u.rol==='tesorero'?'recaudo':'informes')); setPin(""); }
+      else {
+        // Un cajero puede tener acceso adicional al back office (rol_admin) sin dejar de ser cajero en el POS
+        const rolBO=(u.rol==='cajero' && (u.rol_admin==='supervisor'||u.rol_admin==='tesorero'))?u.rol_admin:u.rol;
+        if(rolBO!=='admin' && rolBO!=='supervisor' && rolBO!=='tesorero'){ showToast("Sin acceso al back office","err"); setPin(""); }
+        else { setAuth({...u, rol:rolBO, rolBase:u.rol}); setTab(rolBO==='supervisor'?'mantenimiento':(rolBO==='tesorero'?'recaudo':'informes')); setPin(""); }
+      }
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
   };
@@ -2262,6 +2266,16 @@ function Empleados({showToast, quien}){
               <option value="admin">Administrador</option>
             </select>
             <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Back office: <b>Administrador</b> = todo · <b>Supervisor de mantenimiento</b> = solo pestaña Mantenimiento · los demás roles no entran al back office. <b>Franquiciado</b> = POS limitado (membresías, reportar máquina, pedidos) en su sede.</div>
+            {editing.rol==='cajero' && (
+              <div>
+                <label className="label">Acceso adicional al back office</label>
+                <select className="select" value={editing.rol_admin||""} onChange={e=>setEditing({...editing,rol_admin:e.target.value||null})}>
+                  <option value="">Ninguno (solo POS)</option>
+                  <option value="supervisor">Supervisor de mantenimiento (recaudo, arqueo, mantenimiento, repuestos, tareas, celdas)</option>
+                  <option value="tesorero">Tesorero (solo recaudo)</option>
+                </select>
+                <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Sigue siendo <b>cajero</b> en el POS, en metas y comisiones y en los chequeos; además entra al back office con ese menú usando el mismo PIN.</div>
+              </div>)}
             <label className="label">PIN de acceso (4 dígitos)</label>
             <input className="input" type="text" inputMode="numeric" maxLength={4} placeholder="ej: 1234"
               value={editing.pin||""}
@@ -9215,7 +9229,7 @@ function Recaudo({showToast, quien, rol}){
 
   useEffect(()=>{ Promise.all([db.listSedes(),db.listEmpleados()]).then(([s,e])=>{ setSedes(s); setEmps(e); }).catch(()=>{}); },[]);
   // los supervisores hacen de tesoreros
-  const tesoreros=emps.filter(e=>e.rol==='supervisor'&&e.activo!==false);
+  const tesoreros=emps.filter(e=>(e.rol==='supervisor'||e.rol_admin==='supervisor'||e.rol_admin==='tesorero')&&e.activo!==false);
   const sedeObj=sedes.find(s=>s.nombre===sede)||{};
   const baseConfigurada=Number(sedeObj.base_efectivo)||0;
   const cajerosDeSede=emps.filter(e=>e.activo!==false && (e.sedes||[]).includes(sede) && (e.rol==='cajero'));

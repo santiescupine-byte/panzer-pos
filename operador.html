@@ -549,6 +549,18 @@ const db = {
     const { data, error } = await sb.rpc('reclamar_abono',{ p_id:id, p_operador:operador, p_sede:sede });
     if(error) throw error; return data;
   },
+  // ---- DEVOLUCIÓN por Bluetooth: misma orden que un lavado de celda, registrada como devolución (1 o 3 créditos, motivo) ----
+  async autorizarDevolucion(estado, operador, sede, maquina, creditos, motivo){
+    if(DEMO_MODE) return {ok:false,error:"No disponible en modo demo."};
+    const { data, error } = await sb.rpc('autorizar_devolucion',{ p_estado:estado, p_operador:operador, p_sede:sede, p_maquina:maquina||null, p_creditos:Number(creditos), p_motivo:motivo });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
+  },
+  async misDevolucionesBLE(operador, desdeISO){
+    if(DEMO_MODE || !sb) return [];
+    const { data, error } = await sb.from('lavados_celda').select('id,maquina,ciclos,motivo,creado_en,estado')
+      .eq('operador',operador).eq('tipo','devolucion').eq('estado','aplicado').gte('creado_en',desdeISO).order('creado_en',{ascending:false}).limit(100);
+    if(error) return []; return data||[];
+  },
   // ---- LAVADO DE CELDA por Bluetooth: el servidor autoriza y firma la orden para la máquina ----
   async autorizarLavadoCelda(estado, operador, sede){
     if(DEMO_MODE) return {ok:false,error:"No disponible en modo demo."};
@@ -564,7 +576,7 @@ const db = {
     if(DEMO_MODE) return [];
     const desde=new Date(Date.now()-14*3600*1000).toISOString();
     const { data, error } = await sb.from('lavados_celda').select('id,maquina,ciclos,creado_en,solicitud_id')
-      .eq('operador',operador).eq('estado','aplicado').gte('creado_en',desde).order('creado_en',{ascending:false}).limit(50);
+      .eq('operador',operador).eq('estado','aplicado').eq('tipo','celda').gte('creado_en',desde).order('creado_en',{ascending:false}).limit(50);
     if(error) return []; return data||[];
   },
   // ---- Lavado de celda ADICIONAL: el operador pide, el admin aprueba ----
@@ -756,7 +768,9 @@ function App(){
   const [showRecibos,setShowRecibos]=useState(false); // sheet "mis últimos recibos"
   const [showPagos,setShowPagos]=useState(false);     // sheet "verificar pago QR"
   const [showCelda,setShowCelda]=useState(false);     // sheet "lavar celda" (Bluetooth)
+  const [showDevolBLE,setShowDevolBLE]=useState(false); // sheet "devolución de créditos" (Bluetooth)
   const celdaOn=true;   // 2026-10-08: "Lavar celda" visible para todos (antes solo con #celda en prueba)
+  const devolBleOn=false;   // 2026-11-03: "Devolución de créditos" por Bluetooth, apagado hasta que el dueño lo active
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"
@@ -1100,6 +1114,7 @@ function App(){
             <div className="card-t" style={{marginBottom:6}}>Menú</div>
             <button className="drawer-item" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{setMenuOpen(false);setShowPagos(true);}}>💸 Verificar pago QR</button>
             {celdaOn && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowCelda(true);}}>🚿 Lavar celda</button>}
+            {devolBleOn && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowDevolBLE(true);}}>↩️ Devolución de créditos</button>}
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
             {miMeta && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMeta(true);}}>🎯 Mi meta del mes</button>}
@@ -1181,6 +1196,7 @@ function App(){
 
       {showPagos && <PagosSheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowPagos(false)}/>}
       {showCelda && <CeldaSheet sede={sede} operador={operador} onClose={()=>setShowCelda(false)}/>}
+      {devolBleOn && showDevolBLE && <DevolucionBLESheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowDevolBLE(false)}/>}
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
       )}
@@ -1332,6 +1348,11 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   const [sending,setSending]=useState(false);
   const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
   const [abonosTurno,setAbonosTurno]=useState(null);   // pagos QR que este cajero verificó en el turno
+  const [devBLE,setDevBLE]=useState([]);               // devoluciones de créditos por Bluetooth en el turno (informativo)
+  useEffect(()=>{ if(DEMO_MODE) return; const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+    db.misDevolucionesBLE(operador,d).then(setDevBLE).catch(()=>setDevBLE([])); },[]);
+  const devB3=devBLE.filter(m=>Number(m.ciclos)===3).length, devB1=devBLE.filter(m=>Number(m.ciclos)===1).length, devBCred=devB3*3+devB1;
+  const devBTxt=devBLE.length?("Dev. Bluetooth: "+devB3+"×3 + "+devB1+"×1 = "+devBCred+" créditos"):"";
   // Protecciones (2026-10-18): cierres vacíos y cierres repetidos
   const [ultimo,setUltimo]=useState(null);        // último cierre de este cajero en esta sede
   const [baseAuto,setBaseAuto]=useState(false);   // la base se sugirió desde el último cierre
@@ -1412,7 +1433,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
     qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado,
     // seguimiento por cajero: cuánto del QR registrado quedó respaldado por abonos verificados
     qrVerificado: abonosTurno ? qrVerificado : null, qrSinVerificar: abonosTurno ? qrSinVerificar : null,
-    observaciones:(observaciones||"")+((abonosTurno&&qrSolo>0)?((observaciones?" | ":"")+"QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):""),
+    observaciones:(observaciones||"")+((abonosTurno&&qrSolo>0)?((observaciones?" | ":"")+"QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):"")+(devBTxt?(((observaciones||(abonosTurno&&qrSolo>0))?" | ":"")+devBTxt):""),
   });
 
   const mensajeWA=()=>{
@@ -1433,6 +1454,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
       'Tokens vendidos: '+p.tokensVendidos+' · Dev: '+p.devTokens+' · Membresía: '+p.tokensMembresia+'\n'+
       'Tokens restantes: '+p.tokensRestantes+'\n'+
       'Devoluciones: '+fmt(dev)+'\n'+
+      (devBLE.length?('Devoluciones Bluetooth: '+devB3+' de 3 créditos · '+devB1+' de 1 crédito ('+devBCred+' créditos)\n'):'')+
       '*Efectivo esperado: '+fmt(efectivoEsperado)+'*'+
       (observaciones?('\nObs: '+observaciones):'');
   };
@@ -1532,6 +1554,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
           {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
         </div>
         {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
+        {devBLE.length>0 && <div className="result-row"><span className="result-label">↩️ Devoluciones por Bluetooth</span><span className="result-value">{devB3} de 3 · {devB1} de 1 <span className="header-sub">({devBCred} créditos)</span></span></div>}
         {baseAuto && ultimo && <div style={{fontSize:11,color:"var(--amber)",marginBottom:6}}>🪙 Base sugerida: los {ultimo.tokens_restantes} tokens que quedaron en tu último cierre ({horaDe(ultimo.created_at)}). Corrígela si no coincide con lo que recibiste.</div>}
         {tokensRepetidos && (
           <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
@@ -2230,6 +2253,110 @@ async function lavarCeldaBLE(operador, sede, paso){
     try{ await db.confirmarLavadoCelda(aut.id, bleTxt(await chE.readValue())); }catch(e){}
     return { maquina:aut.maquina, nombre:aut.nombre, ciclos:aut.ciclos, adicional:!!aut.adicional };
   } finally { try{ if(dev.gatt.connected) dev.gatt.disconnect(); }catch(e){} }
+}
+
+// Devolución de créditos: igual que lavarCeldaBLE pero el servidor registra una devolución (1 o 3 créditos, máquina y motivo)
+async function devolverBLE(operador, sede, maquina, creditos, motivo, paso){
+  if(!navigator.bluetooth) throw new Error("Este equipo no puede usar Bluetooth desde el POS. Usa la tablet Android con Chrome.");
+  paso("Elige la máquina "+(maquina||"")+" en la lista…");
+  let dev;
+  try{ dev=await navigator.bluetooth.requestDevice({filters:[{services:[BLE_CELDA.svc]}]}); }
+  catch(e){
+    if(e&&e.name==='NotFoundError') throw new Error("No elegiste ninguna máquina. Párate cerca de la máquina e intenta de nuevo.");
+    throw new Error("No se pudo usar el Bluetooth. Revisa que esté encendido y que Chrome tenga permiso.");
+  }
+  try{
+    paso("Conectando con "+(dev.name||"la máquina")+"…");
+    let svc=null;
+    for(let i=0;i<3&&!svc;i++){
+      try{ const srv=await dev.gatt.connect(); svc=await srv.getPrimaryService(BLE_CELDA.svc); }
+      catch(e){ if(i===2) throw new Error("No se pudo conectar con la máquina. Acércate más e intenta de nuevo."); await bleEspera(700); }
+    }
+    const chE=await svc.getCharacteristic(BLE_CELDA.estado);
+    const chO=await svc.getCharacteristic(BLE_CELDA.orden);
+    const chR=await svc.getCharacteristic(BLE_CELDA.res);
+    const estado=bleTxt(await chE.readValue());
+    paso("Pidiendo autorización…");
+    const aut=await db.autorizarDevolucion(estado,operador,sede,maquina,creditos,motivo);
+    if(!aut||!aut.ok) throw new Error((aut&&aut.error)||"No se autorizó la devolución.");
+    paso("Cargando "+aut.ciclos+" crédito(s) en la máquina…");
+    let ultimo="";
+    const alCambiar=ev=>{ ultimo=bleTxt(ev.target.value); };
+    try{ chR.addEventListener('characteristicvaluechanged',alCambiar); await chR.startNotifications(); }catch(e){}
+    const datos=new TextEncoder().encode(aut.orden);
+    if(chO.writeValueWithResponse) await chO.writeValueWithResponse(datos); else await chO.writeValue(datos);
+    for(let i=0;i<28 && !/^(OK|ERR)\|/.test(ultimo);i++){
+      await bleEspera(250);
+      if(i%4===3){ try{ await chR.readValue(); }catch(e){} }
+    }
+    if(/^ERR\|/.test(ultimo)) throw new Error(BLE_ERRORES[ultimo.split('|')[1]]||"La máquina rechazó la orden. Intenta de nuevo.");
+    if(!/^OK\|/.test(ultimo)) throw new Error("La máquina no confirmó. Mira su pantalla: si no cargó los créditos, intenta de nuevo (no queda registrada).");
+    try{ await db.confirmarLavadoCelda(aut.id, bleTxt(await chE.readValue())); }catch(e){}
+    return { maquina:aut.maquina, ciclos:aut.ciclos };
+  } finally { try{ if(dev.gatt.connected) dev.gatt.disconnect(); }catch(e){} }
+}
+
+function DevolucionBLESheet({sede,operador,turno,onClose}){
+  const [creditos,setCreditos]=useState(1);
+  const [maquina,setMaquina]=useState("");
+  const [motivo,setMotivo]=useState("");
+  const [maqs,setMaqs]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [paso,setPaso]=useState("");
+  const [ok,setOk]=useState(null);
+  const [err,setErr]=useState(null);
+  const [mias,setMias]=useState([]);
+  const desde=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+  const cargar=async()=>{ try{ setMias(await db.misDevolucionesBLE(operador, desde)); }catch(e){} };
+  useEffect(()=>{ cargar(); db.maquinasCeldaDeSede(sede).then(m=>{ setMaqs(m); if(!maquina && m.length===1) setMaquina(m[0]); }).catch(()=>{}); },[]);
+  const hora=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
+  const listo=!!maquina && motivo.trim().length>=5 && (creditos===1||creditos===3);
+  const devolver=async()=>{
+    if(busy||!listo) return; setBusy(true); setErr(null); setOk(null);
+    try{ const r=await devolverBLE(operador,sede,maquina,creditos,motivo.trim(),setPaso); setOk(r); setMotivo(""); }
+    catch(e){ setErr((e&&e.message)||"No se pudo. Intenta de nuevo."); }
+    finally{ setBusy(false); setPaso(""); cargar(); }
+  };
+  const n3=mias.filter(m=>Number(m.ciclos)===3).length, n1=mias.filter(m=>Number(m.ciclos)===1).length;
+  return (
+    <div className="sheet-bg" onClick={()=>{ if(!busy) onClose(); }}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">↩️ Devolución de créditos</div>
+        <div className="header-sub" style={{marginBottom:10}}>Cuando la máquina le falló al cliente, no le devuelvas tokens ni plata: cárgale los créditos por Bluetooth desde aquí. Queda registrado a tu nombre con la máquina y el motivo.</div>
+        {ok ? (
+          <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:"var(--green-d)",border:"2px solid var(--green)"}}>
+            <div style={{fontSize:54,lineHeight:1}}>✅</div>
+            <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>CRÉDITOS DEVUELTOS</div>
+            <div style={{fontSize:26,fontWeight:900,margin:"6px 0"}}>{ok.maquina}</div>
+            <div className="header-sub">{ok.ciclos} crédito(s) · quedó registrado a nombre de {operador}</div>
+            <div style={{fontWeight:800,marginTop:10}}>El cliente ya puede usar los botones de la máquina.</div>
+            <button className="btn-primary" style={{marginTop:14}} onClick={()=>setOk(null)}>Otra devolución</button>
+          </div>
+        ) : (<div>
+          {err && <div style={{margin:"0 0 10px",padding:"12px 14px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {err}</div>}
+          <label className="label">Créditos a devolver</label>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            {[1,3].map(n=>(<button key={n} disabled={busy} onClick={()=>setCreditos(n)} style={{flex:1,padding:"14px 8px",borderRadius:12,border:"2px solid "+(creditos===n?"var(--green)":"var(--bd)"),background:creditos===n?"var(--green-d)":"var(--sf2)",color:"var(--t)",fontWeight:900,fontSize:18,cursor:"pointer"}}>{n} {n===1?"crédito":"créditos"}</button>))}
+          </div>
+          <label className="label">Máquina a la que se le devuelve</label>
+          {maqs.length>0
+            ? <select className="input" value={maquina} disabled={busy} onChange={e=>setMaquina(e.target.value)}><option value="">Elige la máquina</option>{maqs.map(m=><option key={m} value={m}>{m}</option>)}</select>
+            : <input className="input" placeholder="Nombre de la máquina (ej: BOL_ML_02)" value={maquina} onChange={e=>setMaquina(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g,""))}/>}
+          <label className="label">Motivo</label>
+          <input className="input" placeholder="Ej: se tragó el token y no arrancó" value={motivo} disabled={busy} onChange={e=>setMotivo(e.target.value)}/>
+          <button className="btn-primary" style={{marginTop:4}} disabled={busy||!listo} onClick={devolver}>{busy?(paso||"Un momento…"):(!maquina?"Elige la máquina":motivo.trim().length<5?"Escribe el motivo":"🔵 Conectar y devolver "+creditos+" crédito"+(creditos>1?"s":""))}</button>
+          <div className="header-sub" style={{marginTop:8}}>Al tocar el botón sale la lista Bluetooth: elige la misma máquina que marcaste arriba. Si eliges otra, el sistema no la carga.</div>
+        </div>)}
+        <div className="result-row" style={{marginTop:14}}><span className="result-label" style={{fontWeight:800}}>Devoluciones en tu turno</span><span className="result-value">{mias.length} <span className="header-sub">({n3} de 3 · {n1} de 1)</span></span></div>
+        {mias.map(m=>(
+          <div key={m.id} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
+            <span>↩️ {m.maquina} · <b>{m.ciclos}</b> {Number(m.ciclos)===1?"crédito":"créditos"}<div className="header-sub">{m.motivo}</div></span><span className="header-sub" style={{whiteSpace:"nowrap"}}>{hora(m.creado_en)}</span>
+          </div>))}
+        <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
+      </div>
+    </div>
+  );
 }
 
 function CeldaSheet({sede,operador,onClose}){

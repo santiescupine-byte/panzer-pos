@@ -1598,7 +1598,14 @@ const db = {
   // ---- LAVADOS DE CELDA por Bluetooth (el operador ya no usa tokens para lavar la celda) ----
   async listLavadosCelda(desdeISO, hastaISO){
     if(DEMO_MODE) return [];
-    const {data,error}=await sb.from('lavados_celda').select('*')
+    const {data,error}=await sb.from('lavados_celda').select('*').eq('tipo','celda')
+      .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).limit(5000);
+    if(error) throw error; return data||[];
+  },
+  // Devoluciones de créditos por Bluetooth (misma tabla, tipo = 'devolucion')
+  async listDevolucionesBLE(desdeISO, hastaISO){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.from('lavados_celda').select('*').eq('tipo','devolucion')
       .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).limit(5000);
     if(error) throw error; return data||[];
   },
@@ -1759,8 +1766,8 @@ function App(){
         const NAV = auth.rol==='tesorero'
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
-          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["celdas","🚿","Lavado de celdas"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1799,6 +1806,7 @@ function App(){
                 {tab==="tareas"     && <Tareas showToast={showToast} quien={auth.nombre} rol={auth.rol} onTareasChange={()=>cargarMisTareas(auth.nombre)}/>}
                 {tab==="metas"      && <Metas showToast={showToast} quien={auth.nombre}/>}
                 {tab==="celdas"     && <LavadosCelda showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
+                {tab==="devoluciones" && <DevolucionesBLE showToast={showToast}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
                 {tab==="descuentos" && <Descuentos showToast={showToast}/>}
@@ -8672,6 +8680,83 @@ function ConsignarTendencia({sedes}){
           </table>
         </div>
       </div>)}
+    </div>
+  );
+}
+
+// ============ DEVOLUCIONES DE CRÉDITOS (Bluetooth) ============
+// El cajero devuelve 1 o 3 créditos cargándolos por Bluetooth a la máquina que falló, con motivo.
+// Aquí se ve qué máquina falla más (mantenimiento) y qué operador devuelve más (control).
+function DevolucionesBLE({showToast}){
+  const hoyISO=fLocalDia(new Date());
+  const [desde,setDesde]=useState(()=>{ const d=new Date(); d.setDate(d.getDate()-29); return fLocalDia(d); });
+  const [hasta,setHasta]=useState(hoyISO);
+  const [rows,setRows]=useState(null);
+  const [fSede,setFSede]=useState(''); const [fMaq,setFMaq]=useState(''); const [fOp,setFOp]=useState(''); const [fCred,setFCred]=useState('');
+  const [vista,setVista]=useState('maquinas');   // maquinas | operadores | detalle
+  const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='90') d.setDate(d.getDate()-89); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
+  const cargar=async()=>{ if(!desde||!hasta) return; setRows(null);
+    try{ setRows(await db.listDevolucionesBLE(new Date(desde+'T00:00:00').toISOString(), new Date(hasta+'T23:59:59.999').toISOString())); }
+    catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  useEffect(()=>{ cargar(); },[desde,hasta]);
+  if(rows===null) return <div className="empty">Cargando devoluciones…</div>;
+  const todas=rows.filter(r=>r.estado==='aplicado');
+  const sedes=[...new Set(todas.map(r=>r.sede).filter(Boolean))].sort(), maqs=[...new Set(todas.map(r=>r.maquina))].sort(), ops=[...new Set(todas.map(r=>String(r.operador||'').trim()))].sort();
+  const vis=todas.filter(r=>(!fSede||r.sede===fSede)&&(!fMaq||r.maquina===fMaq)&&(!fOp||String(r.operador||'').trim()===fOp)&&(!fCred||String(r.ciclos)===fCred));
+  const cred=a=>a.reduce((x,r)=>x+(Number(r.ciclos)||0),0);
+  const n3=vis.filter(r=>Number(r.ciclos)===3).length, n1=vis.filter(r=>Number(r.ciclos)===1).length;
+  const agrupa=key=>{ const m={}; vis.forEach(r=>{ const k=key(r); const o=m[k]||(m[k]={k, n:0, cred:0, n3:0, n1:0, ult:null, otros:{}}); o.n++; o.cred+=Number(r.ciclos)||0; if(Number(r.ciclos)===3) o.n3++; else o.n1++; if(!o.ult||r.creado_en>o.ult) o.ult=r.creado_en; const otro=key===porMaq?String(r.operador||'').trim():r.maquina; o.otros[otro]=(o.otros[otro]||0)+1; }); return Object.values(m).sort((a,b)=>b.n-a.n||b.cred-a.cred); };
+  const porMaq=r=>r.maquina, porOp=r=>String(r.operador||'').trim();
+  const rMaq=agrupa(porMaq), rOp=agrupa(porOp);
+  const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
+  const pendientes=rows.filter(r=>r.estado!=='aplicado').length;
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>↩️ Devoluciones de créditos por Bluetooth.</b> <span className="muted">Cuando una máquina le falla al cliente, el cajero le carga 1 o 3 créditos desde el POS (sin tokens ni efectivo) y queda registrado con máquina y motivo. Una máquina con muchas devoluciones necesita mantenimiento; un operador con muchas, revisión.</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+        <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+        <div style={{display:"flex",gap:4,alignSelf:"flex-end"}}>{[['7','7 días'],['30','30 días'],['90','90 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
+        <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}><option value="">Todas</option>{sedes.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+        <div className="fld"><label className="label">Máquina</label><select className="select" style={{margin:0}} value={fMaq} onChange={e=>setFMaq(e.target.value)}><option value="">Todas</option>{maqs.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+        <div className="fld"><label className="label">Operador</label><select className="select" style={{margin:0}} value={fOp} onChange={e=>setFOp(e.target.value)}><option value="">Todos</option>{ops.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+        <div className="fld"><label className="label">Créditos</label><select className="select" style={{margin:0}} value={fCred} onChange={e=>setFCred(e.target.value)}><option value="">1 y 3</option><option value="1">Solo de 1</option><option value="3">Solo de 3</option></select></div>
+        <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{vis.length}</div><div className="muted" style={{fontSize:11}}>{n3} de 3 créditos · {n1} de 1</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Créditos devueltos</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{cred(vis)}</div><div className="muted" style={{fontSize:11}}>= {fmt(cred(vis)*6000)} en tokens</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Máquinas con devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{rMaq.length}</div><div className="muted" style={{fontSize:11}}>{rMaq[0]?("la que más: "+rMaq[0].k+" ("+rMaq[0].n+")"):"—"}</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Operadores que devuelven</div><div style={{fontSize:22,fontWeight:800}}>{rOp.length}</div><div className="muted" style={{fontSize:11}}>{rOp[0]?("el que más: "+rOp[0].k+" ("+rOp[0].n+")"):"—"}</div></div>
+      </div>
+      {pendientes>0 && <div className="muted" style={{fontSize:11,marginBottom:8}}>{pendientes} intento(s) que la máquina no confirmó (no se cuentan).</div>}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+        {[['maquinas','🔧 Máquina que más falla'],['operadores','👤 Operador que más devuelve'],['detalle','📋 Detalle']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
+      </div>
+      {vis.length===0 && <div className="empty">Sin devoluciones con esos filtros.</div>}
+      {vista==='maquinas' && vis.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>#</th><th>Máquina</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>Quién devolvió</th></tr></thead>
+          <tbody>{rMaq.map((o,i)=>(<tr key={o.k} style={{background:i===0&&o.n>=3?"var(--red-d)":undefined}}>
+            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800,color:o.n>=3?"var(--red)":"var(--tb)"}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{Object.entries(o.otros).sort((a,b)=>b[1]-a[1]).map(([n,c])=>n+" ("+c+")").join(" · ")}</td></tr>))}</tbody>
+        </table></div>)}
+      {vista==='operadores' && vis.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>#</th><th>Operador</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>En qué máquinas</th></tr></thead>
+          <tbody>{rOp.map((o,i)=>(<tr key={o.k}>
+            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{Object.entries(o.otros).sort((a,b)=>b[1]-a[1]).map(([n,c])=>n+" ("+c+")").join(" · ")}</td></tr>))}</tbody>
+        </table></div>)}
+      {vista==='detalle' && vis.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>Fecha</th><th>Sede</th><th>Máquina</th><th>Operador</th><th className="num">Créditos</th><th>Motivo</th></tr></thead>
+          <tbody>{vis.map(r=>(<tr key={r.id}>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(r.creado_en)}</td><td>{r.sede}</td><td className="row-name">{r.maquina}</td><td>{r.operador}</td>
+            <td className="num" style={{fontWeight:800,color:Number(r.ciclos)===3?"var(--amber)":"var(--tb)"}}>{r.ciclos}</td><td style={{fontSize:13}}>{r.motivo||<span className="muted">sin motivo</span>}</td></tr>))}</tbody>
+        </table></div>)}
     </div>
   );
 }

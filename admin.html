@@ -1219,7 +1219,7 @@ const db = {
       else { DEMO.empleados.push({...e,id:uid()}); }
       return;
     }
-    const row={nombre:e.nombre,rol:e.rol,rol_admin:(e.rol==='cajero'&&(e.rol_admin==='supervisor'||e.rol_admin==='tesorero'))?e.rol_admin:null,activo:e.activo,pin:e.pin||null,fecha_ingreso:e.fecha_ingreso||null};
+    const row={nombre:e.nombre,rol:e.rol,rol_admin:(e.rol==='cajero'&&(e.rol_admin==='supervisor'||e.rol_admin==='tesorero'))?e.rol_admin:((e.rol==='admin'||e.rol==='gerente')&&e.rol_admin==='tesorero')?'tesorero':null,activo:e.activo,pin:e.pin||null,fecha_ingreso:e.fecha_ingreso||null};
     let empId=e.id;
     if(empId){ const {error}=await sb.from('empleados').update(row).eq('id',empId); if(error) throw error; }
     else { const {data,error}=await sb.from('empleados').insert(row).select('id').single(); if(error) throw error; empId=data.id; }
@@ -2274,6 +2274,8 @@ function Empleados({showToast, quien}){
               <option value="admin">Administrador</option>
             </select>
             <div className="muted" style={{marginTop:-4,marginBottom:6,fontSize:12}}>Back office: <b>Administrador</b> = todo · <b>Supervisor de mantenimiento</b> = solo pestaña Mantenimiento · los demás roles no entran al back office. <b>Franquiciado</b> = POS limitado (membresías, reportar máquina, pedidos) en su sede.</div>
+            {(editing.rol==='admin'||editing.rol==='gerente') && (
+              <label className="check" style={{margin:"4px 0 10px"}}><input type="checkbox" checked={editing.rol_admin==='tesorero'} onChange={e=>setEditing({...editing,rol_admin:e.target.checked?'tesorero':null})}/> Puede cerrar ciclos de recaudo (aparece en la lista de tesoreros)</label>)}
             {editing.rol==='cajero' && (
               <div>
                 <label className="label">Acceso adicional al back office</label>

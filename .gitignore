@@ -13,3 +13,6 @@
 !manifest-operador.json
 !icon-192.png
 !icon-512.png
+# Modelos de reconocimiento facial (face-api.js, MIT): los carga el POS desde /models
+!models/
+!models/*

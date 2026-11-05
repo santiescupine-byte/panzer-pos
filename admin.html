@@ -1602,6 +1602,41 @@ const db = {
       .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).limit(5000);
     if(error) throw error; return data||[];
   },
+  // ---- ASISTENCIA (2026-11-05): llegadas con rostro + tablets autorizadas. Sin fotos. ----
+  async asistenciaLista(desde, hasta, sede){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('asistencia_lista',{p_desde:desde,p_hasta:hasta,p_sede:sede||null}); if(error) throw error; return data||[];
+  },
+  async asistenciaRevisar(id, quien, nota){
+    const {data,error}=await sb.rpc('asistencia_revisar',{p_id:id,p_quien:quien,p_nota:nota||null}); if(error) throw error; return data;
+  },
+  async asistenciaConfig(){
+    if(DEMO_MODE) return {activo:true,tolerancia_min:5,exigir_dispositivo:true};
+    const {data,error}=await sb.from('asistencia_config').select('*').eq('id',1).maybeSingle(); if(error) throw error; return data||{activo:true,tolerancia_min:5,exigir_dispositivo:true};
+  },
+  async asistenciaConfigGuardar(c){
+    const {data,error}=await sb.rpc('asistencia_config_guardar',{p_activo:!!c.activo,p_tolerancia:Number(c.tolerancia_min)||0,p_exigir:!!c.exigir_dispositivo}); if(error) throw error; return data;
+  },
+  async dispositivosLista(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('dispositivos_lista'); if(error) throw error; return data||[];
+  },
+  async dispositivoCodigoCrear(sede, quien){
+    const {data,error}=await sb.rpc('dispositivo_codigo_crear',{p_sede:sede,p_quien:quien}); if(error) throw error; return data;
+  },
+  async dispositivoActivar(id, activo){
+    const {data,error}=await sb.rpc('dispositivo_activar',{p_id:id,p_activo:!!activo}); if(error) throw error; return data;
+  },
+  async rostrosLista(){
+    if(DEMO_MODE) return [];
+    const {data,error}=await sb.rpc('rostros_lista'); if(error) throw error; return data||[];
+  },
+  async rostroBorrar(empleado){
+    const {data,error}=await sb.rpc('rostro_borrar',{p_empleado:empleado}); if(error) throw error; return data;
+  },
+  async sedeCoordenadas(sede, lat, lng){
+    const {data,error}=await sb.rpc('sede_coordenadas',{p_sede:sede,p_lat:lat,p_lng:lng}); if(error) throw error; return data;
+  },
   // Devoluciones de créditos por Bluetooth (misma tabla, tipo = 'devolucion')
   async listDevolucionesBLE(desdeISO, hastaISO){
     if(DEMO_MODE) return [];
@@ -1766,8 +1801,8 @@ function App(){
         const NAV = auth.rol==='tesorero'
           ? [["recaudo","💰","Recaudo"]]
           : auth.rol==='supervisor'
-          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
-          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
+          ? [["arqueo","📋","Arqueo de inventario"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["puntualidad","⏰","Puntualidad"],["tareas","✅","Tareas"],["recaudo","💰","Recaudo"]]
+          : [["informes","📊","Informes"],["inventario","📦","Inventario"],["pedidos","🛒","Pedidos"],["remisiones","📄","Remisiones"],["recaudo","💰","Recaudo"],["membresias","💳","Membresías"],["produccion","🏭","Producción"],["mantenimiento","🔧","Mantenimiento"],["repuestos","🔩","Repuestos"],["tareas","✅","Tareas"],["metas","🎯","Metas y comisiones"],["celdas","🚿","Lavado de celdas"],["devoluciones","↩️","Devoluciones"],["puntualidad","⏰","Puntualidad"],["productos","🏷️","Productos"],["categorias","📁","Categorías"],["descuentos","％","Descuentos"],["sedes","🏬","Sedes"],["empleados","👥","Empleados"]];
         const actual = NAV.find(n=>n[0]===tab) || NAV[0];
         return (
           <div className="layout">
@@ -1807,6 +1842,7 @@ function App(){
                 {tab==="metas"      && <Metas showToast={showToast} quien={auth.nombre}/>}
                 {tab==="celdas"     && <LavadosCelda showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="devoluciones" && <DevolucionesBLE showToast={showToast}/>}
+                {tab==="puntualidad" && <Puntualidad showToast={showToast} quien={auth.nombre} rol={auth.rol}/>}
                 {tab==="productos"  && <Productos showToast={showToast}/>}
                 {tab==="categorias" && <Categorias showToast={showToast}/>}
                 {tab==="descuentos" && <Descuentos showToast={showToast}/>}
@@ -8680,6 +8716,182 @@ function ConsignarTendencia({sedes}){
                 <td className="num" style={{color:d==null?"var(--td)":d<0?"var(--red)":d>0?"var(--green)":"var(--td)"}}>{d==null?"—":(d>0?"+":"")+fmt(d)}</td>
               </tr>); })}</tbody>
           </table>
+        </div>
+      </div>)}
+    </div>
+  );
+}
+
+// ============ PUNTUALIDAD (llegada con rostro + tablet autorizada) ============
+// Cada llegada es una fila de texto: hora del servidor, turno programado (cuadro de Turnos), retraso, resultado del rostro, GPS, tablet.
+// NO hay fotos: el rostro se compara en la tablet contra una huella numérica registrada por el supervisor.
+function Puntualidad({showToast, quien, rol}){
+  const hoyISO=fLocalDia(new Date());
+  const [desde,setDesde]=useState(()=>{ const d=new Date(); d.setDate(d.getDate()-13); return fLocalDia(d); });
+  const [hasta,setHasta]=useState(hoyISO);
+  const [rows,setRows]=useState(null);
+  const [fSede,setFSede]=useState(''); const [fEmp,setFEmp]=useState(''); const [fEstado,setFEstado]=useState(''); const [fRostro,setFRostro]=useState('');
+  const [vista,setVista]=useState('llegadas');   // llegadas | ranking | tablets | rostros | config
+  const [sedes,setSedes]=useState([]);
+  const [disps,setDisps]=useState(null); const [codigo,setCodigo]=useState(null); const [sedeCod,setSedeCod]=useState('');
+  const [rostros,setRostros]=useState(null);
+  const [cfg,setCfg]=useState(null); const [busy,setBusy]=useState(false);
+  const [coord,setCoord]=useState({});   // {sede:{lat,lng}} en edición
+  const esAdmin=rol==='admin'||rol==='gerente';
+  const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='14') d.setDate(d.getDate()-13); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
+  const cargar=async()=>{ if(!desde||!hasta) return; setRows(null);
+    try{ setRows(await db.asistenciaLista(desde, hasta, null)); } catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  const cargarDisps=()=>db.dispositivosLista().then(setDisps).catch(e=>{ showToast(""+(e.message||e),"err"); setDisps([]); });
+  const cargarRostros=()=>db.rostrosLista().then(setRostros).catch(e=>{ showToast(""+(e.message||e),"err"); setRostros([]); });
+  useEffect(()=>{ cargar(); },[desde,hasta]);
+  useEffect(()=>{ db.listSedes().then(a=>{ setSedes(a||[]); const c={}; (a||[]).forEach(x=>{ c[x.nombre]={lat:x.lat==null?"":x.lat, lng:x.lng==null?"":x.lng}; }); setCoord(c); }).catch(()=>{});
+    cargarDisps(); cargarRostros(); db.asistenciaConfig().then(setCfg).catch(()=>setCfg({activo:true,tolerancia_min:5,exigir_dispositivo:true})); },[]);
+  const sedesPropias=sedes.filter(x=>!x.es_bodega&&!x.es_franquicia).map(x=>x.nombre);
+  const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
+  const tol=cfg?Number(cfg.tolerancia_min)||0:5;
+  const lista=rows||[];
+  const emps=[...new Set(lista.map(r=>r.empleado))].sort();
+  const vis=lista.filter(r=>(!fSede||r.sede===fSede)&&(!fEmp||r.empleado===fEmp)&&(!fEstado||r.estado===fEstado)&&(!fRostro||r.rostro===fRostro));
+  const nTarde=vis.filter(r=>r.estado==='tarde').length, nOk=vis.filter(r=>r.estado==='a_tiempo').length, nSin=vis.filter(r=>r.estado==='sin_horario').length;
+  const nRostroMal=vis.filter(r=>r.rostro==='no_coincide').length, nRostroNo=vis.filter(r=>r.rostro!=='ok').length;
+  const minTarde=vis.filter(r=>r.estado==='tarde').reduce((a,r)=>a+(Number(r.retraso_min)||0),0);
+  const badgeEstado=r=>{ const st={display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:12,fontWeight:800};
+    if(r.estado==='tarde') return <span style={{...st,background:"var(--red-d)",color:"var(--red)"}}>⏰ {r.retraso_min} min tarde</span>;
+    if(r.estado==='sin_horario') return <span style={{...st,background:"var(--amber-d)",color:"var(--amber)"}}>sin turno programado</span>;
+    return <span style={{...st,background:"var(--green-d)",color:"var(--green)"}}>✓ a tiempo{Number(r.retraso_min)>0?(" (+"+r.retraso_min+")"):Number(r.retraso_min)<0?(" ("+r.retraso_min+")"):""}</span>; };
+  const badgeRostro=r=>{ const st={display:"inline-block",padding:"2px 8px",borderRadius:8,fontSize:12,fontWeight:800};
+    if(r.rostro==='ok') return <span style={{...st,background:"var(--green-d)",color:"var(--green)"}}>✓ rostro OK</span>;
+    if(r.rostro==='no_coincide') return <span style={{...st,background:"var(--red-d)",color:"var(--red)"}}>⛔ NO coincide</span>;
+    if(r.rostro==='sin_registro') return <span style={{...st,background:"var(--amber-d)",color:"var(--amber)"}}>sin rostro registrado</span>;
+    return <span style={{...st,background:"var(--amber-d)",color:"var(--amber)"}}>⚠️ no verificado</span>; };
+  const gps=r=>r.lat==null?<span className="muted">sin GPS</span>:(r.distancia_m==null?<a href={"https://maps.google.com/?q="+r.lat+","+r.lng} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>ver mapa</a>:<a href={"https://maps.google.com/?q="+r.lat+","+r.lng} target="_blank" rel="noopener" style={{color:Number(r.distancia_m)>300?"var(--red)":"var(--green)",fontWeight:800}}>{Math.round(r.distancia_m)} m</a>);
+  const dispNombre=id=>{ const d=(disps||[]).find(x=>x.id===id); return d?(d.nombre+(d.activo?"":" (inactiva)")):(id?"?":"—"); };
+  const revisar=async r=>{ const nota=prompt("Nota de revisión para "+r.empleado+" ("+fecha(r.marcado_en)+"):", r.nota||""); if(nota===null) return;
+    try{ await db.asistenciaRevisar(r.id, quien, nota); showToast("Revisado ✓","ok"); cargar(); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  // ranking por cajero
+  const porEmp={}; vis.forEach(r=>{ const o=porEmp[r.empleado]||(porEmp[r.empleado]={k:r.empleado,n:0,tarde:0,min:0,max:0,rostroMal:0,rostroNo:0,sedes:{}}); o.n++;
+    if(r.estado==='tarde'){ o.tarde++; o.min+=Number(r.retraso_min)||0; o.max=Math.max(o.max,Number(r.retraso_min)||0); }
+    if(r.rostro==='no_coincide') o.rostroMal++; else if(r.rostro!=='ok') o.rostroNo++; o.sedes[r.sede]=(o.sedes[r.sede]||0)+1; });
+  const rEmp=Object.values(porEmp).sort((a,b)=>b.min-a.min||b.tarde-a.tarde||a.k.localeCompare(b.k));
+  const porSede={}; vis.forEach(r=>{ const o=porSede[r.sede]||(porSede[r.sede]={k:r.sede,n:0,tarde:0,min:0}); o.n++; if(r.estado==='tarde'){ o.tarde++; o.min+=Number(r.retraso_min)||0; } });
+  const rSede=Object.values(porSede).sort((a,b)=>b.min-a.min);
+  // tablets
+  const generarCodigo=async()=>{ if(!sedeCod||busy) return; setBusy(true);
+    try{ const r=await db.dispositivoCodigoCrear(sedeCod, quien); if(!r||!r.ok) throw new Error((r&&r.error)||"No se pudo"); setCodigo(r); }
+    catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+  const toggleDisp=async d=>{ if(!confirm((d.activo?"¿Desactivar":"¿Activar")+" la tablet \""+d.nombre+"\" de "+d.sede+"?")) return;
+    try{ await db.dispositivoActivar(d.id, !d.activo); cargarDisps(); showToast(d.activo?"Tablet desactivada":"Tablet activada","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const borrarRostro=async r=>{ if(!confirm("¿Borrar el rostro registrado de "+r.empleado+"? Tendrá que registrarlo de nuevo el supervisor.")) return;
+    try{ await db.rostroBorrar(r.empleado); cargarRostros(); showToast("Rostro borrado","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const guardarCfg=async()=>{ setBusy(true); try{ await db.asistenciaConfigGuardar(cfg); showToast("Configuración guardada ✓","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } finally{ setBusy(false); } };
+  const guardarCoord=async sd=>{ const c=coord[sd]||{}; const lat=c.lat===""?null:Number(c.lat), lng=c.lng===""?null:Number(c.lng);
+    if((lat==null)!==(lng==null)||(lat!=null&&(isNaN(lat)||isNaN(lng)))) return showToast("Latitud y longitud válidas, o ambas vacías","err");
+    try{ await db.sedeCoordenadas(sd, lat, lng); showToast("Coordenadas de "+sd+" guardadas ✓","ok"); }catch(e){ showToast(""+(e.message||e),"err"); } };
+  const miUbicacion=sd=>{ if(!navigator.geolocation) return showToast("Este equipo no tiene GPS","err");
+    navigator.geolocation.getCurrentPosition(p=>setCoord(c=>({...c,[sd]:{lat:Number(p.coords.latitude.toFixed(6)),lng:Number(p.coords.longitude.toFixed(6))}})), ()=>showToast("No se pudo leer la ubicación","err"), {enableHighAccuracy:true,timeout:10000}); };
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>⏰ Puntualidad.</b> <span className="muted">Al entrar al POS, el cajero marca su llegada: la tablet autorizada de la sede verifica su rostro (sin guardar fotos) y el servidor pone la hora. El retraso se calcula contra el cuadro de Turnos. Tolerancia: {tol} min.</span>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+        {[['llegadas','📋 Llegadas'],['ranking','🏆 Ranking'],['tablets','📱 Tablets autorizadas'],['rostros','🪪 Rostros registrados']].concat(esAdmin?[['config','⚙️ Configuración']]:[]).map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
+      </div>
+      {(vista==='llegadas'||vista==='ranking') && (<div>
+        <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+          <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+          <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+          <div style={{display:"flex",gap:4,alignSelf:"flex-end"}}>{[['7','7 días'],['14','14 días'],['30','30 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
+          <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}><option value="">Todas</option>{[...new Set(lista.map(r=>r.sede))].sort().map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+          <div className="fld"><label className="label">Cajero</label><select className="select" style={{margin:0}} value={fEmp} onChange={e=>setFEmp(e.target.value)}><option value="">Todos</option>{emps.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+          <div className="fld"><label className="label">Puntualidad</label><select className="select" style={{margin:0}} value={fEstado} onChange={e=>setFEstado(e.target.value)}><option value="">Todas</option><option value="tarde">Tarde</option><option value="a_tiempo">A tiempo</option><option value="sin_horario">Sin turno programado</option></select></div>
+          <div className="fld"><label className="label">Rostro</label><select className="select" style={{margin:0}} value={fRostro} onChange={e=>setFRostro(e.target.value)}><option value="">Todos</option><option value="ok">OK</option><option value="no_coincide">No coincide</option><option value="no_verificado">No verificado</option><option value="sin_registro">Sin registro</option></select></div>
+          <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
+        </div>
+        {rows===null ? <div className="empty">Cargando llegadas…</div> : (<div>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
+            <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Llegadas</div><div style={{fontSize:22,fontWeight:800}}>{vis.length}</div><div className="muted" style={{fontSize:11}}>{nOk} a tiempo · {nSin} sin turno</div></div>
+            <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Tarde</div><div style={{fontSize:22,fontWeight:800,color:nTarde?"var(--red)":"var(--tb)"}}>{nTarde}</div><div className="muted" style={{fontSize:11}}>{vis.length?Math.round(nTarde*100/vis.length):0}% de las llegadas</div></div>
+            <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Minutos de retraso</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{minTarde}</div><div className="muted" style={{fontSize:11}}>= {(minTarde/60).toFixed(1)} horas</div></div>
+            <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Rostro sin verificar</div><div style={{fontSize:22,fontWeight:800,color:nRostroMal?"var(--red)":"var(--tb)"}}>{nRostroNo}</div><div className="muted" style={{fontSize:11}}>{nRostroMal} NO coinciden</div></div>
+          </div>
+          {vis.length===0 && <div className="empty">Sin llegadas con esos filtros.</div>}
+          {vista==='llegadas' && vis.length>0 && (
+            <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+              <thead><tr><th>Llegó</th><th>Sede</th><th>Cajero</th><th>Programado</th><th>Puntualidad</th><th>Rostro</th><th>GPS</th><th>Tablet</th><th>Revisión</th></tr></thead>
+              <tbody>{vis.map(r=>(<tr key={r.id} style={{background:r.rostro==='no_coincide'?"var(--red-d)":undefined}}>
+                <td style={{whiteSpace:"nowrap",fontWeight:700}}>{fecha(r.marcado_en)}</td><td>{r.sede}</td><td className="row-name">{r.empleado}</td>
+                <td className="muted" style={{whiteSpace:"nowrap"}}>{r.programado_en?fLocalHora(r.programado_en):"—"}</td>
+                <td>{badgeEstado(r)}</td><td>{badgeRostro(r)}{r.rostro_dist!=null&&<span className="muted" style={{fontSize:10}}> {Number(r.rostro_dist).toFixed(2)}</span>}</td>
+                <td>{gps(r)}</td><td className="muted" style={{fontSize:12}}>{dispNombre(r.dispositivo_id)}</td>
+                <td style={{fontSize:12}}>{r.revisado_por?<span className="muted">{r.revisado_por}{r.nota?(": "+r.nota):""}</span>:<button className="btn btn-ghost btn-sm" onClick={()=>revisar(r)}>Anotar</button>}</td></tr>))}</tbody>
+            </table></div>)}
+          {vista==='ranking' && vis.length>0 && (<div>
+            <div className="card" style={{padding:0,overflowX:"auto",marginBottom:12}}><table className="tbl">
+              <thead><tr><th>#</th><th>Cajero</th><th className="num">Llegadas</th><th className="num">Tarde</th><th className="num">% tarde</th><th className="num">Min. retraso</th><th className="num">Mayor retraso</th><th className="num">Rostro sin verificar</th><th>Sedes</th></tr></thead>
+              <tbody>{rEmp.map((o,i)=>(<tr key={o.k}>
+                <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num">{o.n}</td><td className="num" style={{fontWeight:800,color:o.tarde?"var(--red)":"var(--tb)"}}>{o.tarde}</td>
+                <td className="num">{Math.round(o.tarde*100/o.n)}%</td><td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{o.min}</td><td className="num">{o.max||"—"}</td>
+                <td className="num" style={{color:o.rostroMal?"var(--red)":"var(--tb)"}}>{o.rostroNo+o.rostroMal}{o.rostroMal?(" ("+o.rostroMal+" no coincide)"):""}</td>
+                <td className="muted" style={{fontSize:12}}>{Object.entries(o.sedes).map(([n,c])=>n+" ("+c+")").join(" · ")}</td></tr>))}</tbody>
+            </table></div>
+            <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+              <thead><tr><th>Sede</th><th className="num">Llegadas</th><th className="num">Tarde</th><th className="num">% tarde</th><th className="num">Min. retraso</th></tr></thead>
+              <tbody>{rSede.map(o=>(<tr key={o.k}><td className="row-name">{o.k}</td><td className="num">{o.n}</td><td className="num" style={{fontWeight:800,color:o.tarde?"var(--red)":"var(--tb)"}}>{o.tarde}</td><td className="num">{Math.round(o.tarde*100/o.n)}%</td><td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{o.min}</td></tr>))}</tbody>
+            </table></div>
+          </div>)}
+        </div>)}
+      </div>)}
+      {vista==='tablets' && (<div>
+        <div className="card" style={{marginBottom:12}}>
+          <div className="card-t">📱 Autorizar una tablet</div>
+          <div className="muted" style={{fontSize:13,marginBottom:8}}>Elige la sede y genera un código. En la tablet, al marcar llegada (o en "Registrar rostro"), se digita el código una sola vez y la tablet queda autorizada. El código sirve 10 minutos y para una sola tablet.</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={sedeCod} onChange={e=>setSedeCod(e.target.value)}><option value="">Elige la sede</option>{sedesPropias.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
+            <button className="btn btn-amber" disabled={!sedeCod||busy} onClick={generarCodigo}>Generar código</button>
+          </div>
+          {codigo && <div style={{marginTop:12,textAlign:"center",padding:"16px",borderRadius:12,background:"var(--green-d)",border:"2px solid var(--green)"}}>
+            <div className="muted" style={{fontSize:12}}>Código para la tablet de <b>{codigo.sede}</b> (vence {fLocalHora(codigo.expira_en)})</div>
+            <div style={{fontSize:44,fontWeight:900,letterSpacing:10,color:"var(--green)"}}>{codigo.codigo}</div>
+          </div>}
+        </div>
+        {disps===null ? <div className="empty">Cargando…</div> : disps.length===0 ? <div className="empty">Ninguna tablet autorizada todavía.</div> : (
+          <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+            <thead><tr><th>Sede</th><th>Tablet</th><th>Estado</th><th>Autorizada</th><th>Último uso</th><th>Equipo</th><th></th></tr></thead>
+            <tbody>{disps.map(d=>(<tr key={d.id} style={{opacity:d.activo?1:.55}}>
+              <td className="row-name">{d.sede}</td><td>{d.nombre}</td><td>{d.activo?<span style={{color:"var(--green)",fontWeight:800}}>activa</span>:<span style={{color:"var(--red)",fontWeight:800}}>inactiva</span>}</td>
+              <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(d.creado_en)}{d.creado_por?(" · "+d.creado_por):""}</td><td className="muted" style={{whiteSpace:"nowrap"}}>{d.ultimo_uso?fecha(d.ultimo_uso):"—"}</td>
+              <td className="muted" style={{fontSize:11,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={d.user_agent||""}>{(d.user_agent||"").replace(/^Mozilla\/5\.0 /,"").slice(0,80)}</td>
+              <td>{esAdmin && <button className="btn btn-ghost btn-sm" onClick={()=>toggleDisp(d)}>{d.activo?"Desactivar":"Activar"}</button>}</td></tr>))}</tbody>
+          </table></div>)}
+      </div>)}
+      {vista==='rostros' && (<div>
+        <div className="muted" style={{fontSize:13,marginBottom:8}}>El rostro lo registra el supervisor desde el POS de la tablet autorizada (menú ☰ → Registrar rostro de cajero). Aquí solo se ve quién lo tiene y se puede borrar para que lo registren de nuevo.</div>
+        {rostros===null ? <div className="empty">Cargando…</div> : rostros.length===0 ? <div className="empty">Ningún cajero tiene el rostro registrado todavía.</div> : (
+          <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+            <thead><tr><th>Cajero</th><th className="num">Capturas</th><th>Sede</th><th>Registrado por</th><th>Fecha</th><th></th></tr></thead>
+            <tbody>{rostros.map(r=>(<tr key={r.empleado}><td className="row-name">{r.empleado}</td><td className="num">{r.capturas}</td><td>{r.sede_registro||"—"}</td><td className="muted">{r.registrado_por||"—"}</td><td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(r.registrado_en)}</td>
+              <td>{esAdmin && <button className="btn btn-ghost btn-sm" onClick={()=>borrarRostro(r)}>Borrar</button>}</td></tr>))}</tbody>
+          </table></div>)}
+      </div>)}
+      {vista==='config' && esAdmin && cfg && (<div>
+        <div className="card" style={{marginBottom:12}}>
+          <div className="card-t">⚙️ Reglas</div>
+          <label className="check"><input type="checkbox" checked={!!cfg.activo} onChange={e=>setCfg({...cfg,activo:e.target.checked})}/> Pedir marcar llegada a los cajeros al entrar al POS</label>
+          <label className="check"><input type="checkbox" checked={!!cfg.exigir_dispositivo} onChange={e=>setCfg({...cfg,exigir_dispositivo:e.target.checked})}/> Solo desde la tablet autorizada de la sede (recomendado)</label>
+          <div className="fld" style={{marginTop:8}}><label className="label">Tolerancia (minutos después de la hora programada que todavía cuentan como "a tiempo")</label><input type="number" className="input" style={{maxWidth:120}} min="0" value={cfg.tolerancia_min} onChange={e=>setCfg({...cfg,tolerancia_min:e.target.value})}/></div>
+          <button className="btn btn-amber" style={{marginTop:8}} disabled={busy} onClick={guardarCfg}>Guardar</button>
+        </div>
+        <div className="card">
+          <div className="card-t">📍 Coordenadas de las sedes</div>
+          <div className="muted" style={{fontSize:13,marginBottom:8}}>Con coordenadas, cada llegada muestra a cuántos metros de la sede estaba la tablet. Párate en la sede con este equipo y toca "Usar mi ubicación", o pega la latitud y longitud de Google Maps.</div>
+          {sedesPropias.map(sd=>(<div key={sd} style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",padding:"6px 0",borderBottom:"1px solid var(--bd)"}}>
+            <div style={{flex:"1 1 140px",fontWeight:800}}>{sd}</div>
+            <div className="fld"><label className="label">Latitud</label><input className="input" style={{margin:0,width:140}} value={(coord[sd]||{}).lat==null?"":(coord[sd]||{}).lat} onChange={e=>setCoord(c=>({...c,[sd]:{...(c[sd]||{}),lat:e.target.value}}))}/></div>
+            <div className="fld"><label className="label">Longitud</label><input className="input" style={{margin:0,width:140}} value={(coord[sd]||{}).lng==null?"":(coord[sd]||{}).lng} onChange={e=>setCoord(c=>({...c,[sd]:{...(c[sd]||{}),lng:e.target.value}}))}/></div>
+            <button className="btn btn-ghost btn-sm" onClick={()=>miUbicacion(sd)}>Usar mi ubicación</button>
+            <button className="btn btn-amber btn-sm" onClick={()=>guardarCoord(sd)}>Guardar</button>
+          </div>))}
         </div>
       </div>)}
     </div>

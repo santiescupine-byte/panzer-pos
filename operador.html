@@ -409,6 +409,40 @@ const db = {
     if(error) throw error;
     return data;
   },
+  // ---- ASISTENCIA (2026-11-05): llegada con rostro + tablet autorizada. Sin fotos: solo filas de texto ----
+  async llegadaEstado(sede, operador){
+    if(DEMO_MODE||!sb) return {pendiente:false};
+    const { data, error } = await sb.rpc('llegada_estado',{ p_sede:sede, p_empleado:operador });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data||{pendiente:false};
+  },
+  async marcarLlegada(o){
+    if(DEMO_MODE||!sb) return {ok:true, ya:false, estado:'sin_horario', rostro:o.rostro, marcado_en:new Date().toISOString()};
+    const { data, error } = await sb.rpc('marcar_llegada',{ p_token:o.token||'', p_sede:o.sede, p_empleado:o.operador, p_rostro:o.rostro,
+      p_dist:(o.dist==null||!isFinite(o.dist))?null:Number(Number(o.dist).toFixed(4)), p_lat:o.lat==null?null:o.lat, p_lng:o.lng==null?null:o.lng, p_prec:o.prec==null?null:o.prec });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
+  },
+  async dispositivoRegistrar(codigo, nombre){
+    if(DEMO_MODE||!sb) return {ok:false,error:"No disponible en modo demo."};
+    const { data, error } = await sb.rpc('dispositivo_registrar',{ p_codigo:codigo, p_nombre:nombre||null, p_user_agent:navigator.userAgent||null });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
+  },
+  async dispositivoEstado(token){
+    if(DEMO_MODE||!sb||!token) return {ok:false};
+    const { data, error } = await sb.rpc('dispositivo_estado',{ p_token:token }); if(error) return null; return data||{ok:false};
+  },
+  async cajerosDeSede(sede){
+    if(DEMO_MODE||!sb) return [];
+    const { data, error } = await sb.rpc('cajeros_de_sede',{ p_sede:sede }); if(error) throw new Error("Sin conexión con el sistema."); return data||[];
+  },
+  async rostroGuardar(token, empleado, descriptores, quien, sede){
+    if(DEMO_MODE||!sb) return {ok:false,error:"No disponible en modo demo."};
+    const { data, error } = await sb.rpc('rostro_guardar',{ p_token:token||'', p_empleado:empleado, p_descriptores:descriptores, p_quien:quien, p_sede:sede||null });
+    if(error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo."); return data;
+  },
+  async rostroDe(empleado){
+    if(DEMO_MODE||!sb) return null;
+    const { data, error } = await sb.rpc('rostro_de',{ p_empleado:empleado }); if(error) throw new Error("Sin conexión con el sistema."); return data||null;
+  },
   // Descuentos predefinidos activos (para el POS)
   async getDescuentos(){
     if(DEMO_MODE) return [{id:"d1",nombre:"Empleado 10%",porcentaje:10},{id:"d2",nombre:"Promoción 5%",porcentaje:5}];
@@ -771,6 +805,7 @@ function App(){
   const [showDevolBLE,setShowDevolBLE]=useState(false); // sheet "devolución de créditos" (Bluetooth)
   const celdaOn=true;   // 2026-10-08: "Lavar celda" visible para todos (antes solo con #celda en prueba)
   const devolBleOn=false;   // 2026-11-03: "Devolución de créditos" por Bluetooth, apagado hasta que el dueño lo active
+  const asistenciaOn=true;  // 2026-11-05: llegada con rostro + tablet autorizada (cajeros)
   const [showRecepcion,setShowRecepcion]=useState(false); // sheet recepción de mercancía
   const [pendTransito,setPendTransito]=useState(0);        // # transferencias en tránsito hacia esta sede
   const [showMeta,setShowMeta]=useState(false);            // sheet "mi meta"
@@ -784,6 +819,8 @@ function App(){
   const refrescarTareas=()=>{ if(sede&&operador) db.misTareas(sede,operador).then(aplicarTareas).catch(()=>{}); };
   const [showVip,setShowVip]=useState(false);              // módulo de membresías VIP
   const [rol,setRol]=useState('');                         // rol del usuario logueado
+  const [llegada,setLlegada]=useState(null);               // {sede,nombre,rol,est}: el cajero debe marcar llegada antes de abrir turno
+  const [showRostro,setShowRostro]=useState(false);        // sheet "registrar rostro" (supervisor/admin)
   const [showPedido,setShowPedido]=useState(false);        // sheet de pedido de productos (franquiciado)
   const [showDevol,setShowDevol]=useState(false);          // sheet de devolución por falla (franquiciado)
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
@@ -805,10 +842,15 @@ function App(){
   // al abrir la app: muestra el contador y reintenta enviar lo que quedó en cola
   useEffect(()=>{ refrescarLiqPend(); db.reintentarLiqPendientes().then(refrescarLiqPend).catch(()=>{}); },[]);
 
-  const abrir=async(sedeSel, nombre, rolArg)=>{
+  const abrir=async(sedeSel, nombre, rolArg, yaMarco)=>{
     setBusy(true);
     try{
       setRol(rolArg||'');
+      // ASISTENCIA (2026-11-05): el cajero marca llegada (rostro + tablet autorizada) antes de abrir el turno
+      if(asistenciaOn && rolArg==='cajero' && !yaMarco && !DEMO_MODE){
+        const est=await db.llegadaEstado(sedeSel, nombre);
+        if(est && est.pendiente){ setLlegada({sede:sedeSel, nombre, rol:rolArg, est}); setBusy(false); return; }
+      }
       // FRANQUICIADO: POS limitado (membresías, reportar máquina, pedidos). Sin turno ni chequeo.
       if(rolArg==='franquiciado'){
         setSede(sedeSel); setOperador(nombre);
@@ -868,6 +910,7 @@ function App(){
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
     setChequeoHecho(false); setDescTicket(null);
     setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false); setShowDevol(false);
+    setLlegada(null); setShowRostro(false);
   };
   // aplicar/quitar descuento a una línea del carrito (d = {nombre,porcentaje} o null)
   const setLineDesc=(key,d)=>setCart(prev=>prev.map(c=>((c.key||c.producto_id)===key && !c.fijo)?{...c,descId:d?d.id:'',descPct:d?d.porcentaje:0,descNombre:d?d.nombre:null}:c));
@@ -1000,6 +1043,18 @@ function App(){
     );
   }
 
+  if(!turno && llegada){
+    return (
+      <div className="app">
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <div className="page">
+          <LlegadaScreen sede={llegada.sede} operador={llegada.nombre} estado={llegada.est}
+            onListo={()=>{ const l=llegada; setLlegada(null); abrir(l.sede,l.nombre,l.rol,true); }}
+            onCancelar={()=>{ setLlegada(null); setPin(""); setPinEmp(null); setRol(""); }}/>
+        </div>
+      </div>
+    );
+  }
   if(!turno){
     const tecla=d=>{ setPin(prev=>(prev+d).slice(0,4)); };
     const borrar=()=>setPin(prev=>prev.slice(0,-1));
@@ -1029,6 +1084,7 @@ function App(){
               <button className="btn-primary" style={{marginTop:16}} disabled={pin.length<4||busy} onClick={()=>intentarPin(pin)}>
                 {busy?"Verificando...":"Entrar"}
               </button>
+              {asistenciaOn && <DispositivoPie/>}
             </div>
           ) : (
             <div className="card">
@@ -1115,6 +1171,7 @@ function App(){
             <button className="drawer-item" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{setMenuOpen(false);setShowPagos(true);}}>💸 Verificar pago QR</button>
             {celdaOn && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowCelda(true);}}>🚿 Lavar celda</button>}
             {devolBleOn && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowDevolBLE(true);}}>↩️ Devolución de créditos</button>}
+            {asistenciaOn && rol && rol!=='cajero' && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRostro(true);}}>🪪 Registrar rostro de cajero</button>}
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowVip(true);}}>💳 Membresías</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecepcion(true);}}>📦 Recibir mercancía{pendTransito>0?(" ("+pendTransito+")"):""}</button>
             {miMeta && <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMeta(true);}}>🎯 Mi meta del mes</button>}
@@ -1196,6 +1253,7 @@ function App(){
 
       {showPagos && <PagosSheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowPagos(false)}/>}
       {showCelda && <CeldaSheet sede={sede} operador={operador} onClose={()=>setShowCelda(false)}/>}
+      {asistenciaOn && showRostro && <RostroSheet sede={sede} quien={operador} onClose={()=>setShowRostro(false)}/>}
       {devolBleOn && showDevolBLE && <DevolucionBLESheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowDevolBLE(false)}/>}
       {showRecibos && (
         <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
@@ -2353,6 +2411,294 @@ function DevolucionBLESheet({sede,operador,turno,onClose}){
           <div key={m.id} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"9px 2px",borderBottom:"1px solid var(--bd)",fontSize:14}}>
             <span>↩️ {m.maquina} · <b>{m.ciclos}</b> {Number(m.ciclos)===1?"crédito":"créditos"}<div className="header-sub">{m.motivo}</div></span><span className="header-sub" style={{whiteSpace:"nowrap"}}>{hora(m.creado_en)}</span>
           </div>))}
+        <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
+      </div>
+    </div>
+  );
+}
+
+// ============ ASISTENCIA: tablet autorizada + reconocimiento facial en la tablet (sin fotos) ============
+// La tablet guarda un token (localStorage) que el admin autoriza con un código de 6 dígitos. La cara se convierte en 128 números
+// (face-api.js, corre en la tablet) y se compara con los registrados; al servidor solo viaja el resultado (ok / no coincide / ...).
+const DISPOSITIVO_KEY='pos_dispositivo';
+function dispositivoLocal(){ try{ return JSON.parse(localStorage.getItem(DISPOSITIVO_KEY)||'null'); }catch(e){ return null; } }
+function dispositivoGuardar(d){ try{ if(d) localStorage.setItem(DISPOSITIVO_KEY, JSON.stringify(d)); else localStorage.removeItem(DISPOSITIVO_KEY); }catch(e){} }
+const FACE_URL='https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+const FACE_MODELS='models';
+const FACE_UMBRAL=0.5;     // distancia máxima para decir "es la misma persona" (menor = más estricto)
+const FACE_GIRO=0.22;      // cuánto tiene que girar la cabeza en la prueba de vida
+const espera=ms=>new Promise(r=>setTimeout(r,ms));
+let faceReady=null;
+function cargarFaceApi(paso){
+  if(faceReady) return faceReady;
+  faceReady=(async()=>{
+    if(!window.faceapi){
+      paso&&paso("Cargando reconocimiento facial…");
+      await new Promise((res,rej)=>{ const sc=document.createElement('script'); sc.src=FACE_URL; sc.onload=res;
+        sc.onerror=()=>rej(new Error("No se pudo cargar el reconocimiento facial. Revisa el internet e intenta de nuevo.")); document.head.appendChild(sc); });
+    }
+    paso&&paso("Cargando modelos (solo la primera vez tarda)…");
+    await Promise.all([faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS), faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_MODELS), faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS)]);
+    return true;
+  })().catch(e=>{ faceReady=null; throw e; });
+  return faceReady;
+}
+async function detectarRostro(video){
+  if(!video||video.readyState<2) return null;
+  return await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({inputSize:320, scoreThreshold:0.5})).withFaceLandmarks(true).withFaceDescriptor();
+}
+// giro de cabeza aproximado: dónde queda la nariz entre los bordes de la cara. >0 = el usuario giró a SU izquierda (la cámara frontal no está en espejo)
+function giroDe(det){ const p=det.landmarks.positions; const nariz=p[30], izq=p[0], der=p[16]; const w=der.x-izq.x; if(!w) return 0; return ((nariz.x-izq.x)/w-0.5)*2; }
+function distanciaMin(desc, lista){ let m=Infinity; (lista||[]).forEach(d=>{ try{ const v=faceapi.euclideanDistance(desc, Float32Array.from(d)); if(v<m) m=v; }catch(e){} }); return m; }
+async function abrirCamara(videoEl){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia) throw new Error("Esta tablet no permite usar la cámara desde la app.");
+  let st;
+  try{ st=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false}); }
+  catch(e){ throw new Error("No se pudo abrir la cámara. Revisa que la app tenga permiso de cámara."); }
+  videoEl.srcObject=st; await Promise.race([videoEl.play().catch(()=>{}), espera(2000)]);
+  for(let i=0;i<30 && videoEl.readyState<2;i++) await espera(100);
+  if(videoEl.readyState<2){ cerrarCamara(st); throw new Error("La cámara no está entregando imagen. Cierra otras apps que la usen e intenta de nuevo."); }
+  return st;
+}
+function cerrarCamara(st){ try{ ((st&&st.getTracks())||[]).forEach(t=>t.stop()); }catch(e){} }
+function ubicacionActual(){
+  return new Promise(res=>{ if(!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude,lng:p.coords.longitude,prec:Math.round(p.coords.accuracy||0)}), ()=>res(null), {enableHighAccuracy:true, timeout:8000, maximumAge:60000}); });
+}
+const horaCorta=iso=>iso?new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):"—";
+
+// Pie del login: qué tablet es esta
+function DispositivoPie(){
+  const d=dispositivoLocal();
+  return <div className="header-sub" style={{textAlign:"center",marginTop:10,fontSize:11}}>{d&&d.token?("📱 "+(d.nombre||"Tablet")+" · autorizada para "+d.sede):"📵 Tablet sin autorizar para marcar llegada"}</div>;
+}
+
+// Formulario para autorizar esta tablet con el código del administrador
+function DispositivoForm({sede, msg, onListo, onCancelar}){
+  const [codigo,setCodigo]=useState(""); const [nombre,setNombre]=useState(""); const [busy,setBusy]=useState(false); const [err,setErr]=useState(null);
+  const registrar=async()=>{
+    if(busy||codigo.length!==6) return; setBusy(true); setErr(null);
+    try{ const r=await db.dispositivoRegistrar(codigo, nombre.trim());
+      if(!r||!r.ok) throw new Error((r&&r.error)||"No se pudo autorizar.");
+      dispositivoGuardar({token:r.token, id:r.id, sede:r.sede, nombre:r.nombre}); onListo(r);
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  return (
+    <div className="card">
+      <div className="card-t">📵 Tablet no autorizada</div>
+      <div className="header-sub" style={{marginBottom:10}}>{msg||("Para marcar llegada en "+sede+", esta tablet tiene que estar autorizada. El administrador genera el código en Admin → Puntualidad → Tablets.")}</div>
+      {err && <div style={{margin:"0 0 10px",padding:"10px 12px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {err}</div>}
+      <label className="label">Código de autorización (6 dígitos)</label>
+      <input className="input" inputMode="numeric" placeholder="000000" value={codigo} style={{fontSize:26,letterSpacing:6,textAlign:"center",fontWeight:900}} onChange={e=>setCodigo(e.target.value.replace(/\D/g,"").slice(0,6))}/>
+      <label className="label">Nombre de esta tablet (opcional)</label>
+      <input className="input" placeholder={"Ej: Tablet "+sede} value={nombre} onChange={e=>setNombre(e.target.value)}/>
+      <button className="btn-primary" disabled={busy||codigo.length!==6} onClick={registrar}>{busy?"Autorizando…":"Autorizar esta tablet"}</button>
+      {onCancelar && <button className="btn-secondary" style={{marginTop:8,opacity:.8}} disabled={busy} onClick={onCancelar}>← Volver</button>}
+    </div>
+  );
+}
+
+// Pantalla "Marcar llegada": cámara → compara con el rostro registrado → prueba de vida (giro de cabeza) → marca con hora del servidor
+function LlegadaScreen({sede,operador,estado,onListo,onCancelar}){
+  const videoRef=React.useRef(null); const stRef=React.useRef(null); const vivo=React.useRef(true);
+  const [fase,setFase]=useState('inicio');   // inicio | dispositivo | cargando | camara | marcando | listo | error
+  const [msg,setMsg]=useState(""); const [guia,setGuia]=useState(""); const [reto,setReto]=useState(null);
+  const [intento,setIntento]=useState(1); const [res,setRes]=useState(null); const [busy,setBusy]=useState(false);
+  const disp=dispositivoLocal();
+  useEffect(()=>()=>{ vivo.current=false; cerrarCamara(stRef.current); },[]);
+  const conCamara=fase==='camara'||fase==='marcando';
+  const marcar=async(rostro, dist)=>{
+    setFase('marcando'); setGuia("Registrando llegada…");
+    const u=await ubicacionActual();
+    const r=await db.marcarLlegada({token:(dispositivoLocal()||{}).token, sede, operador, rostro, dist, lat:u&&u.lat, lng:u&&u.lng, prec:u&&u.prec});
+    cerrarCamara(stRef.current); stRef.current=null;
+    if(!r||!r.ok){
+      if(r&&r.codigo==='DISPOSITIVO'){ setMsg(r.error); setFase('dispositivo'); return; }
+      throw new Error((r&&r.error)||"No se pudo registrar la llegada.");
+    }
+    setRes(r); setFase('listo');
+    setTimeout(()=>{ if(vivo.current) onListo(r); }, 3500);
+  };
+  const intentoRostro=async(registrados)=>{
+    // 1) de frente: buscar la cara y medir qué tan parecida es a la registrada
+    setGuia("Mira a la cámara"); setReto(null);
+    let t0=Date.now(), mejor=Infinity, caras=0;
+    while(vivo.current && Date.now()-t0<9000){
+      const det=await detectarRostro(videoRef.current);
+      if(det){ caras++; const d=distanciaMin(det.descriptor, registrados); if(d<mejor) mejor=d; if(caras>=2 && mejor<FACE_UMBRAL && Math.abs(giroDe(det))<0.15) break; }
+      else await espera(150);
+    }
+    if(!caras) return {ok:false, motivo:'sin_cara', dist:mejor};
+    if(mejor>=FACE_UMBRAL) return {ok:false, motivo:'no_coincide', dist:mejor};
+    // 2) prueba de vida: giro de cabeza al azar (una foto no lo pasa)
+    const lado=Math.random()<0.5?'izq':'der'; setReto(lado); setGuia(lado==='izq'?"Gira la cabeza a tu IZQUIERDA":"Gira la cabeza a tu DERECHA");
+    t0=Date.now(); let girado=false;
+    while(vivo.current && Date.now()-t0<8000 && !girado){
+      const det=await detectarRostro(videoRef.current);
+      if(det){ const g=giroDe(det); if(lado==='izq'?g>FACE_GIRO:g<-FACE_GIRO) girado=true; }
+      else await espera(120);
+    }
+    if(!girado) return {ok:false, motivo:'sin_giro', dist:mejor};
+    // 3) de frente otra vez: confirmar que sigue siendo la misma persona
+    setReto(null); setGuia("Mira otra vez a la cámara");
+    t0=Date.now(); let conf=Infinity;
+    while(vivo.current && Date.now()-t0<6000){
+      const det=await detectarRostro(videoRef.current);
+      if(det && Math.abs(giroDe(det))<0.2){ conf=distanciaMin(det.descriptor, registrados); if(conf<FACE_UMBRAL) break; }
+      else await espera(150);
+    }
+    if(conf>=FACE_UMBRAL) return {ok:false, motivo:'no_coincide', dist:Math.min(mejor,conf)};
+    return {ok:true, dist:Math.min(mejor,conf)};
+  };
+  const verificar=async()=>{
+    if(busy) return; setBusy(true); setMsg("");
+    try{
+      if(estado.exigir_dispositivo!==false && !(dispositivoLocal()||{}).token){ setFase('dispositivo'); return; }
+      setFase('cargando');
+      const [,registrados]=await Promise.all([cargarFaceApi(setMsg), estado.tiene_rostro?db.rostroDe(operador):Promise.resolve(null)]);
+      setMsg(""); setFase('camara');
+      stRef.current=await abrirCamara(videoRef.current);
+      if(!registrados||!registrados.length){
+        // Sin rostro registrado: solo confirma que hay una persona frente a la cámara y marca como "sin registro" (el admin lo ve)
+        setGuia("Mira a la cámara"); const t0=Date.now(); let det=null;
+        while(vivo.current && Date.now()-t0<12000 && !det){ det=await detectarRostro(videoRef.current); if(!det) await espera(250); }
+        await marcar('sin_registro', null); return;
+      }
+      let ult=null;
+      for(let n=1;n<=3 && vivo.current;n++){
+        setIntento(n);
+        const r=await intentoRostro(registrados); ult=r;
+        if(r.ok){ await marcar('ok', r.dist); return; }
+        setMsg(r.motivo==='no_coincide'?"El rostro no coincide con el registrado.":r.motivo==='sin_giro'?"No se detectó el giro de cabeza. Inténtalo más despacio.":"No se detectó ninguna cara. Acércate y busca luz de frente.");
+        if(n<3) await espera(1500);
+      }
+      await marcar(ult&&ult.motivo==='no_coincide'?'no_coincide':'no_verificado', ult&&isFinite(ult.dist)?ult.dist:null);
+    }catch(e){ cerrarCamara(stRef.current); stRef.current=null; setMsg(e.message||String(e)); setFase('error'); }
+    finally{ setBusy(false); }
+  };
+  const prog=estado&&estado.programado_en?horaCorta(estado.programado_en):null;
+  const retrasoTxt=r=>r.estado==='sin_horario'?"Sin turno programado hoy":(r.retraso_min>(estado.tolerancia_min||5)?(r.retraso_min+" min tarde"):(r.retraso_min<=0?"A tiempo":("A tiempo ("+r.retraso_min+" min)")));
+  const colorRes=r=>r.estado==='tarde'?"var(--red)":r.estado==='sin_horario'?"var(--amber)":"var(--green)";
+  return (
+    <div>
+      <div style={{textAlign:"center",padding:"18px 0 10px"}}>
+        <img src="https://santiescupine-byte.github.io/panzer-vip/Panzer%20Logo%20FINAL.png" style={{width:120,marginBottom:6}} alt="Panzer"/>
+        <p style={{fontSize:14,color:"var(--td)"}}>Marcar llegada — {sede}</p>
+      </div>
+      {fase==='dispositivo' && <DispositivoForm sede={sede} msg={msg} onListo={()=>{ setMsg(""); setFase('inicio'); }} onCancelar={onCancelar}/>}
+      {fase==='inicio' && (
+        <div className="card">
+          <div className="card-t">📸 Hola, {operador}</div>
+          <div className="header-sub" style={{marginBottom:10}}>Para abrir el turno en <b>{sede}</b> tienes que marcar tu llegada: la cámara verifica tu rostro y queda la hora. No se guardan fotos.</div>
+          <div className="result-row"><span className="result-label">Hora programada</span><span className="result-value">{prog||<span style={{color:"var(--amber)"}}>sin turno hoy</span>}</span></div>
+          <div className="result-row"><span className="result-label">Hora actual</span><span className="result-value">{horaCorta(new Date().toISOString())}</span></div>
+          {!estado.tiene_rostro && <div style={{margin:"10px 0",padding:"10px 12px",borderRadius:12,background:"var(--amber-d)",border:"1px solid var(--amber)",color:"var(--amber)",fontSize:13,fontWeight:700}}>⚠️ Aún no tienes el rostro registrado. Pídele al supervisor que lo registre en esta tablet. Hoy la llegada queda como "sin registro".</div>}
+          {msg && <div style={{margin:"10px 0",padding:"10px 12px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {msg}</div>}
+          <button className="btn-primary" style={{marginTop:10}} disabled={busy} onClick={verificar}>📸 Marcar llegada</button>
+          <button className="btn-secondary" style={{marginTop:8,opacity:.8}} disabled={busy} onClick={onCancelar}>← Volver</button>
+          <div className="header-sub" style={{textAlign:"center",marginTop:10,fontSize:11}}>{disp&&disp.token?("📱 "+(disp.nombre||"Tablet")+" · autorizada para "+disp.sede):"📵 Esta tablet aún no está autorizada"}</div>
+        </div>
+      )}
+      {(fase==='cargando'||conCamara) && (
+        <div className="card" style={{textAlign:"center"}}>
+          {fase==='cargando' && <div style={{padding:"26px 0"}}><div style={{fontSize:40}}>⏳</div><div className="header-sub" style={{marginTop:8}}>{msg||"Preparando…"}</div></div>}
+          <div style={{position:"relative",display:conCamara?"block":"none"}}>
+            <video ref={videoRef} playsInline muted autoPlay style={{width:"100%",maxWidth:420,borderRadius:16,transform:"scaleX(-1)",background:"#000",border:"3px solid "+(reto?"var(--amber)":"var(--blue)")}}/>
+            {reto && <div style={{position:"absolute",top:"40%",[reto==='izq'?'left':'right']:12,fontSize:56,lineHeight:1,textShadow:"0 2px 8px #000"}}>{reto==='izq'?"👈":"👉"}</div>}
+          </div>
+          {conCamara && <div style={{fontSize:20,fontWeight:900,marginTop:10,color:reto?"var(--amber)":"var(--tb)"}}>{guia}</div>}
+          {conCamara && fase==='camara' && estado.tiene_rostro && <div className="header-sub" style={{marginTop:4}}>Intento {intento} de 3</div>}
+          {conCamara && msg && <div style={{margin:"10px 0 0",padding:"10px 12px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>{msg}</div>}
+        </div>
+      )}
+      {fase==='listo' && res && (
+        <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:res.estado==='tarde'?"var(--red-d)":"var(--green-d)",border:"2px solid "+colorRes(res)}}>
+          <div style={{fontSize:54,lineHeight:1}}>{res.estado==='tarde'?"⏰":"✅"}</div>
+          <div style={{fontSize:20,fontWeight:900,color:colorRes(res),marginTop:6}}>{res.ya?"YA HABÍAS MARCADO":"LLEGADA REGISTRADA"}</div>
+          <div style={{fontSize:30,fontWeight:900,margin:"6px 0"}}>{horaCorta(res.marcado_en)}</div>
+          <div style={{fontWeight:800,color:colorRes(res)}}>{retrasoTxt(res)}{res.programado_en?(" · programado "+horaCorta(res.programado_en)):""}</div>
+          <div className="header-sub" style={{marginTop:8}}>{res.rostro==='ok'?"Rostro verificado ✓":res.rostro==='sin_registro'?"Sin rostro registrado (queda anotado)":res.rostro==='no_coincide'?"⛔ El rostro NO coincidió. Quedó registrado y el administrador lo verá.":"⚠️ No se pudo verificar el rostro. Quedó registrado y el administrador lo verá."}</div>
+          <button className="btn-primary" style={{marginTop:14}} onClick={()=>onListo(res)}>Entrar al POS</button>
+        </div>
+      )}
+      {fase==='error' && (
+        <div className="card">
+          <div style={{margin:"0 0 10px",padding:"12px 14px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {msg}</div>
+          <button className="btn-primary" onClick={()=>{ setMsg(""); setFase('inicio'); }}>Reintentar</button>
+          <button className="btn-secondary" style={{marginTop:8,opacity:.8}} onClick={onCancelar}>← Volver</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Registro del rostro de un cajero (lo hace el supervisor/admin en la tablet autorizada de la sede). Se guardan 7 "huellas" numéricas, ninguna foto.
+function RostroSheet({sede,quien,onClose}){
+  const videoRef=React.useRef(null); const stRef=React.useRef(null); const vivo=React.useRef(true);
+  const [cajeros,setCajeros]=useState(null); const [emp,setEmp]=useState("");
+  const [fase,setFase]=useState('lista');   // lista | dispositivo | cargando | camara | listo
+  const [msg,setMsg]=useState(""); const [guia,setGuia]=useState(""); const [n,setN]=useState(0); const [busy,setBusy]=useState(false); const [err,setErr]=useState(null);
+  const disp=dispositivoLocal();
+  const cargar=()=>db.cajerosDeSede(sede).then(setCajeros).catch(e=>{ setErr(e.message||String(e)); setCajeros([]); });
+  useEffect(()=>{ cargar(); return ()=>{ vivo.current=false; cerrarCamara(stRef.current); }; },[]);
+  const META=7;
+  const capturar=async()=>{
+    if(busy||!emp) return; setBusy(true); setErr(null); setN(0);
+    try{
+      if(!(dispositivoLocal()||{}).token){ setFase('dispositivo'); return; }
+      setFase('cargando'); await cargarFaceApi(setMsg); setMsg(""); setFase('camara');
+      stRef.current=await abrirCamara(videoRef.current);
+      const guias=[[0,"Mira a la cámara"],[3,"Gira un poco a tu izquierda"],[5,"Gira un poco a tu derecha"]];
+      const descs=[]; const t0=Date.now(); let ultimo=0;
+      while(vivo.current && descs.length<META && Date.now()-t0<30000){
+        const g=guias.filter(x=>descs.length>=x[0]).pop(); setGuia(g?g[1]:"");
+        const det=await detectarRostro(videoRef.current);
+        if(det && det.detection.score>=0.6 && Date.now()-ultimo>=500){ descs.push(Array.from(det.descriptor).map(v=>Number(v.toFixed(5)))); ultimo=Date.now(); setN(descs.length); }
+        else await espera(120);
+      }
+      cerrarCamara(stRef.current); stRef.current=null;
+      if(descs.length<3) throw new Error("No se logró capturar el rostro (solo "+descs.length+" captura(s)). Busca luz de frente e intenta de nuevo.");
+      const r=await db.rostroGuardar((dispositivoLocal()||{}).token, emp, descs, quien, sede);
+      if(!r||!r.ok) throw new Error((r&&r.error)||"No se pudo guardar.");
+      setFase('listo'); cargar();
+    }catch(e){ cerrarCamara(stRef.current); stRef.current=null; setErr(e.message||String(e)); setFase('lista'); }
+    finally{ setBusy(false); }
+  };
+  const conCamara=fase==='camara';
+  return (
+    <div className="sheet-bg" onClick={()=>{ if(!busy) onClose(); }}>
+      <div className="sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-handle"/>
+        <div className="card-t">🪪 Registrar rostro de cajero</div>
+        <div className="header-sub" style={{marginBottom:10}}>El cajero se para frente a esta tablet y la cámara toma {META} capturas en unos segundos. Se guarda una huella numérica, no fotos. Si ya tenía rostro, se reemplaza.</div>
+        {fase==='dispositivo' && <DispositivoForm sede={sede} onListo={()=>setFase('lista')} onCancelar={()=>setFase('lista')}/>}
+        {fase==='lista' && (<div>
+          {err && <div style={{margin:"0 0 10px",padding:"10px 12px",borderRadius:12,background:"var(--red-d)",border:"1px solid var(--red)",color:"var(--red)",fontWeight:700,fontSize:14}}>⛔ {err}</div>}
+          <label className="label">Cajero</label>
+          {cajeros===null ? <div className="header-sub">Cargando…</div> : cajeros.length===0 ? <div className="header-sub">No hay cajeros asignados a {sede}.</div> :
+            cajeros.map(c=>(<button key={c.nombre} disabled={busy} onClick={()=>setEmp(c.nombre)} style={{display:"flex",justifyContent:"space-between",width:"100%",padding:"12px 14px",marginBottom:6,borderRadius:12,border:"2px solid "+(emp===c.nombre?"var(--green)":"var(--bd)"),background:emp===c.nombre?"var(--green-d)":"var(--sf2)",color:"var(--t)",fontWeight:800,fontSize:15,cursor:"pointer"}}>
+              <span>{c.nombre}</span><span className="header-sub">{c.tiene_rostro?"✓ registrado":"sin registrar"}</span></button>))}
+          <button className="btn-primary" style={{marginTop:6}} disabled={busy||!emp} onClick={capturar}>{emp?("📸 Capturar rostro de "+emp):"Elige el cajero"}</button>
+          <div className="header-sub" style={{textAlign:"center",marginTop:10,fontSize:11}}>{disp&&disp.token?("📱 "+(disp.nombre||"Tablet")+" · "+disp.sede):"📵 Esta tablet aún no está autorizada (se pide el código al capturar)"}</div>
+        </div>)}
+        {(fase==='cargando'||conCamara) && (
+          <div style={{textAlign:"center"}}>
+            {fase==='cargando' && <div style={{padding:"20px 0"}}><div style={{fontSize:36}}>⏳</div><div className="header-sub" style={{marginTop:6}}>{msg||"Preparando…"}</div></div>}
+            <video ref={videoRef} playsInline muted autoPlay style={{display:conCamara?"block":"none",width:"100%",maxWidth:420,margin:"0 auto",borderRadius:16,transform:"scaleX(-1)",background:"#000",border:"3px solid var(--blue)"}}/>
+            {conCamara && <div style={{fontSize:20,fontWeight:900,marginTop:10}}>{guia}</div>}
+            {conCamara && <div className="header-sub" style={{marginTop:4}}>Capturas: {n} de {META}</div>}
+          </div>
+        )}
+        {fase==='listo' && (
+          <div style={{textAlign:"center",padding:"22px 14px",borderRadius:16,background:"var(--green-d)",border:"2px solid var(--green)"}}>
+            <div style={{fontSize:54,lineHeight:1}}>✅</div>
+            <div style={{fontSize:20,fontWeight:900,color:"var(--green)",marginTop:6}}>ROSTRO REGISTRADO</div>
+            <div style={{fontSize:22,fontWeight:900,margin:"6px 0"}}>{emp}</div>
+            <div className="header-sub">Desde ahora su llegada se verifica con la cámara.</div>
+            <button className="btn-primary" style={{marginTop:14}} onClick={()=>{ setEmp(""); setFase('lista'); }}>Registrar otro</button>
+          </div>
+        )}
         <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onClose}>Cerrar</button>
       </div>
     </div>

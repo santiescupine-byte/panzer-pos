@@ -5261,6 +5261,49 @@ function FaltantesTurno({showToast, foco}){
   const productos=Object.values(porProd).filter(p=>!qn||p.nombre.toUpperCase().includes(qn)).sort((a,b)=>b.valor-a.valor||b.unidades-a.unidades);
   const tog=k=>setAbierto(a=>({...a,[k]:!a[k]}));
 
+  // ---- Informe imprimible por operador (2026-11-06): solo pérdidas reales (pendiente/confirmado/definitivo), a precio de venta ----
+  const informeOperador=(o)=>{
+    const esc=v=>String(v==null?"":v).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+    const $=n=>"$"+Math.round(Number(n)||0).toLocaleString('es-CO');
+    const fechaLarga=d=>new Date(d+'T12:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
+    const ts=turnos.filter(t=>t.operador===o.operador).sort((a,b)=>a.inicio<b.inicio?-1:1);
+    const conPerd=ts.filter(t=>t.perdidos.length);
+    let totU=0, totV=0, totPend=0; const porProd={};
+    const bloques=conPerd.map(t=>{
+      const its=[...t.perdidos].sort((a,b)=>(b.valorVenta||0)-(a.valorVenta||0));
+      let subU=0, subV=0;
+      const filas=its.map(i=>{ const u=Number(i.perdida)||0, v=Number(i.valorVenta)||0; subU+=u; subV+=v; if(i.estado==='pendiente') totPend+=u;
+        const p=porProd[i.nombre]||(porProd[i.nombre]={u:0,v:0}); p.u+=u; p.v+=v;
+        return '<tr><td>'+esc(i.nombre)+'</td><td class="c">'+esc(i.antes)+'</td><td class="c">'+esc(i.ahora)+'</td><td class="c b red">'+u+'</td><td class="r">'+(u?$(v/u):"—")+'</td><td class="r b">'+$(v)+'</td><td><span class="est '+esc(i.estado)+'">'+esc(lblEstado[i.estado]||i.estado)+'</span>'+(i.estadoNota?('<div class="nota">'+esc(i.estadoNota)+'</div>'):'')+'</td></tr>'; }).join('');
+      totU+=subU; totV+=subV;
+      return '<div class="turno"><div class="th"><b>'+esc(t.sede)+'</b> · turno '+esc(horaT(t))+' · contó después: '+esc(t.contadoPor||"—")+'</div>'+
+        '<table><thead><tr><th>Producto</th><th class="c">Dif. antes</th><th class="c">Dif. ahora</th><th class="c">Perdidas</th><th class="r">Precio unit.</th><th class="r">Valor venta</th><th>Estado</th></tr></thead>'+
+        '<tbody>'+filas+'</tbody><tfoot><tr><td colspan="3" class="r b">Subtotal del turno</td><td class="c b red">'+subU+'</td><td></td><td class="r b">'+$(subV)+'</td><td></td></tr></tfoot></table></div>';
+    }).join('');
+    const resumen=Object.entries(porProd).sort((a,b)=>b[1].v-a[1].v||b[1].u-a[1].u).map(([n,p])=>'<tr><td>'+esc(n)+'</td><td class="c b red">'+p.u+'</td><td class="r b">'+$(p.v)+'</td></tr>').join('');
+    const html='<!doctype html><html><head><meta charset="utf-8"><title>Faltantes '+esc(o.operador)+' '+esc(desde)+' a '+esc(hasta)+'</title>'+
+      '<style>body{font-family:Arial,sans-serif;padding:28px;color:#111;max-width:900px;margin:0 auto}h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px;border-bottom:2px solid #111;padding-bottom:4px}'+
+      '.meta{font-size:13px;color:#333;line-height:1.5}.kpis{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.kpi{flex:1 1 140px;border:1px solid #ccc;border-radius:8px;padding:8px 10px}.kpi .l{font-size:11px;color:#555}.kpi .v{font-size:20px;font-weight:bold}'+
+      'table{width:100%;border-collapse:collapse;margin-top:6px}th,td{border:1px solid #ccc;padding:6px 8px;font-size:12px;text-align:left;vertical-align:top}th{background:#f3f4f6}.c{text-align:center}.r{text-align:right}.b{font-weight:bold}.red{color:#b91c1c}'+
+      '.turno{margin-top:14px;page-break-inside:avoid}.th{font-size:13px;background:#fef3c7;padding:6px 8px;border:1px solid #ccc;border-bottom:0}.est{font-size:11px;padding:1px 6px;border-radius:6px;border:1px solid #999}.est.definitivo,.est.confirmado{border-color:#b91c1c;color:#b91c1c}.est.pendiente{border-color:#b45309;color:#b45309}.nota{font-size:10px;color:#555;margin-top:2px}'+
+      '.total{font-size:18px;font-weight:bold;text-align:right;margin-top:14px}.pie{font-size:11px;color:#555;margin-top:18px;line-height:1.5}.firmas{display:flex;gap:40px;margin-top:46px}.firmas div{flex:1;border-top:1px solid #111;padding-top:6px;font-size:12px;text-align:center}'+
+      '@media print{button{display:none}body{padding:0}}</style></head><body>'+
+      '<h1>🕵️ FALTANTES DE INVENTARIO — PANZER CARWASH</h1>'+
+      '<div class="meta">Operador: <b style="font-size:15px">'+esc(o.operador)+'</b><br>Período: <b>'+esc(fechaLarga(desde))+'</b> a <b>'+esc(fechaLarga(hasta))+'</b> · Sede: <b>'+esc(sede||"Todas")+'</b> · Tolerancia: '+(tol?("±"+tol+" unidad"+(tol>1?"es":"")):"ninguna")+'<br>Generado: '+esc(new Date().toLocaleString('es-CO'))+'</div>'+
+      '<div class="kpis"><div class="kpi"><div class="l">Turnos comparados</div><div class="v">'+ts.length+'</div></div><div class="kpi"><div class="l">Turnos con pérdida</div><div class="v">'+conPerd.length+'</div></div>'+
+      '<div class="kpi"><div class="l">Unidades perdidas</div><div class="v red">'+totU+'</div></div><div class="kpi"><div class="l">Valor a precio de venta</div><div class="v red">'+$(totV)+'</div></div><div class="kpi"><div class="l">Pendientes de confirmar</div><div class="v">'+totPend+'</div></div></div>'+
+      (conPerd.length===0 ? '<p><b>Sin pérdidas reales en este período.</b></p>' :
+        '<h2>Detalle por turno</h2>'+bloques+
+        '<h2>Resumen por producto</h2><table><thead><tr><th>Producto</th><th class="c">Unidades perdidas</th><th class="r">Valor venta</th></tr></thead><tbody>'+resumen+'</tbody></table>'+
+        '<div class="total">TOTAL A PRECIO DE VENTA: '+$(totV)+' <span style="font-size:13px;font-weight:normal">('+totU+' unidades)</span></div>')+
+      '<div class="pie">Cada chequeo se compara con el anterior de la misma sede: lo que falta de nuevo se perdió en el turno de quien hizo el chequeo anterior. Solo se incluyen pérdidas reales: <b>pendiente</b> (falta confirmarlo con el siguiente chequeo), <b>confirmado</b> y <b>definitivo</b> (el responsable volvió a contar y sigue faltando). No se incluyen errores de conteo, faltantes subsanados, dentro de tolerancia ni los marcados para revisar. Los ajustes del back office no cuentan. Valores a precio de venta.</div>'+
+      '<div class="firmas"><div>Operador: '+esc(o.operador)+'</div><div>Administración</div></div>'+
+      '<button onclick="window.print()" style="margin-top:22px;padding:10px 16px;font-size:14px;cursor:pointer">🖨 Imprimir / guardar PDF</button>'+
+      '</body></html>';
+    const w=window.open('','_blank'); if(!w){ showToast("Permite las ventanas emergentes para ver el informe","err"); return; }
+    w.document.write(html); w.document.close();
+  };
+
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
@@ -5322,13 +5365,14 @@ function FaltantesTurno({showToast, foco}){
       {vista==='operadores' && turnos.length>0 && (
         <div className="card" style={{padding:0,overflowX:"auto"}}>
           <table className="tbl">
-            <thead><tr><th>#</th><th>Operador</th><th className="num">Turnos</th><th className="num">Con pérdida</th><th className="num">Unidades perdidas</th><th className="num">Pendientes</th><th className="num">Valor al costo</th><th className="num">Precio venta</th><th className="num">Err. conteo</th><th>Productos más perdidos</th></tr></thead>
+            <thead><tr><th>#</th><th>Operador</th><th className="num">Turnos</th><th className="num">Con pérdida</th><th className="num">Unidades perdidas</th><th className="num">Pendientes</th><th className="num">Valor al costo</th><th className="num">Precio venta</th><th className="num">Err. conteo</th><th>Productos más perdidos</th><th></th></tr></thead>
             <tbody>{ranking.map((o,i)=>(
               <tr key={o.operador}>
                 <td className="muted">{i+1}</td><td className="row-name">{o.operador}</td><td className="num">{o.turnos}</td><td className="num">{o.conPerdida}</td>
                 <td className="num" style={{fontWeight:800,color:o.unidades>0?"var(--red)":"var(--green)"}}>{o.unidades}</td>
                 <td className="num muted">{o.pend||"—"}</td><td className="num" style={{fontWeight:700}}>{o.valor>0?fmt(o.valor):"—"}</td><td className="num" style={{fontWeight:700}}>{o.valorVenta>0?fmt(o.valorVenta):"—"}</td><td className="num muted">{o.errores||"—"}</td>
                 <td className="muted" style={{fontSize:12}}>{Object.entries(o.productos).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([n,u])=>n+" ("+u+")").join(" · ")||"—"}</td>
+                <td><button className="btn btn-ghost btn-sm" style={{whiteSpace:"nowrap"}} title="Informe imprimible con el detalle de las pérdidas de este operador en el filtro actual" onClick={()=>informeOperador(o)}>📄 Informe</button></td>
               </tr>))}</tbody>
           </table>
           <div className="muted" style={{fontSize:11,padding:"8px 12px"}}>Solo cuenta lo que se perdió en el turno de cada operador (no el arrastre de chequeos anteriores) y que no se ha subsanado. "Pendientes" son faltantes del último chequeo, que todavía no confirma un chequeo siguiente. Los marcados "revisar" no se suman.</div>

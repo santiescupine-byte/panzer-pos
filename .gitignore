@@ -16,3 +16,9 @@
 # Modelos de reconocimiento facial (face-api.js, MIT): los carga el POS desde /models
 !models/
 !models/*
+# Fuentes JSX (se editan aquí) y el script que las compila a admin.html / operador.html
+!src/
+!src/*.html
+!tools/
+tools/*
+!tools/build.js

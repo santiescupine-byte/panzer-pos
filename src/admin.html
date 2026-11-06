@@ -1446,6 +1446,13 @@ const db = {
     const {data,error}=await q; if(error) return []; return data||[];
   },
   // Trazabilidad: todos los movimientos de un producto (entradas/ventas/salidas/transferencias/muestras…)
+  // Retiros de muestra (movimientos tipo 'muestra') en un rango, para el seguimiento del admin (2026-11-06)
+  async listMuestras(desdeISO, hastaISO, sede){
+    if(DEMO_MODE) return [];
+    let q=sb.from('movimientos_inventario').select('id,producto_id,sede,cantidad,operador,nota,created_at').eq('tipo','muestra').gte('created_at',desdeISO).lte('created_at',hastaISO).order('created_at',{ascending:false}).limit(5000);
+    if(sede) q=q.eq('sede',sede);
+    const {data,error}=await q; if(error) throw error; return data||[];
+  },
   async listMovimientos({producto_id, sede, desde, hasta}={}){
     if(DEMO_MODE) return [];
     let q=sb.from('movimientos_inventario').select('created_at,sede,tipo,cantidad,operador,nota').eq('producto_id',producto_id).order('created_at',{ascending:false}).limit(500);
@@ -4888,13 +4895,100 @@ function InventarioHub({showToast, admin}){
   return (
     <div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
-        {[['stock','📦 Stock'],['chequeos','✔️ Chequeos'],['faltantes','🕵️ Faltantes por turno'],['arqueos','📋 Arqueos']].map(([k,l])=>(
+        {[['stock','📦 Stock'],['chequeos','✔️ Chequeos'],['faltantes','🕵️ Faltantes por turno'],['arqueos','📋 Arqueos'],['muestras','🧪 Muestras']].map(([k,l])=>(
           <button key={k} className={"btn btn-sm "+(sub===k?'btn-amber':'btn-ghost')} onClick={()=>{ setSub(k); if(k!=='faltantes') setFoco(""); }}>{l}</button>))}
       </div>
       {sub==='stock' && <Inventario showToast={showToast} admin={admin} onVerFaltantes={verFaltantes}/>}
       {sub==='chequeos' && <Chequeos showToast={showToast} admin={admin}/>}
       {sub==='faltantes' && <FaltantesTurno showToast={showToast} foco={foco}/>}
       {sub==='arqueos' && <Arqueos showToast={showToast} admin={admin}/>}
+      {sub==='muestras' && <Muestras showToast={showToast}/>}
+    </div>
+  );
+}
+
+// ============================================================
+// MUESTRAS: seguimiento de los retiros de muestra que hacen los cajeros en el POS (productos y snacks).
+// Cada retiro es un movimiento 'muestra' con operador, sede, cantidad y el motivo en la nota (obligatorio desde 2026-11-06).
+// ============================================================
+function Muestras({showToast}){
+  const hoy=fLocalDia(new Date());
+  const [desde,setDesde]=useState(()=>{ const d=new Date(); d.setDate(d.getDate()-29); return fLocalDia(d); });
+  const [hasta,setHasta]=useState(hoy);
+  const [sede,setSede]=useState(""); const [sedes,setSedes]=useState([]);
+  const [grupo,setGrupo]=useState("");          // '' todos | 'snacks' | 'productos'
+  const [q,setQ]=useState("");
+  const [vista,setVista]=useState('detalle');   // detalle | operadores | productos
+  const [rows,setRows]=useState(null); const [prods,setProds]=useState({});
+  useEffect(()=>{ db.listSedes().then(s=>setSedes(s.filter(x=>!x.es_bodega))).catch(()=>{}); },[]);
+  const cargar=async()=>{ setRows(null);
+    try{
+      const [ms,ps]=await Promise.all([db.listMuestras(new Date(desde+'T00:00:00').toISOString(), new Date(hasta+'T23:59:59.999').toISOString(), sede||undefined), db.listProductos()]);
+      const m={}; (ps||[]).forEach(p=>{ m[p.id]={nombre:p.nombre, categoria:p.categoria||"", costo:Number(p.costo)||0, precio:Number(p.precio)||0}; });
+      setProds(m); setRows(ms||[]);
+    }catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
+  useEffect(()=>{ cargar(); },[desde,hasta,sede]);
+  const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='90') d.setDate(d.getDate()-89); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
+  const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
+  const esSnack=p=>(p.categoria||"").trim().toUpperCase()==='SNACKS';
+  const motivoDe=r=>{ const n=String(r.nota||""); if(n.startsWith("Muestra:")) return n.slice(8).trim(); if(/^Retiro para muestra/.test(n)) return ""; return n.trim(); };
+  if(rows===null) return <div className="empty">Cargando retiros de muestra…</div>;
+  const qn=q.trim().toUpperCase();
+  const items=rows.map(r=>{ const p=prods[r.producto_id]||{nombre:"(producto borrado)",categoria:"",costo:0,precio:0}; const u=Math.abs(Number(r.cantidad)||0);
+      return {...r, nombre:p.nombre, categoria:p.categoria, snack:esSnack(p), unidades:u, costo:u*p.costo, venta:u*p.precio, motivo:motivoDe(r)}; })
+    .filter(r=>(grupo===''||(grupo==='snacks'?r.snack:!r.snack)) && (!qn || r.nombre.toUpperCase().includes(qn) || String(r.operador||"").toUpperCase().includes(qn) || r.motivo.toUpperCase().includes(qn)));
+  const tU=items.reduce((a,r)=>a+r.unidades,0), tC=items.reduce((a,r)=>a+r.costo,0), tV=items.reduce((a,r)=>a+r.venta,0), sinMotivo=items.filter(r=>!r.motivo).length;
+  const agrupa=key=>{ const m={}; items.forEach(r=>{ const k=key(r); const o=m[k]||(m[k]={k, n:0, unidades:0, costo:0, venta:0, ult:null, otros:{}}); o.n++; o.unidades+=r.unidades; o.costo+=r.costo; o.venta+=r.venta; if(!o.ult||r.created_at>o.ult) o.ult=r.created_at;
+      const otro=key===porOp?r.nombre:String(r.operador||"—"); o.otros[otro]=(o.otros[otro]||0)+r.unidades; }); return Object.values(m).sort((a,b)=>b.unidades-a.unidades||b.n-a.n); };
+  const porOp=r=>String(r.operador||"—").trim(); const porProd=r=>r.nombre;
+  const rOp=agrupa(porOp), rProd=agrupa(porProd);
+  const topOtros=o=>Object.entries(o.otros).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([n,u])=>n+" ("+u+")").join(" · ")||"—";
+  return (
+    <div>
+      <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
+        <b style={{color:"var(--amber)"}}>🧪 Retiros de muestra.</b> <span className="muted">Producto que el cajero saca del inventario desde el POS para demostración o muestra: no es venta, pero sí descuenta stock. Desde el 6 de noviembre el POS exige el motivo. Los retiros anteriores salen como "sin motivo".</span>
+      </div>
+      <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
+        <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
+        <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
+        <div style={{display:"flex",gap:4,alignSelf:"flex-end",flexWrap:"wrap"}}>{[['7','7 días'],['30','30 días'],['90','90 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
+        <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={sede} onChange={e=>setSede(e.target.value)}><option value="">Todas</option>{sedes.map(s=><option key={s.id} value={s.nombre}>{s.nombre}</option>)}</select></div>
+        <div className="fld"><label className="label">Tipo</label><select className="select" style={{margin:0}} value={grupo} onChange={e=>setGrupo(e.target.value)}><option value="">Productos y snacks</option><option value="productos">Solo productos</option><option value="snacks">Solo snacks</option></select></div>
+        <div className="fld" style={{flex:"1 1 180px"}}><label className="label">Buscar</label><input className="input" style={{margin:0}} placeholder="Producto, operador o motivo…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+        <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
+      </div>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Retiros</div><div style={{fontSize:22,fontWeight:800}}>{items.length}</div><div className="muted" style={{fontSize:11}}>{rOp.length} operador(es) · {rProd.length} producto(s)</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Unidades retiradas</div><div style={{fontSize:22,fontWeight:800,color:tU>0?"var(--amber)":"var(--green)"}}>{tU}</div><div className="muted" style={{fontSize:11}}>{items.filter(r=>r.snack).reduce((a,r)=>a+r.unidades,0)} son snacks</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Valor al costo</div><div style={{fontSize:22,fontWeight:800}}>{fmt(tC)}</div><div className="muted" style={{fontSize:11}}>productos sin costo valen $0</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Valor a precio de venta</div><div style={{fontSize:22,fontWeight:800}}>{fmt(tV)}</div><div className="muted" style={{fontSize:11}}>lo que se habría vendido</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Sin motivo</div><div style={{fontSize:22,fontWeight:800,color:sinMotivo>0?"var(--red)":"var(--green)"}}>{sinMotivo}</div><div className="muted" style={{fontSize:11}}>retiros anteriores al motivo obligatorio</div></div>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+        {[['detalle','📋 Detalle'],['operadores','👤 Por operador'],['productos','🏷️ Por producto']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
+      </div>
+      {items.length===0 && <div className="empty">No hay retiros de muestra con esos filtros.</div>}
+      {vista==='detalle' && items.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>Fecha</th><th>Sede</th><th>Operador</th><th>Producto</th><th className="num">Unidades</th><th className="num">Costo</th><th className="num">Precio venta</th><th>Motivo</th></tr></thead>
+          <tbody>{items.map(r=>(<tr key={r.id} style={{background:!r.motivo?"var(--red-d)":undefined}}>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(r.created_at)}</td><td>{r.sede}</td><td className="row-name">{r.operador||"—"}</td>
+            <td>{r.nombre}{r.snack && <span className="pill pill-prod" style={{marginLeft:6}}>snack</span>}</td>
+            <td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{r.unidades}</td><td className="num">{r.costo>0?fmt(r.costo):"—"}</td><td className="num">{r.venta>0?fmt(r.venta):"—"}</td>
+            <td style={{fontSize:13,maxWidth:320,whiteSpace:"normal"}}>{r.motivo||<span style={{color:"var(--red)",fontWeight:700}}>sin motivo</span>}</td></tr>))}</tbody>
+        </table></div>)}
+      {vista==='operadores' && items.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>#</th><th>Operador</th><th className="num">Retiros</th><th className="num">Unidades</th><th className="num">Costo</th><th className="num">Precio venta</th><th>Último</th><th>Qué retira más</th></tr></thead>
+          <tbody>{rOp.map((o,i)=>(<tr key={o.k}><td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num">{o.n}</td><td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{o.unidades}</td><td className="num">{o.costo>0?fmt(o.costo):"—"}</td><td className="num">{o.venta>0?fmt(o.venta):"—"}</td>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{topOtros(o)}</td></tr>))}</tbody>
+        </table></div>)}
+      {vista==='productos' && items.length>0 && (
+        <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
+          <thead><tr><th>#</th><th>Producto</th><th className="num">Retiros</th><th className="num">Unidades</th><th className="num">Costo</th><th className="num">Precio venta</th><th>Último</th><th>Quién lo retira</th></tr></thead>
+          <tbody>{rProd.map((o,i)=>(<tr key={o.k}><td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num">{o.n}</td><td className="num" style={{fontWeight:800,color:"var(--amber)"}}>{o.unidades}</td><td className="num">{o.costo>0?fmt(o.costo):"—"}</td><td className="num">{o.venta>0?fmt(o.venta):"—"}</td>
+            <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{topOtros(o)}</td></tr>))}</tbody>
+        </table></div>)}
     </div>
   );
 }

@@ -370,13 +370,12 @@ const db = {
       const e = DEMO_EMPLEADOS.find((x) => x.pin === pin);
       return e ? { nombre: String(e.nombre || '').trim(), rol: e.rol || 'cajero', sedes: [...e.sedes] } : null;
     }
-    const { data, error } = await sb.from('empleados').
-    select('nombre, rol, empleado_sedes(sedes(nombre))').
-    eq('pin', pin).eq('activo', true).maybeSingle();
-    if (error || !data) return null;
-    const sedes = (data.empleado_sedes || []).map((r) => r.sedes?.nombre).filter(Boolean);
 
-    return { nombre: String(data.nombre || '').trim(), rol: data.rol || 'cajero', sedes };
+    const { data, error } = await sb.rpc('login_pin', { p_pin: String(pin || '') });
+    if (error) throw new Error("Sin conexión con el sistema. Revisa el internet e intenta de nuevo.");
+    if (!data || !data.ok) {if (data && data.bloqueado) throw new Error(data.error || "Demasiados intentos. Espera 10 minutos.");return null;}
+
+    return { nombre: String(data.nombre || '').trim(), rol: data.rol || 'cajero', sedes: Array.isArray(data.sedes) ? data.sedes : [] };
   },
   async getProductos(sede) {
     if (DEMO_MODE) {
@@ -676,7 +675,7 @@ const db = {
     }
   },
 
-  async retirarMuestra(sede, operador, items) {
+  async retirarMuestra(sede, operador, items, motivo) {
     if (DEMO_MODE) {
       const st = demoStock(sede);
       items.forEach((it) => {if (it.producto_id in st) st[it.producto_id] = (Number(st[it.producto_id]) || 0) - it.cantidad;});
@@ -685,7 +684,7 @@ const db = {
     for (const it of items) {
       const { error } = await sb.rpc('ajustar_inventario', {
         p_producto_id: it.producto_id, p_sede: sede, p_tipo: 'muestra',
-        p_cantidad: -Math.abs(it.cantidad), p_operador: operador, p_nota: 'Retiro para muestra/demostración (POS)'
+        p_cantidad: -Math.abs(it.cantidad), p_operador: operador, p_nota: 'Muestra: ' + String(motivo || '').trim()
       });
       if (error) throw error;
     }
@@ -3010,6 +3009,7 @@ function RecepcionSheet({ sede, operador, productos, showToast, onClose, onSaved
   const [q, setQ] = useState("");
   const [cant, setCant] = useState({});
   const [cantM, setCantM] = useState({});
+  const [motivoM, setMotivoM] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -3045,11 +3045,13 @@ function RecepcionSheet({ sede, operador, productos, showToast, onClose, onSaved
   const setM = (id, v) => setCantM((prev) => ({ ...prev, [id]: v.replace(/[^0-9]/g, "") }));
   const itemsM = Object.entries(cantM).map(([producto_id, v]) => ({ producto_id, cantidad: Number(v) || 0 })).filter((it) => it.cantidad > 0);
   const totalM = itemsM.reduce((s, it) => s + it.cantidad, 0);
+  const motivoOk = motivoM.trim().length >= 5;
   const guardarMuestra = async () => {
     if (!itemsM.length) {showToast("Escribe al menos una cantidad", "err");return;}
+    if (!motivoOk) {showToast("Escribe el motivo del retiro (mínimo 5 letras)", "err");return;}
     setBusy(true);
     try {
-      await db.retirarMuestra(sede, operador, itemsM);
+      await db.retirarMuestra(sede, operador, itemsM, motivoM);
       showToast("Retiro de muestra registrado (" + totalM + " uds)", "ok");
       if (onSaved) onSaved();onClose();
     } catch (e) {showToast("No se pudo registrar: " + (e.message || e), "err");setBusy(false);}
@@ -3153,7 +3155,10 @@ function RecepcionSheet({ sede, operador, productos, showToast, onClose, onSaved
     })
     ),
     itemsM.length > 0 && React.createElement("div", { className: "header-sub", style: { marginBottom: 8 } }, "Vas a retirar ", React.createElement("b", null, totalM), " unidad(es) en ", React.createElement("b", null, itemsM.length), " producto(s) para muestra."),
-    React.createElement("button", { className: "btn-primary", style: { background: "var(--amber)", borderColor: "var(--amber)" }, disabled: busy || !itemsM.length, onClick: guardarMuestra }, busy ? "Registrando…" : "🧪 Registrar retiro de muestra")
+    React.createElement("label", { className: "label" }, "Motivo del retiro ", React.createElement("span", { style: { color: "var(--red)" } }, "*obligatorio")),
+    React.createElement("textarea", { className: "input", rows: "2", placeholder: "Ej: demostraci\xF3n a cliente de camioneta blanca / muestra para el vendedor de Bel\xE9n", value: motivoM, onChange: (e) => setMotivoM(e.target.value), style: { resize: "none" } }),
+    motivoM.trim().length > 0 && !motivoOk && React.createElement("div", { className: "header-sub", style: { color: "var(--red)", marginBottom: 6 } }, "Escribe un motivo m\xE1s claro (m\xEDnimo 5 letras)."),
+    React.createElement("button", { className: "btn-primary", style: { background: "var(--amber)", borderColor: "var(--amber)" }, disabled: busy || !itemsM.length || !motivoOk, onClick: guardarMuestra }, busy ? "Registrando…" : !itemsM.length ? "Escribe las cantidades" : !motivoOk ? "Escribe el motivo" : "🧪 Registrar retiro de muestra")
     ),
 
 

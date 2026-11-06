@@ -1447,6 +1447,13 @@ const db = {
     const { data, error } = await q;if (error) return [];return data || [];
   },
 
+
+  async listMuestras(desdeISO, hastaISO, sede) {
+    if (DEMO_MODE) return [];
+    let q = sb.from('movimientos_inventario').select('id,producto_id,sede,cantidad,operador,nota,created_at').eq('tipo', 'muestra').gte('created_at', desdeISO).lte('created_at', hastaISO).order('created_at', { ascending: false }).limit(5000);
+    if (sede) q = q.eq('sede', sede);
+    const { data, error } = await q;if (error) throw error;return data || [];
+  },
   async listMovimientos({ producto_id, sede, desde, hasta } = {}) {
     if (DEMO_MODE) return [];
     let q = sb.from('movimientos_inventario').select('created_at,sede,tipo,cantidad,operador,nota').eq('producto_id', producto_id).order('created_at', { ascending: false }).limit(500);
@@ -4889,13 +4896,100 @@ function InventarioHub({ showToast, admin }) {
   return (
     React.createElement("div", null,
     React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } },
-    [['stock', '📦 Stock'], ['chequeos', '✔️ Chequeos'], ['faltantes', '🕵️ Faltantes por turno'], ['arqueos', '📋 Arqueos']].map(([k, l]) =>
+    [['stock', '📦 Stock'], ['chequeos', '✔️ Chequeos'], ['faltantes', '🕵️ Faltantes por turno'], ['arqueos', '📋 Arqueos'], ['muestras', '🧪 Muestras']].map(([k, l]) =>
     React.createElement("button", { key: k, className: "btn btn-sm " + (sub === k ? 'btn-amber' : 'btn-ghost'), onClick: () => {setSub(k);if (k !== 'faltantes') setFoco("");} }, l))
     ),
     sub === 'stock' && React.createElement(Inventario, { showToast: showToast, admin: admin, onVerFaltantes: verFaltantes }),
     sub === 'chequeos' && React.createElement(Chequeos, { showToast: showToast, admin: admin }),
     sub === 'faltantes' && React.createElement(FaltantesTurno, { showToast: showToast, foco: foco }),
-    sub === 'arqueos' && React.createElement(Arqueos, { showToast: showToast, admin: admin })
+    sub === 'arqueos' && React.createElement(Arqueos, { showToast: showToast, admin: admin }),
+    sub === 'muestras' && React.createElement(Muestras, { showToast: showToast })
+    ));
+
+}
+
+
+
+
+
+function Muestras({ showToast }) {
+  const hoy = fLocalDia(new Date());
+  const [desde, setDesde] = useState(() => {const d = new Date();d.setDate(d.getDate() - 29);return fLocalDia(d);});
+  const [hasta, setHasta] = useState(hoy);
+  const [sede, setSede] = useState("");const [sedes, setSedes] = useState([]);
+  const [grupo, setGrupo] = useState("");
+  const [q, setQ] = useState("");
+  const [vista, setVista] = useState('detalle');
+  const [rows, setRows] = useState(null);const [prods, setProds] = useState({});
+  useEffect(() => {db.listSedes().then((s) => setSedes(s.filter((x) => !x.es_bodega))).catch(() => {});}, []);
+  const cargar = async () => {setRows(null);
+    try {
+      const [ms, ps] = await Promise.all([db.listMuestras(new Date(desde + 'T00:00:00').toISOString(), new Date(hasta + 'T23:59:59.999').toISOString(), sede || undefined), db.listProductos()]);
+      const m = {};(ps || []).forEach((p) => {m[p.id] = { nombre: p.nombre, categoria: p.categoria || "", costo: Number(p.costo) || 0, precio: Number(p.precio) || 0 };});
+      setProds(m);setRows(ms || []);
+    } catch (e) {showToast("" + (e.message || e), "err");setRows([]);}};
+  useEffect(() => {cargar();}, [desde, hasta, sede]);
+  const preset = (k) => {const h = new Date();const d = new Date();if (k === '7') d.setDate(d.getDate() - 6);else if (k === '30') d.setDate(d.getDate() - 29);else if (k === '90') d.setDate(d.getDate() - 89);else if (k === 'mes') d.setDate(1);setDesde(fLocalDia(d));setHasta(fLocalDia(h));};
+  const fecha = (iso) => fLocalDia(iso) + " " + fLocalHora(iso);
+  const esSnack = (p) => (p.categoria || "").trim().toUpperCase() === 'SNACKS';
+  const motivoDe = (r) => {const n = String(r.nota || "");if (n.startsWith("Muestra:")) return n.slice(8).trim();if (/^Retiro para muestra/.test(n)) return "";return n.trim();};
+  if (rows === null) return React.createElement("div", { className: "empty" }, "Cargando retiros de muestra\u2026");
+  const qn = q.trim().toUpperCase();
+  const items = rows.map((r) => {const p = prods[r.producto_id] || { nombre: "(producto borrado)", categoria: "", costo: 0, precio: 0 };const u = Math.abs(Number(r.cantidad) || 0);
+    return { ...r, nombre: p.nombre, categoria: p.categoria, snack: esSnack(p), unidades: u, costo: u * p.costo, venta: u * p.precio, motivo: motivoDe(r) };}).
+  filter((r) => (grupo === '' || (grupo === 'snacks' ? r.snack : !r.snack)) && (!qn || r.nombre.toUpperCase().includes(qn) || String(r.operador || "").toUpperCase().includes(qn) || r.motivo.toUpperCase().includes(qn)));
+  const tU = items.reduce((a, r) => a + r.unidades, 0),tC = items.reduce((a, r) => a + r.costo, 0),tV = items.reduce((a, r) => a + r.venta, 0),sinMotivo = items.filter((r) => !r.motivo).length;
+  const agrupa = (key) => {const m = {};items.forEach((r) => {const k = key(r);const o = m[k] || (m[k] = { k, n: 0, unidades: 0, costo: 0, venta: 0, ult: null, otros: {} });o.n++;o.unidades += r.unidades;o.costo += r.costo;o.venta += r.venta;if (!o.ult || r.created_at > o.ult) o.ult = r.created_at;
+      const otro = key === porOp ? r.nombre : String(r.operador || "—");o.otros[otro] = (o.otros[otro] || 0) + r.unidades;});return Object.values(m).sort((a, b) => b.unidades - a.unidades || b.n - a.n);};
+  const porOp = (r) => String(r.operador || "—").trim();const porProd = (r) => r.nombre;
+  const rOp = agrupa(porOp),rProd = agrupa(porProd);
+  const topOtros = (o) => Object.entries(o.otros).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, u]) => n + " (" + u + ")").join(" · ") || "—";
+  return (
+    React.createElement("div", null,
+    React.createElement("div", { className: "card", style: { background: "var(--amber-d)", border: "1px solid rgba(37,99,235,.3)", marginBottom: 12 } },
+    React.createElement("b", { style: { color: "var(--amber)" } }, "\uD83E\uDDEA Retiros de muestra."), " ", React.createElement("span", { className: "muted" }, "Producto que el cajero saca del inventario desde el POS para demostraci\xF3n o muestra: no es venta, pero s\xED descuenta stock. Desde el 6 de noviembre el POS exige el motivo. Los retiros anteriores salen como \"sin motivo\".")
+    ),
+    React.createElement("div", { className: "toolbar", style: { gap: 8, flexWrap: "wrap" } },
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Desde"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: desde, onChange: (e) => setDesde(e.target.value) })),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Hasta"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: hasta, onChange: (e) => setHasta(e.target.value) })),
+    React.createElement("div", { style: { display: "flex", gap: 4, alignSelf: "flex-end", flexWrap: "wrap" } }, [['7', '7 días'], ['30', '30 días'], ['90', '90 días'], ['mes', 'Este mes']].map(([k, l]) => React.createElement("button", { key: k, className: "btn btn-ghost btn-sm", onClick: () => preset(k) }, l))),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Sede"), React.createElement("select", { className: "select", style: { margin: 0 }, value: sede, onChange: (e) => setSede(e.target.value) }, React.createElement("option", { value: "" }, "Todas"), sedes.map((s) => React.createElement("option", { key: s.id, value: s.nombre }, s.nombre)))),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Tipo"), React.createElement("select", { className: "select", style: { margin: 0 }, value: grupo, onChange: (e) => setGrupo(e.target.value) }, React.createElement("option", { value: "" }, "Productos y snacks"), React.createElement("option", { value: "productos" }, "Solo productos"), React.createElement("option", { value: "snacks" }, "Solo snacks"))),
+    React.createElement("div", { className: "fld", style: { flex: "1 1 180px" } }, React.createElement("label", { className: "label" }, "Buscar"), React.createElement("input", { className: "input", style: { margin: 0 }, placeholder: "Producto, operador o motivo\u2026", value: q, onChange: (e) => setQ(e.target.value) })),
+    React.createElement("button", { className: "btn btn-ghost btn-sm", style: { alignSelf: "flex-end" }, onClick: cargar }, "\u21BB")
+    ),
+    React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", margin: "10px 0" } },
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Retiros"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, items.length), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, rOp.length, " operador(es) \xB7 ", rProd.length, " producto(s)")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Unidades retiradas"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: tU > 0 ? "var(--amber)" : "var(--green)" } }, tU), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, items.filter((r) => r.snack).reduce((a, r) => a + r.unidades, 0), " son snacks")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Valor al costo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, fmt(tC)), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "productos sin costo valen $0")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Valor a precio de venta"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, fmt(tV)), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "lo que se habr\xEDa vendido")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Sin motivo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: sinMotivo > 0 ? "var(--red)" : "var(--green)" } }, sinMotivo), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "retiros anteriores al motivo obligatorio"))
+    ),
+    React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 } },
+    [['detalle', '📋 Detalle'], ['operadores', '👤 Por operador'], ['productos', '🏷️ Por producto']].map(([k, l]) => React.createElement("button", { key: k, className: "btn btn-sm " + (vista === k ? 'btn-amber' : 'btn-ghost'), onClick: () => setVista(k) }, l))
+    ),
+    items.length === 0 && React.createElement("div", { className: "empty" }, "No hay retiros de muestra con esos filtros."),
+    vista === 'detalle' && items.length > 0 &&
+    React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto" } }, React.createElement("table", { className: "tbl" },
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Fecha"), React.createElement("th", null, "Sede"), React.createElement("th", null, "Operador"), React.createElement("th", null, "Producto"), React.createElement("th", { className: "num" }, "Unidades"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", null, "Motivo"))),
+    React.createElement("tbody", null, items.map((r) => React.createElement("tr", { key: r.id, style: { background: !r.motivo ? "var(--red-d)" : undefined } },
+    React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, fecha(r.created_at)), React.createElement("td", null, r.sede), React.createElement("td", { className: "row-name" }, r.operador || "—"),
+    React.createElement("td", null, r.nombre, r.snack && React.createElement("span", { className: "pill pill-prod", style: { marginLeft: 6 } }, "snack")),
+    React.createElement("td", { className: "num", style: { fontWeight: 800, color: "var(--amber)" } }, r.unidades), React.createElement("td", { className: "num" }, r.costo > 0 ? fmt(r.costo) : "—"), React.createElement("td", { className: "num" }, r.venta > 0 ? fmt(r.venta) : "—"),
+    React.createElement("td", { style: { fontSize: 13, maxWidth: 320, whiteSpace: "normal" } }, r.motivo || React.createElement("span", { style: { color: "var(--red)", fontWeight: 700 } }, "sin motivo")))))
+    )),
+    vista === 'operadores' && items.length > 0 &&
+    React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto" } }, React.createElement("table", { className: "tbl" },
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "#"), React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Retiros"), React.createElement("th", { className: "num" }, "Unidades"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", null, "\xDAltimo"), React.createElement("th", null, "Qu\xE9 retira m\xE1s"))),
+    React.createElement("tbody", null, rOp.map((o, i) => React.createElement("tr", { key: o.k }, React.createElement("td", { className: "muted" }, i + 1), React.createElement("td", { className: "row-name" }, o.k), React.createElement("td", { className: "num" }, o.n), React.createElement("td", { className: "num", style: { fontWeight: 800, color: "var(--amber)" } }, o.unidades), React.createElement("td", { className: "num" }, o.costo > 0 ? fmt(o.costo) : "—"), React.createElement("td", { className: "num" }, o.venta > 0 ? fmt(o.venta) : "—"),
+    React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, fecha(o.ult)), React.createElement("td", { className: "muted", style: { fontSize: 12 } }, topOtros(o)))))
+    )),
+    vista === 'productos' && items.length > 0 &&
+    React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto" } }, React.createElement("table", { className: "tbl" },
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "#"), React.createElement("th", null, "Producto"), React.createElement("th", { className: "num" }, "Retiros"), React.createElement("th", { className: "num" }, "Unidades"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", null, "\xDAltimo"), React.createElement("th", null, "Qui\xE9n lo retira"))),
+    React.createElement("tbody", null, rProd.map((o, i) => React.createElement("tr", { key: o.k }, React.createElement("td", { className: "muted" }, i + 1), React.createElement("td", { className: "row-name" }, o.k), React.createElement("td", { className: "num" }, o.n), React.createElement("td", { className: "num", style: { fontWeight: 800, color: "var(--amber)" } }, o.unidades), React.createElement("td", { className: "num" }, o.costo > 0 ? fmt(o.costo) : "—"), React.createElement("td", { className: "num" }, o.venta > 0 ? fmt(o.venta) : "—"),
+    React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, fecha(o.ult)), React.createElement("td", { className: "muted", style: { fontSize: 12 } }, topOtros(o)))))
+    ))
     ));
 
 }

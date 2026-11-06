@@ -9056,8 +9056,8 @@ function DevolucionesBLE({showToast}){
   const sedes=[...new Set(todas.map(r=>r.sede).filter(Boolean))].sort(), maqs=[...new Set(todas.map(r=>r.maquina))].sort(), ops=[...new Set(todas.map(r=>String(r.operador||'').trim()))].sort();
   const vis=todas.filter(r=>(!fSede||r.sede===fSede)&&(!fMaq||r.maquina===fMaq)&&(!fOp||String(r.operador||'').trim()===fOp)&&(!fCred||String(r.ciclos)===fCred));
   const cred=a=>a.reduce((x,r)=>x+(Number(r.ciclos)||0),0);
-  const n3=vis.filter(r=>Number(r.ciclos)===3).length, n1=vis.filter(r=>Number(r.ciclos)===1).length;
-  const agrupa=key=>{ const m={}; vis.forEach(r=>{ const k=key(r); const o=m[k]||(m[k]={k, n:0, cred:0, n3:0, n1:0, ult:null, otros:{}}); o.n++; o.cred+=Number(r.ciclos)||0; if(Number(r.ciclos)===3) o.n3++; else o.n1++; if(!o.ult||r.creado_en>o.ult) o.ult=r.creado_en; const otro=key===porMaq?String(r.operador||'').trim():r.maquina; o.otros[otro]=(o.otros[otro]||0)+1; }); return Object.values(m).sort((a,b)=>b.n-a.n||b.cred-a.cred); };
+  const n3=vis.filter(r=>Number(r.ciclos)===3).length, n2=vis.filter(r=>Number(r.ciclos)===2).length, n1=vis.filter(r=>Number(r.ciclos)===1).length;
+  const agrupa=key=>{ const m={}; vis.forEach(r=>{ const k=key(r); const o=m[k]||(m[k]={k, n:0, cred:0, n3:0, n2:0, n1:0, ult:null, otros:{}}); o.n++; o.cred+=Number(r.ciclos)||0; if(Number(r.ciclos)===3) o.n3++; else if(Number(r.ciclos)===2) o.n2++; else o.n1++; if(!o.ult||r.creado_en>o.ult) o.ult=r.creado_en; const otro=key===porMaq?String(r.operador||'').trim():r.maquina; o.otros[otro]=(o.otros[otro]||0)+1; }); return Object.values(m).sort((a,b)=>b.n-a.n||b.cred-a.cred); };
   const porMaq=r=>r.maquina, porOp=r=>String(r.operador||'').trim();
   const rMaq=agrupa(porMaq), rOp=agrupa(porOp);
   const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
@@ -9078,7 +9078,7 @@ function DevolucionesBLE({showToast}){
         <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
       </div>
       <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
-        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{vis.length}</div><div className="muted" style={{fontSize:11}}>{n3} de 3 créditos · {n1} de 1</div></div>
+        <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{vis.length}</div><div className="muted" style={{fontSize:11}}>{n3} de 3 créditos · {n2} de 2 · {n1} de 1</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Créditos devueltos</div><div style={{fontSize:22,fontWeight:800,color:"var(--amber)"}}>{cred(vis)}</div><div className="muted" style={{fontSize:11}}>= {fmt(cred(vis)*6000)} en tokens</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Máquinas con devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{rMaq.length}</div><div className="muted" style={{fontSize:11}}>{rMaq[0]?("la que más: "+rMaq[0].k+" ("+rMaq[0].n+")"):"—"}</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Operadores que devuelven</div><div style={{fontSize:22,fontWeight:800}}>{rOp.length}</div><div className="muted" style={{fontSize:11}}>{rOp[0]?("el que más: "+rOp[0].k+" ("+rOp[0].n+")"):"—"}</div></div>
@@ -9090,16 +9090,16 @@ function DevolucionesBLE({showToast}){
       {vis.length===0 && <div className="empty">Sin devoluciones con esos filtros.</div>}
       {vista==='maquinas' && vis.length>0 && (
         <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
-          <thead><tr><th>#</th><th>Máquina</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>Quién devolvió</th></tr></thead>
+          <thead><tr><th>#</th><th>Máquina</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 2</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>Quién devolvió</th></tr></thead>
           <tbody>{rMaq.map((o,i)=>(<tr key={o.k} style={{background:i===0&&o.n>=3?"var(--red-d)":undefined}}>
-            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800,color:o.n>=3?"var(--red)":"var(--tb)"}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
+            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800,color:o.n>=3?"var(--red)":"var(--tb)"}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n2}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
             <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{Object.entries(o.otros).sort((a,b)=>b[1]-a[1]).map(([n,c])=>n+" ("+c+")").join(" · ")}</td></tr>))}</tbody>
         </table></div>)}
       {vista==='operadores' && vis.length>0 && (
         <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
-          <thead><tr><th>#</th><th>Operador</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>En qué máquinas</th></tr></thead>
+          <thead><tr><th>#</th><th>Operador</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 2</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>En qué máquinas</th></tr></thead>
           <tbody>{rOp.map((o,i)=>(<tr key={o.k}>
-            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
+            <td className="muted">{i+1}</td><td className="row-name">{o.k}</td><td className="num" style={{fontWeight:800}}>{o.n}</td><td className="num">{o.n3}</td><td className="num">{o.n2}</td><td className="num">{o.n1}</td><td className="num">{o.cred}</td>
             <td className="muted" style={{whiteSpace:"nowrap"}}>{fecha(o.ult)}</td><td className="muted" style={{fontSize:12}}>{Object.entries(o.otros).sort((a,b)=>b[1]-a[1]).map(([n,c])=>n+" ("+c+")").join(" · ")}</td></tr>))}</tbody>
         </table></div>)}
       {vista==='detalle' && vis.length>0 && (

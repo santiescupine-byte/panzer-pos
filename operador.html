@@ -804,7 +804,7 @@ function App() {
   const [showCelda, setShowCelda] = useState(false);
   const [showDevolBLE, setShowDevolBLE] = useState(false);
   const celdaOn = true;
-  const devolBleOn = false;
+  const devolBleOn = true;
   const asistenciaOn = true;
   const [showRecepcion, setShowRecepcion] = useState(false);
   const [pendTransito, setPendTransito] = useState(0);
@@ -1409,8 +1409,8 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
   const [devBLE, setDevBLE] = useState([]);
   useEffect(() => {if (DEMO_MODE) return;const d = turno && turno.created_at ? turno.created_at : new Date(Date.now() - 14 * 3600 * 1000).toISOString();
     db.misDevolucionesBLE(operador, d).then(setDevBLE).catch(() => setDevBLE([]));}, []);
-  const devB3 = devBLE.filter((m) => Number(m.ciclos) === 3).length,devB1 = devBLE.filter((m) => Number(m.ciclos) === 1).length,devBCred = devB3 * 3 + devB1;
-  const devBTxt = devBLE.length ? "Dev. Bluetooth: " + devB3 + "×3 + " + devB1 + "×1 = " + devBCred + " créditos" : "";
+  const devB3 = devBLE.filter((m) => Number(m.ciclos) === 3).length,devB2 = devBLE.filter((m) => Number(m.ciclos) === 2).length,devB1 = devBLE.filter((m) => Number(m.ciclos) === 1).length,devBCred = devBLE.reduce((a, m) => a + (Number(m.ciclos) || 0), 0);
+  const devBTxt = devBLE.length ? "Dev. Bluetooth: " + devB3 + "×3 + " + devB2 + "×2 + " + devB1 + "×1 = " + devBCred + " créditos" : "";
 
   const [ultimo, setUltimo] = useState(null);
   const [baseAuto, setBaseAuto] = useState(false);
@@ -1512,7 +1512,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     'Tokens vendidos: ' + p.tokensVendidos + ' · Dev: ' + p.devTokens + ' · Membresía: ' + p.tokensMembresia + '\n' +
     'Tokens restantes: ' + p.tokensRestantes + '\n' +
     'Devoluciones: ' + fmt(dev) + '\n' + (
-    devBLE.length ? 'Devoluciones Bluetooth: ' + devB3 + ' de 3 créditos · ' + devB1 + ' de 1 crédito (' + devBCred + ' créditos)\n' : '') +
+    devBLE.length ? 'Devoluciones Bluetooth: ' + devB3 + ' de 3 créditos · ' + devB2 + ' de 2 · ' + devB1 + ' de 1 (' + devBCred + ' créditos)\n' : '') +
     '*Efectivo esperado: ' + fmt(efectivoEsperado) + '*' + (
     observaciones ? '\nObs: ' + observaciones : '');
   };
@@ -1612,7 +1612,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     tokenInput("Membresía", tokensMembresia, setTokensMembresia, { borderColor: "var(--purple)" })
     ),
     memAuto && React.createElement("div", { style: { fontSize: 11, color: "var(--purple)", marginBottom: 6 } }, "\uD83D\uDCB3 \"Membres\xEDa\" se trajo autom\xE1tico de los canjes VIP del turno. Puedes ajustarlo."),
-    devBLE.length > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "\u21A9\uFE0F Devoluciones por Bluetooth"), React.createElement("span", { className: "result-value" }, devB3, " de 3 \xB7 ", devB1, " de 1 ", React.createElement("span", { className: "header-sub" }, "(", devBCred, " cr\xE9ditos)"))),
+    devBLE.length > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "\u21A9\uFE0F Devoluciones por Bluetooth"), React.createElement("span", { className: "result-value" }, devB3, " de 3 \xB7 ", devB2, " de 2 \xB7 ", devB1, " de 1 ", React.createElement("span", { className: "header-sub" }, "(", devBCred, " cr\xE9ditos)"))),
     baseAuto && ultimo && React.createElement("div", { style: { fontSize: 11, color: "var(--amber)", marginBottom: 6 } }, "\uD83E\uDE99 Base sugerida: los ", ultimo.tokens_restantes, " tokens que quedaron en tu \xFAltimo cierre (", horaDe(ultimo.created_at), "). Corr\xEDgela si no coincide con lo que recibiste."),
     tokensRepetidos &&
     React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--red)", background: "var(--red-d)", fontSize: 13, color: "var(--red)" } },
@@ -2368,7 +2368,7 @@ function DevolucionBLESheet({ sede, operador, turno, onClose }) {
   const cargar = async () => {try {setMias(await db.misDevolucionesBLE(operador, desde));} catch (e) {}};
   useEffect(() => {cargar();db.maquinasCeldaDeSede(sede).then((m) => {setMaqs(m);if (!maquina && m.length === 1) setMaquina(m[0]);}).catch(() => {});}, []);
   const hora = (iso) => new Date(iso).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
-  const listo = !!maquina && motivo.trim().length >= 5 && (creditos === 1 || creditos === 3);
+  const listo = !!maquina && motivo.trim().length >= 5 && (creditos === 1 || creditos === 2 || creditos === 3);
   const devolver = async () => {
     if (busy || !listo) return;setBusy(true);setErr(null);setOk(null);
     try {const r = await devolverBLE(operador, sede, maquina, creditos, motivo.trim(), setPaso);setOk(r);setMotivo("");}
@@ -2395,7 +2395,7 @@ function DevolucionBLESheet({ sede, operador, turno, onClose }) {
     err && React.createElement("div", { style: { margin: "0 0 10px", padding: "12px 14px", borderRadius: 12, background: "var(--red-d)", border: "1px solid var(--red)", color: "var(--red)", fontWeight: 700, fontSize: 14 } }, "\u26D4 ", err),
     React.createElement("label", { className: "label" }, "Cr\xE9ditos a devolver"),
     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
-    [1, 3].map((n) => React.createElement("button", { key: n, disabled: busy, onClick: () => setCreditos(n), style: { flex: 1, padding: "14px 8px", borderRadius: 12, border: "2px solid " + (creditos === n ? "var(--green)" : "var(--bd)"), background: creditos === n ? "var(--green-d)" : "var(--sf2)", color: "var(--t)", fontWeight: 900, fontSize: 18, cursor: "pointer" } }, n, " ", n === 1 ? "crédito" : "créditos"))
+    [1, 2, 3].map((n) => React.createElement("button", { key: n, disabled: busy, onClick: () => setCreditos(n), style: { flex: 1, padding: "14px 8px", borderRadius: 12, border: "2px solid " + (creditos === n ? "var(--green)" : "var(--bd)"), background: creditos === n ? "var(--green-d)" : "var(--sf2)", color: "var(--t)", fontWeight: 900, fontSize: 18, cursor: "pointer" } }, n, " ", n === 1 ? "crédito" : "créditos"))
     ),
     React.createElement("label", { className: "label" }, "M\xE1quina a la que se le devuelve"),
     maqs.length > 0 ?

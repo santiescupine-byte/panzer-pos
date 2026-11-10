@@ -8662,44 +8662,63 @@ function GraficaCiclos({ pts, series, porOp, abajo, desdeCero, paso, fmtV, padLe
 
 
 
+
+
+
+const keyNom = (s) => String(s || '').trim().toLowerCase();
 function DevolucionesTendencia({ sede }) {
   const [ciclos, setCiclos] = useState(null);
   const [lavados, setLavados] = useState([]);
+  const [devBt, setDevBt] = useState([]);
   const [porOp, setPorOp] = useState(false);
   const [modo, setModo] = useState('tokens');
   const [n, setN] = useState(12);
   useEffect(() => {let vivo = true;setCiclos(null);
     db.recCiclos({ sede }).then(async (cs) => {
       const cerr = (cs || []).filter((c) => c.estado === 'cerrado');
-      let lv = [];
-      try {const desde = new Date('2026-10-01T00:00:00').toISOString();
-        lv = (await db.listLavadosCelda(desde, new Date(Date.now() + 86400000).toISOString())).filter((l) => l.estado === 'aplicado' && l.sede === sede);} catch (e) {}
-      if (vivo) {setLavados(lv);setCiclos(cerr);}
+      let lv = [],dv = [];
+      try {const desde = new Date('2026-10-01T00:00:00').toISOString(),hasta = new Date(Date.now() + 86400000).toISOString();
+        const [a, b] = await Promise.all([db.listLavadosCelda(desde, hasta), db.listDevolucionesBLE(desde, hasta).catch(() => [])]);
+        lv = a.filter((l) => l.estado === 'aplicado' && l.sede === sede);dv = b.filter((l) => l.estado === 'aplicado' && l.sede === sede);} catch (e) {}
+      if (vivo) {setLavados(lv);setDevBt(dv);setCiclos(cerr);}
     }).catch(() => {if (vivo) setCiclos([]);});
     return () => {vivo = false;};}, [sede]);
   if (ciclos === null) return React.createElement("div", { className: "empty" }, "Cargando historial\u2026");
   const orden = ciclos.map((c) => ({ c, r: c.reparto || {} })).filter((x) => x.r.totalDevTokensCiclo != null || x.r.totalVendidosCiclo != null).
   sort((a, b) => a.c.fecha < b.c.fecha ? -1 : 1);
   const pts = orden.map((x, i) => {const r = x.r;const dev = Number(r.totalDevTokensCiclo) || 0,ven = Number(r.totalVendidosCiclo) || 0;
-    const ant = i > 0 ? orden[i - 1].c.fecha : null;
-    const lav = lavados.filter((l) => {const f = fLocalDia(l.creado_en);return f <= x.c.fecha && (!ant || f > ant);}).length;
-    return { fecha: x.c.fecha, dev, ven, pct: ven > 0 ? Math.round(dev / ven * 1000) / 10 : null, lav,
-      ops: (r.controlTokens || []).map((o) => ({ nombre: o.nombre, dev: Number(o.devTokensEsteC != null ? o.devTokensEsteC : o.devTokens) || 0, ven: Number(o.vendidosEsteC != null ? o.vendidosEsteC : o.vendidos) || 0 })) };}).
+
+    const tsC = (c) => c ? new Date(c.created_at || c.fecha + 'T23:59:59').getTime() : 0;
+    const hastaT = tsC(x.c),desdeT = i > 0 ? tsC(orden[i - 1].c) : 0;
+    const enCiclo = (l) => {const t = new Date(l.creado_en).getTime();return t <= hastaT && t > desdeT;};
+    const lav = lavados.filter(enCiclo).length;
+
+    const dvC = devBt.filter(enCiclo);
+    const btN = r.devBleN != null ? Number(r.devBleN) || 0 : dvC.length;
+    const btCred = r.devBleN != null ? Number(r.devBleCred) || 0 : dvC.reduce((a, l) => a + (Number(l.ciclos) || 0), 0);
+    const btOps = r.devBleOps || null;
+    const tot = dev + btCred;
+    return { fecha: x.c.fecha, dev, btN, btCred, tot, ven, pct: ven > 0 ? Math.round(tot / ven * 1000) / 10 : null, lav,
+      ops: (r.controlTokens || []).map((o) => {const devTok = Number(o.devTokensEsteC != null ? o.devTokensEsteC : o.devTokens) || 0;
+        const bt = btOps ? Number((btOps.find((b) => keyNom(b.nombre) === keyNom(o.nombre)) || {}).cred) || 0 : dvC.filter((l) => keyNom(l.operador) === keyNom(o.nombre)).reduce((a, l) => a + (Number(l.ciclos) || 0), 0);
+        return { nombre: o.nombre, devTok, bt, dev: devTok + bt, ven: Number(o.vendidosEsteC != null ? o.vendidosEsteC : o.vendidos) || 0 };}) };}).
   slice(-n);
   if (pts.length === 0) return React.createElement("div", { className: "empty" }, "Esta sede a\xFAn no tiene ciclos cerrados con reparto de tokens.");
   const nombres = [...new Set(pts.flatMap((p) => p.ops.map((o) => o.nombre)))];
   const paleta = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#be185d", "#65a30d"];
   const valOp = (o) => modo === 'pct' ? o.ven > 0 ? Math.round(o.dev / o.ven * 1000) / 10 : null : o.dev;
   const series = porOp ? nombres.map((nm, i) => ({ nombre: nm, color: paleta[i % paleta.length], vals: pts.map((p) => {const o = p.ops.find((x) => x.nombre === nm);return o ? valOp(o) : null;}) })) :
-  [{ nombre: modo === 'pct' ? "% devuelto sobre vendidos" : "Tokens devueltos", color: "var(--red)", vals: pts.map((p) => modo === 'pct' ? p.pct : p.dev) },
+  [{ nombre: modo === 'pct' ? "% devuelto sobre vendidos" : "Devoluciones (tokens + créditos BT)", color: "var(--red)", vals: pts.map((p) => modo === 'pct' ? p.pct : p.tot) },
+  ...(modo === 'tokens' && pts.some((p) => p.btCred > 0) ? [{ nombre: "Créditos devueltos por Bluetooth", color: "var(--amber)", punteada: true, vals: pts.map((p) => p.btCred > 0 ? p.btCred : null) }] : []),
   ...(modo === 'tokens' && pts.some((p) => p.lav > 0) ? [{ nombre: "Lavados de celda por Bluetooth", color: "var(--green)", punteada: true, vals: pts.map((p) => p.lav > 0 ? p.lav : null) }] : [])];
-  const totDev = pts.reduce((a, p) => a + p.dev, 0),totVen = pts.reduce((a, p) => a + p.ven, 0),totLav = pts.reduce((a, p) => a + p.lav, 0);
+  const totDev = pts.reduce((a, p) => a + p.tot, 0),totTok = pts.reduce((a, p) => a + p.dev, 0),totBtCred = pts.reduce((a, p) => a + p.btCred, 0),totBtN = pts.reduce((a, p) => a + p.btN, 0);
+  const totVen = pts.reduce((a, p) => a + p.ven, 0),totLav = pts.reduce((a, p) => a + p.lav, 0);
   const ult = pts[pts.length - 1],prev = pts.length > 1 ? pts[pts.length - 2] : null;
   const prom = pts.length ? Math.round(totDev / pts.length) : 0;
   return (
     React.createElement("div", { className: "card", style: { marginTop: 12 } },
     React.createElement("div", { className: "toolbar", style: { marginBottom: 6 } },
-    React.createElement("div", { className: "sec-title", style: { fontSize: 14, marginRight: "auto" } }, "\u21A9\uFE0F C\xF3mo se mueven las devoluciones de tokens ", React.createElement("span", { className: "muted" }, "\xB7 por ciclo")),
+    React.createElement("div", { className: "sec-title", style: { fontSize: 14, marginRight: "auto" } }, "\u21A9\uFE0F C\xF3mo se mueven las devoluciones ", React.createElement("span", { className: "muted" }, "\xB7 tokens + Bluetooth \xB7 por ciclo")),
     React.createElement("div", { style: { display: "flex", gap: 4, background: "var(--sf2)", borderRadius: 10, padding: 3 } },
     React.createElement("button", { className: "btn btn-sm " + (modo === 'tokens' ? 'btn-amber' : 'btn-ghost'), onClick: () => setModo('tokens') }, "Tokens"),
     React.createElement("button", { className: "btn btn-sm " + (modo === 'pct' ? 'btn-amber' : 'btn-ghost'), onClick: () => setModo('pct') }, "% de lo vendido")
@@ -8710,23 +8729,26 @@ function DevolucionesTendencia({ sede }) {
     React.createElement("button", { className: "btn btn-sm " + (porOp ? 'btn-amber' : 'btn-ghost'), onClick: () => setPorOp((v) => !v) }, porOp ? "Ver total" : "Ver por operador")
     ),
     React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 } },
-    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "\xDAltimo ciclo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--red)" } }, ult.dev), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "devueltos el ", ult.fecha, ult.pct != null ? " · " + ult.pct + "% de lo vendido" : "")),
-    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Frente al ciclo anterior"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: !prev ? "var(--td)" : ult.dev < prev.dev ? "var(--green)" : ult.dev > prev.dev ? "var(--red)" : "var(--td)" } }, prev ? (ult.dev - prev.dev > 0 ? "+" : "") + (ult.dev - prev.dev) : "—"), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, prev ? "antes " + prev.dev : "sin ciclo anterior")),
-    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Promedio por ciclo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, prom), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totDev, " en ", pts.length, " ciclos \xB7 ", totVen > 0 ? Math.round(totDev / totVen * 1000) / 10 : 0, "% de lo vendido")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "\xDAltimo ciclo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--red)" } }, ult.tot), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, ult.dev, " tokens", ult.btCred > 0 ? " + " + ult.btCred + " créditos BT" : "", " \xB7 ", ult.fecha, ult.pct != null ? " · " + ult.pct + "% de lo vendido" : "")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Frente al ciclo anterior"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: !prev ? "var(--td)" : ult.tot < prev.tot ? "var(--green)" : ult.tot > prev.tot ? "var(--red)" : "var(--td)" } }, prev ? (ult.tot - prev.tot > 0 ? "+" : "") + (ult.tot - prev.tot) : "—"), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, prev ? "antes " + prev.tot : "sin ciclo anterior")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Promedio por ciclo"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, prom), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totDev, " en ", pts.length, " ciclos (", totTok, " tokens + ", totBtCred, " BT) \xB7 ", totVen > 0 ? Math.round(totDev / totVen * 1000) / 10 : 0, "% de lo vendido")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px", borderColor: totBtN > 0 ? "var(--amber)" : undefined } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "\u21A9\uFE0F Devoluciones por Bluetooth"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--amber)" } }, totBtCred, " ", React.createElement("span", { className: "muted", style: { fontSize: 13 } }, "cr\xE9ditos")), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totBtN > 0 ? totBtN + " devoluciones en el rango · ya cuentan en la línea roja" : "aún no hay en esta sede")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px", borderColor: totLav > 0 ? "var(--green)" : undefined } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "\uD83D\uDEBF Lavados de celda por Bluetooth"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--green)" } }, totLav), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totLav > 0 ? "en el rango · ya no salen de la casilla de devoluciones" : "aún no hay en esta sede"))
     ),
     React.createElement(GraficaCiclos, { pts: pts, series: series, porOp: porOp, desdeCero: true, paso: modo === 'pct' ? 5 : 10 }),
     porOp && React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 } }, series.map((sr) => React.createElement("span", { key: sr.nombre, style: { fontSize: 12, display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 10, height: 10, borderRadius: 5, background: sr.color, display: "inline-block" } }), sr.nombre))),
-    !porOp && modo === 'tokens' && pts.some((p) => p.lav > 0) && React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 6, fontSize: 12 } }, React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 18, height: 3, background: "var(--red)", display: "inline-block" } }), "Tokens devueltos"), React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 18, height: 0, borderTop: "3px dashed var(--green)", display: "inline-block" } }), "Lavados de celda por Bluetooth")),
-    React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 6 } }, "\"Devueltos\" es la casilla Dev. tokens de las liquidaciones del ciclo: hoy mezcla aseo de celdas, devoluciones a clientes, membres\xEDas y cortes\xEDas. Cuando el lavado por Bluetooth est\xE9 en toda la sede, esa l\xEDnea debe bajar y quedar solo con devoluciones reales."),
+    !porOp && modo === 'tokens' && (pts.some((p) => p.lav > 0) || pts.some((p) => p.btCred > 0)) && React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 6, fontSize: 12, flexWrap: "wrap" } }, React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 18, height: 3, background: "var(--red)", display: "inline-block" } }), "Devoluciones (tokens + cr\xE9ditos BT)"), pts.some((p) => p.btCred > 0) && React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 18, height: 0, borderTop: "3px dashed var(--amber)", display: "inline-block" } }), "Cr\xE9ditos devueltos por Bluetooth"), pts.some((p) => p.lav > 0) && React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 18, height: 0, borderTop: "3px dashed var(--green)", display: "inline-block" } }), "Lavados de celda por Bluetooth")),
+    React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 6 } }, "\"Devoluciones\" = casilla Dev. tokens de las liquidaciones del ciclo (hoy mezcla aseo de celdas, devoluciones a clientes, membres\xEDas y cortes\xEDas) ", React.createElement("b", null, "+ cr\xE9ditos devueltos por Bluetooth"), " (desde noviembre 2026 la devoluci\xF3n al cliente ya no gasta token). Por operador tambi\xE9n se suman las dos. Los cr\xE9ditos BT no mueven tokens ni efectivo: solo cuentan aqu\xED para el control."),
     React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto", marginTop: 10 } },
     React.createElement("table", { className: "tbl" },
-    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Ciclo"), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Devueltos"), React.createElement("th", { className: "num" }, "% de lo vendido"), React.createElement("th", { className: "num" }, "Cambio"), React.createElement("th", { className: "num" }, "\uD83D\uDEBF Lavados BT"))),
-    React.createElement("tbody", null, [...pts].reverse().map((p, i, arr) => {const ant = arr[i + 1];const d = ant ? p.dev - ant.dev : null;return (
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Ciclo"), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Devoluciones"), React.createElement("th", { className: "num" }, "Tokens"), React.createElement("th", { className: "num" }, "\u21A9\uFE0F Cr\xE9ditos BT"), React.createElement("th", { className: "num" }, "% de lo vendido"), React.createElement("th", { className: "num" }, "Cambio"), React.createElement("th", { className: "num" }, "\uD83D\uDEBF Lavados BT"))),
+    React.createElement("tbody", null, [...pts].reverse().map((p, i, arr) => {const ant = arr[i + 1];const d = ant ? p.tot - ant.tot : null;return (
         React.createElement("tr", { key: p.fecha },
         React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, p.fecha),
         React.createElement("td", { className: "num" }, p.ven),
-        React.createElement("td", { className: "num", style: { fontWeight: 800, color: "var(--red)" } }, p.dev),
+        React.createElement("td", { className: "num", style: { fontWeight: 800, color: "var(--red)" } }, p.tot),
+        React.createElement("td", { className: "num" }, p.dev),
+        React.createElement("td", { className: "num", style: { color: p.btCred > 0 ? "var(--amber)" : "var(--td)", fontWeight: p.btCred > 0 ? 800 : 400 } }, p.btCred > 0 ? p.btCred + " (" + p.btN + ")" : "—"),
         React.createElement("td", { className: "num" }, p.pct != null ? p.pct + "%" : "—"),
         React.createElement("td", { className: "num", style: { color: d == null ? "var(--td)" : d < 0 ? "var(--green)" : d > 0 ? "var(--red)" : "var(--td)" } }, d == null ? "—" : (d > 0 ? "+" : "") + d),
         React.createElement("td", { className: "num", style: { color: p.lav > 0 ? "var(--green)" : "var(--td)", fontWeight: p.lav > 0 ? 800 : 400 } }, p.lav || "—")
@@ -9658,6 +9680,7 @@ function Recaudo({ showToast, quien, rol }) {
   const [conteo, setConteo] = useState({ tokens_fisicos: "", efectivo_total_monedas: "" });
   const [gastos, setGastos] = useState([]);
   const [saldosPrev, setSaldosPrev] = useState({});
+  const [devBle, setDevBle] = useState({ rows: [], desde: null });
   const [reparto, setReparto] = useState({ modo: 'operadores', baseRecogida: "", baseNueva: "", ajusteTokens: "", ajusteMotivo: "" });
   const [busy, setBusy] = useState(false);
   const [impSel, setImpSel] = useState({});
@@ -9681,6 +9704,11 @@ function Recaudo({ showToast, quien, rol }) {
     try {
       const [p, m, s] = await Promise.all([db.recLiqPendientes(sede), db.recMaquinas(sede), db.recSaldos(sede)]);
       setPend(p);setImpSel({});
+
+      try {const cs = await db.recCiclos({ sede });const ult = (cs || []).find((c) => c.estado === 'cerrado');
+        const desdeISO = ult ? ult.created_at || new Date(ult.fecha + 'T23:59:59').toISOString() : new Date('2026-11-01T00:00:00').toISOString();
+        const rows = (await db.listDevolucionesBLE(desdeISO, new Date(Date.now() + 60000).toISOString())).filter((r) => r.estado === 'aplicado' && r.sede === sede);
+        setDevBle({ rows, desde: desdeISO });} catch (e) {setDevBle({ rows: [], desde: null });}
       const prev = {};(s || []).forEach((x) => prev[x.operador] = Number(x.saldo) || 0);setSaldosPrev(prev);
       const byName = {};(m || []).forEach((x) => byName[x.nombre] = x);
       const nombres = m && m.length ? m.map((x) => x.nombre) : MAQ_DEFAULT;
@@ -9756,12 +9784,16 @@ function Recaudo({ showToast, quien, rol }) {
     const contado = cRaw != null && cRaw !== "" && !prevSede ? Number(cRaw) || 0 : null;
     const diferencia = contado != null ? contado - saldoEsperado : null;
     const saldoReal = contado != null ? contado : saldoEsperado;
+
+    const dB = devBle.rows.filter((r) => keyOp(r.operador) === keyOp(op));
+    const devBleN = dB.length,devBleCred = dB.reduce((a, r) => a + (Number(r.ciclos) || 0), 0);
     return { nombre: op, historial: { saldo: saldoAnterior }, saldoAnterior, vendidos,
       vendidosEsteC: vendidos, devTokens, devTokensEsteC: devTokens, membresia, membresiaEsteC: membresia,
-      saldoEsperado, contado, diferencia, saldoReal };
+      saldoEsperado, contado, diferencia, saldoReal, devBleN, devBleCred };
   });
   const totVendidos = controlTokens.reduce((a, c) => a + c.vendidos, 0);
   const totDevTokens = controlTokens.reduce((a, c) => a + c.devTokens, 0);
+  const totDevBleN = devBle.rows.length,totDevBleCred = devBle.rows.reduce((a, r) => a + (Number(r.ciclos) || 0), 0);
   const totMembresia = controlTokens.reduce((a, c) => a + c.membresia, 0);
   const totSaldoAnt = prevSede ? Number(baseSedeSaldo) || 0 : controlTokens.reduce((a, c) => a + c.saldoAnterior, 0);
   const totSaldoEsp = prevSede ? totSaldoAnt - totVendidos - totDevTokens - totMembresia : controlTokens.reduce((a, c) => a + (c.saldoEsperado || 0), 0);
@@ -9799,6 +9831,9 @@ function Recaudo({ showToast, quien, rol }) {
         totalDevTokensCiclo: totDevTokens, totalMembresiaCiclo: totMembresia, totalSaldoEsperado: totSaldoEsp, tokensPerdidos,
         faltanteMaqTokens, opsNegativos: opsNegativos.map((o) => o.nombre), nuevoSaldoSede,
 
+        devBleN: totDevBleN, devBleCred: totDevBleCred, devBleDesde: devBle.desde,
+        devBleOps: controlTokens.filter((c) => c.devBleN > 0).map((c) => ({ nombre: (c.nombre || '').trim(), n: c.devBleN, cred: c.devBleCred })),
+
         totalSaldoReal: totSaldoReal, baseSedeContada, difBaseSede, perdidosOps, sobrantesOps,
         rectificados: opsRect.map((c) => ({ nombre: c.nombre, esperado: c.saldoEsperado, contado: c.contado, diferencia: c.diferencia })),
 
@@ -9830,7 +9865,19 @@ function Recaudo({ showToast, quien, rol }) {
   };
 
   const verHistorial = async () => {setPaso('historial');setHisto(null);setHisto(await db.recCiclos({}));};
-  const verDetalle = async (c) => {const d = await db.recCicloDetalle(c.id);setDetalle({ ciclo: c, ...d });};
+  const verDetalle = async (c) => {const d = await db.recCicloDetalle(c.id);
+
+    let devBleDet = null;const rep = c.reparto || {};
+    if (rep.devBleN != null) devBleDet = { n: Number(rep.devBleN) || 0, cred: Number(rep.devBleCred) || 0, ops: rep.devBleOps || [], guardado: true };else
+    if (c.fecha >= '2026-11-01') {try {
+        const prev = (histo || []).filter((x) => x.sede === c.sede && x.estado === 'cerrado' && x.id !== c.id && (x.created_at || x.fecha) < (c.created_at || c.fecha)).sort((a, b) => (a.created_at || a.fecha) < (b.created_at || b.fecha) ? 1 : -1)[0];
+        const desdeISO = prev ? prev.created_at || new Date(prev.fecha + 'T23:59:59').toISOString() : new Date('2026-11-01T00:00:00').toISOString();
+        const hastaISO = c.created_at || new Date(c.fecha + 'T23:59:59').toISOString();
+        const rows = (await db.listDevolucionesBLE(desdeISO, hastaISO)).filter((r) => r.estado === 'aplicado' && r.sede === c.sede);
+        const m = {};rows.forEach((r) => {const k = String(r.operador || '').trim();const o = m[k] || (m[k] = { nombre: k, n: 0, cred: 0 });o.n++;o.cred += Number(r.ciclos) || 0;});
+        devBleDet = { n: rows.length, cred: rows.reduce((a, r) => a + (Number(r.ciclos) || 0), 0), ops: Object.values(m), guardado: false };
+      } catch (e) {}}
+    setDetalle({ ciclo: c, ...d, devBle: devBleDet });};
 
 
   const [contMaqs, setContMaqs] = useState(null);
@@ -10210,15 +10257,16 @@ function Recaudo({ showToast, quien, rol }) {
     ),
     React.createElement("div", { style: { overflowX: "auto" } },
     React.createElement("table", { className: "tbl" },
-    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Saldo ant."), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Dev."), React.createElement("th", { className: "num" }, "Membres\xEDa"), React.createElement("th", { className: "num" }, "Saldo esperado"), !prevSede && React.createElement("th", { className: "num" }, "Contado f\xEDsico"), !prevSede && React.createElement("th", { className: "num" }, "Diferencia"))),
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Saldo ant."), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Dev."), React.createElement("th", { className: "num", title: "Cr\xE9ditos devueltos por Bluetooth en este ciclo (entre par\xE9ntesis, cu\xE1ntas devoluciones). No mueven tokens ni efectivo." }, "\u21A9\uFE0F Dev. BT"), React.createElement("th", { className: "num" }, "Membres\xEDa"), React.createElement("th", { className: "num" }, "Saldo esperado"), !prevSede && React.createElement("th", { className: "num" }, "Contado f\xEDsico"), !prevSede && React.createElement("th", { className: "num" }, "Diferencia"))),
     React.createElement("tbody", null,
-    controlTokens.length === 0 && React.createElement("tr", null, React.createElement("td", { colSpan: "8" }, React.createElement("div", { className: "empty" }, "A\xFAn no hay operadores. Vuelve al paso ", React.createElement("b", null, "Liquidaciones"), " e importa o agrega las liquidaciones del turno \u2014 los operadores aparecer\xE1n aqu\xED autom\xE1ticamente con su saldo de tokens."))),
+    controlTokens.length === 0 && React.createElement("tr", null, React.createElement("td", { colSpan: "9" }, React.createElement("div", { className: "empty" }, "A\xFAn no hay operadores. Vuelve al paso ", React.createElement("b", null, "Liquidaciones"), " e importa o agrega las liquidaciones del turno \u2014 los operadores aparecer\xE1n aqu\xED autom\xE1ticamente con su saldo de tokens."))),
     controlTokens.map((c) =>
     React.createElement("tr", { key: c.nombre },
     React.createElement("td", { className: "row-name" }, c.nombre),
     React.createElement("td", { className: "num muted" }, c.saldoAnterior),
     React.createElement("td", { className: "num" }, c.vendidos),
     React.createElement("td", { className: "num" }, c.devTokens),
+    React.createElement("td", { className: "num" }, c.devBleN > 0 ? React.createElement("span", { style: { color: "var(--amber)", fontWeight: 700 } }, c.devBleCred, " ", React.createElement("span", { className: "muted", style: { fontSize: 10, fontWeight: 400 } }, "(", c.devBleN, ")")) : React.createElement("span", { className: "muted" }, "\u2014")),
     React.createElement("td", { className: "num" }, c.membresia),
     React.createElement("td", { className: "num", style: { fontWeight: 700, color: c.saldoEsperado != null && c.saldoEsperado < 0 ? "var(--red)" : "var(--t)" } }, c.saldoEsperado == null ? React.createElement("span", { className: "muted" }, "base sede") : c.saldoEsperado),
     !prevSede && React.createElement("td", { className: "num" },
@@ -10234,6 +10282,7 @@ function Recaudo({ showToast, quien, rol }) {
     )
     )
     ),
+    totDevBleN > 0 && React.createElement("div", { className: "muted", style: { fontSize: 12, marginTop: 6 } }, "\u21A9\uFE0F ", React.createElement("b", { style: { color: "var(--amber)" } }, "Devoluciones por Bluetooth en este ciclo: ", totDevBleCred, " cr\xE9ditos en ", totDevBleN, " devoluciones"), " (desde el cierre anterior). Son devoluciones digitales al cliente: no gastan tokens ni efectivo, por eso no entran al saldo esperado; quedan guardadas en el ciclo para el control."),
     !prevSede && controlTokens.length > 0 &&
     React.createElement("div", { className: "muted", style: { fontSize: 12, marginTop: 6 } },
     React.createElement("b", null, "Rectificaci\xF3n:"), " escribe en ", React.createElement("b", null, "Contado f\xEDsico"), " los tokens que de verdad tiene cada operador en la mano. Si no lo llenas, se toma el esperado.",
@@ -10909,6 +10958,8 @@ function Recaudo({ showToast, quien, rol }) {
 
     detalle && (() => {
       const c = detalle.ciclo;const rep = c.reparto || {};const ct = rep.controlTokens || [];
+      const dB = detalle.devBle || { n: 0, cred: 0, ops: [] };
+      const dBop = (nombre) => (dB.ops || []).find((o) => String(o.nombre || '').trim().toLowerCase() === String(nombre || '').trim().toLowerCase());
       const sumTD = detalle.maquinas.reduce((a, m) => a + (Number(m.token_dia) || 0), 0);
       const sumMD = detalle.maquinas.reduce((a, m) => a + (Number(m.mone_dia) || 0), 0);
 
@@ -10960,7 +11011,7 @@ function Recaudo({ showToast, quien, rol }) {
         ),
 
         React.createElement("div", { className: "cards", style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 } },
-        [['Total recaudo', fmt(c.total_recaudo)], ['A consignar', fmt(c.a_consignar)], ['Gastos', fmt(c.total_gastos)], ['Descuadre', fmt(c.total_descuadre)], ['Tokens físicos', c.tokens_fisicos], ['Saldo esperado tokens', sEspSede], ['Base tokens', rep.tokensTotalBase != null ? rep.tokensTotalBase : '—']].map(([l, v]) =>
+        [['Total recaudo', fmt(c.total_recaudo)], ['A consignar', fmt(c.a_consignar)], ['Gastos', fmt(c.total_gastos)], ['Descuadre', fmt(c.total_descuadre)], ['Tokens físicos', c.tokens_fisicos], ['Saldo esperado tokens', sEspSede], ['Base tokens', rep.tokensTotalBase != null ? rep.tokensTotalBase : '—'], ...(dB.n > 0 ? [['↩️ Dev. Bluetooth', dB.cred + ' cr. (' + dB.n + ')']] : [])].map(([l, v]) =>
         React.createElement("div", { key: l, className: "card", style: { flex: "1 1 110px", padding: 10 } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, l), React.createElement("div", { style: { fontSize: 16, fontWeight: 800 } }, v))
         )
         ),
@@ -10995,6 +11046,7 @@ function Recaudo({ showToast, quien, rol }) {
             fila(modoRep === 'sede' ? 'Base de tokens anterior (sede)' : 'Saldo anterior (Σ operadores)', sAnt),
             fila('− Vendidos', totVend),
             fila('− Devoluciones', totDev),
+            dB.n > 0 && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--bd)", fontSize: 12 } }, React.createElement("span", { className: "muted" }, "\u21A9\uFE0F Devoluciones por Bluetooth ", React.createElement("span", { style: { fontSize: 11 } }, "(cr\xE9ditos; no mueven tokens", dB.guardado === false ? " · calculado por fechas" : "", ")")), React.createElement("b", { style: { color: "var(--amber)" } }, dB.cred, " en ", dB.n)),
             fila('− Membresías', totMemb),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "2px solid var(--bd2)", fontWeight: 800 } },
             React.createElement("span", null, "= Saldo esperado", modoRep === 'sede' ? ' (base sede)' : ''),
@@ -11024,8 +11076,8 @@ function Recaudo({ showToast, quien, rol }) {
         ct.length > 0 && React.createElement("div", null,
         React.createElement("div", { className: "card-t", style: { marginTop: 14 } }, "Control de tokens por operador"),
         (() => {const conRect = ct.some((o) => o.contado != null);const conNuevo = ct.some((o) => o.saldoNuevo != null);return (
-            React.createElement("div", { style: { overflowX: "auto" } }, React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Saldo ant."), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Dev"), React.createElement("th", { className: "num" }, "Memb."), React.createElement("th", { className: "num" }, "Saldo esp."), conRect && React.createElement("th", { className: "num" }, "Contado"), conRect && React.createElement("th", { className: "num" }, "Dif."), conNuevo && React.createElement("th", { className: "num" }, "Dejado"))),
-            React.createElement("tbody", null, ct.map((o, i) => {const d = o.diferencia != null ? Number(o.diferencia) : null;return React.createElement("tr", { key: i }, React.createElement("td", { className: "row-name" }, o.nombre), React.createElement("td", { className: "num muted" }, o.historial ? o.historial.saldo : 0), React.createElement("td", { className: "num" }, o.vendidosEsteC), React.createElement("td", { className: "num" }, o.devTokensEsteC), React.createElement("td", { className: "num" }, o.membresiaEsteC), React.createElement("td", { className: "num", style: { fontWeight: 700, color: o.saldoEsperado != null && o.saldoEsperado < 0 ? "var(--red)" : "var(--t)" } }, o.saldoEsperado == null ? "base sede" : o.saldoEsperado),
+            React.createElement("div", { style: { overflowX: "auto" } }, React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Saldo ant."), React.createElement("th", { className: "num" }, "Vendidos"), React.createElement("th", { className: "num" }, "Dev"), dB.n > 0 && React.createElement("th", { className: "num" }, "\u21A9\uFE0F Dev. BT"), React.createElement("th", { className: "num" }, "Memb."), React.createElement("th", { className: "num" }, "Saldo esp."), conRect && React.createElement("th", { className: "num" }, "Contado"), conRect && React.createElement("th", { className: "num" }, "Dif."), conNuevo && React.createElement("th", { className: "num" }, "Dejado"))),
+            React.createElement("tbody", null, ct.map((o, i) => {const d = o.diferencia != null ? Number(o.diferencia) : null;const ob = dBop(o.nombre);return React.createElement("tr", { key: i }, React.createElement("td", { className: "row-name" }, o.nombre), React.createElement("td", { className: "num muted" }, o.historial ? o.historial.saldo : 0), React.createElement("td", { className: "num" }, o.vendidosEsteC), React.createElement("td", { className: "num" }, o.devTokensEsteC), dB.n > 0 && React.createElement("td", { className: "num" }, ob ? React.createElement("span", { style: { color: "var(--amber)", fontWeight: 700 } }, ob.cred, " ", React.createElement("span", { className: "muted", style: { fontSize: 10, fontWeight: 400 } }, "(", ob.n, ")")) : React.createElement("span", { className: "muted" }, "\u2014")), React.createElement("td", { className: "num" }, o.membresiaEsteC), React.createElement("td", { className: "num", style: { fontWeight: 700, color: o.saldoEsperado != null && o.saldoEsperado < 0 ? "var(--red)" : "var(--t)" } }, o.saldoEsperado == null ? "base sede" : o.saldoEsperado),
               conRect && React.createElement("td", { className: "num" }, o.contado != null ? o.contado : React.createElement("span", { className: "muted" }, "\u2014")),
               conRect && React.createElement("td", { className: "num", style: { fontWeight: 800, color: d == null ? "var(--td)" : d < 0 ? "var(--red)" : d > 0 ? "var(--amber)" : "var(--green)" } }, d == null ? "—" : d === 0 ? "✓ 0" : (d > 0 ? "+" : "") + d),
               conNuevo && React.createElement("td", { className: "num muted" }, o.saldoNuevo != null ? o.saldoNuevo : "—")

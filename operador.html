@@ -614,10 +614,11 @@ const db = {
     if (error) return [];return data || [];
   },
 
-  async maquinasCeldaDeSede(sede) {
+
+  async maquinasCeldaDeSede(sede, soloLavado) {
     if (DEMO_MODE) return [];
     const { data, error } = await sb.rpc('maquinas_lista');if (error) return [];
-    return (data || []).filter((m) => m.activa && (!sede || m.sede === sede) && !/^(PANZER_001|SIN_NOMBRE|MAQ-01)$/i.test(m.id)).map((m) => m.id).sort();
+    return (data || []).filter((m) => m.activa && (!sede || m.sede === sede) && !/^(PANZER_001|SIN_NOMBRE|MAQ-01)$/i.test(m.id) && (!soloLavado || m.tipo !== 'aspiradora')).map((m) => m.id).sort();
   },
   async misSolicitudesCelda(operador) {
     if (DEMO_MODE) return [];
@@ -2334,6 +2335,7 @@ async function devolverBLE(operador, sede, maquina, creditos, motivo, paso) {
     const chO = await svc.getCharacteristic(BLE_CELDA.orden);
     const chR = await svc.getCharacteristic(BLE_CELDA.res);
     const estado = bleTxt(await chE.readValue());
+    const esAsp = /^a1\|/.test(estado);
     paso("Pidiendo autorización…");
     const aut = await db.autorizarDevolucion(estado, operador, sede, maquina, creditos, motivo);
     if (!aut || !aut.ok) throw new Error(aut && aut.error || "No se autorizó la devolución.");
@@ -2347,10 +2349,12 @@ async function devolverBLE(operador, sede, maquina, creditos, motivo, paso) {
       await bleEspera(250);
       if (i % 4 === 3) {try {await chR.readValue();} catch (e) {}}
     }
-    if (/^ERR\|/.test(ultimo)) throw new Error(BLE_ERRORES[ultimo.split('|')[1]] || "La máquina rechazó la orden. Intenta de nuevo.");
+    if (/^ERR\|/.test(ultimo)) {const cod = ultimo.split('|')[1];
+      if (esAsp && cod === 'ocupada') throw new Error("La máquina está en uso. Espera a que termine e intenta de nuevo.");
+      throw new Error(BLE_ERRORES[cod] || "La máquina rechazó la orden. Intenta de nuevo.");}
     if (!/^OK\|/.test(ultimo)) throw new Error("La máquina no confirmó. Mira su pantalla: si no cargó los créditos, intenta de nuevo (no queda registrada).");
     try {await db.confirmarLavadoCelda(aut.id, bleTxt(await chE.readValue()));} catch (e) {}
-    return { maquina: aut.maquina, ciclos: aut.ciclos };
+    return { maquina: aut.maquina, ciclos: aut.ciclos, aspiradora: esAsp };
   } finally {try {if (dev.gatt.connected) dev.gatt.disconnect();} catch (e) {}}
 }
 
@@ -2388,7 +2392,7 @@ function DevolucionBLESheet({ sede, operador, turno, onClose }) {
     React.createElement("div", { style: { fontSize: 20, fontWeight: 900, color: "var(--green)", marginTop: 6 } }, "CR\xC9DITOS DEVUELTOS"),
     React.createElement("div", { style: { fontSize: 26, fontWeight: 900, margin: "6px 0" } }, ok.maquina),
     React.createElement("div", { className: "header-sub" }, ok.ciclos, " cr\xE9dito(s) \xB7 qued\xF3 registrado a nombre de ", operador),
-    React.createElement("div", { style: { fontWeight: 800, marginTop: 10 } }, "El cliente ya puede usar los botones de la m\xE1quina."),
+    React.createElement("div", { style: { fontWeight: 800, marginTop: 10 } }, ok.aspiradora ? "La máquina ya se encendió para el cliente." : "El cliente ya puede usar los botones de la máquina."),
     React.createElement("button", { className: "btn-primary", style: { marginTop: 14 }, onClick: () => setOk(null) }, "Otra devoluci\xF3n")
     ) :
     React.createElement("div", null,
@@ -2719,7 +2723,7 @@ function CeldaSheet({ sede, operador, onClose }) {
   const [pedBusy, setPedBusy] = useState(false);
   const [pedErr, setPedErr] = useState(null);
   const cargar = async () => {try {const [l, s] = await Promise.all([db.misLavadosCelda(operador), db.misSolicitudesCelda(operador)]);setMios(l);setSols(s);} catch (e) {}};
-  useEffect(() => {cargar();db.maquinasCeldaDeSede(sede).then(setMaqs).catch(() => {});const t = setInterval(cargar, 10000);return () => clearInterval(t);}, []);
+  useEffect(() => {cargar();db.maquinasCeldaDeSede(sede, true).then(setMaqs).catch(() => {});const t = setInterval(cargar, 10000);return () => clearInterval(t);}, []);
   const enviarSolicitud = async () => {
     if (pedBusy) return;setPedBusy(true);setPedErr(null);
     try {const r = await db.solicitarLavadoCelda(pedMaq, sede, operador, pedMotivo.trim());

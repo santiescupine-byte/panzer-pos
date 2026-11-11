@@ -9223,7 +9223,7 @@ function LavadosCelda({showToast, quien, rol}){
     setRows(null);
     try{ const dISO=new Date(desde+'T00:00:00').toISOString(), hISO=new Date(hasta+'T23:59:59.999').toISOString();
       const [lv,mq,cf,sl]=await Promise.all([db.listLavadosCelda(dISO,hISO), db.listMaquinasCelda().catch(()=>[]), db.getCeldaConfig().catch(()=>null), db.listSolicitudesCelda(dISO).catch(()=>[])]);
-      setRows(lv); setMaqs(mq); setSols(sl); if(cf) setCfg(c=>c&&c._sucio?c:{ciclos:cf.ciclos,cupo:cf.cupo,ventana_horas:cf.ventana_horas,actualizado_por:cf.actualizado_por,actualizado_en:cf.actualizado_en}); }
+      setRows(lv); setMaqs((mq||[]).filter(m=>m.tipo!=='aspiradora') /* aspiradoras y dispensadores no tienen lavado de celda */); setSols(sl); if(cf) setCfg(c=>c&&c._sucio?c:{ciclos:cf.ciclos,cupo:cf.cupo,ventana_horas:cf.ventana_horas,actualizado_por:cf.actualizado_por,actualizado_en:cf.actualizado_en}); }
     catch(e){ showToast(""+(e.message||e),"err"); setRows([]); }
   };
   useEffect(()=>{ cargar(); },[desde,hasta]);

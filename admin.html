@@ -1407,7 +1407,7 @@ const db = {
 
     const todo = [];
     for (let off = 0; off < 30000; off += 1000) {
-      let q = sb.from('chequeos_inventario').select('id,sede,operador,created_at,n_descuadres,total_items,descuadres').gte('created_at', desdeISO).order('created_at', { ascending: true }).order('id', { ascending: true }).range(off, off + 999);
+      let q = sb.from('chequeos_inventario').select('id,sede,operador,created_at,n_descuadres,total_items,descuadres,tipo').gte('created_at', desdeISO).order('created_at', { ascending: true }).order('id', { ascending: true }).range(off, off + 999);
       if (sede) q = q.eq('sede', sede);
       const { data, error } = await q;if (error) throw error;todo.push(...(data || []));if (!data || data.length < 1000) break;
     }
@@ -4626,8 +4626,8 @@ function Chequeos({ showToast, admin }) {
     React.createElement("tr", { key: c.id, style: { cursor: "pointer" }, onClick: () => setDetalle(c) },
     React.createElement("td", { className: "muted" }, fLocalDia(c.created_at), " ", fLocalHora(c.created_at)),
     React.createElement("td", null, c.sede),
-    React.createElement("td", { className: "row-name" }, c.operador),
-    React.createElement("td", { className: "num" }, fmt(c.base_recibida)),
+    React.createElement("td", { className: "row-name" }, c.operador, c.tipo === 'cierre' && React.createElement("span", { className: "pill pill-token", style: { marginLeft: 6 } }, "cierre")),
+    React.createElement("td", { className: "num" }, c.tipo === 'cierre' ? "—" : fmt(c.base_recibida)),
     React.createElement("td", { className: "num" }, c.n_descuadres > 0 ? React.createElement("span", { className: "pill pill-off" }, c.n_descuadres) : React.createElement("span", { className: "pill pill-prod" }, "0")),
     React.createElement("td", null, React.createElement("div", { className: "actions" }, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: (e) => {e.stopPropagation();setDetalle(c);} }, "Ver")))
     )
@@ -5259,7 +5259,9 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
       (prev.descuadres || []).forEach((d) => {dPrev[norm(d.nombre)] = { nombre: d.nombre, dif: Number(d.diferencia) || 0 };});
       (cur.descuadres || []).forEach((d) => {dCur[norm(d.nombre)] = { nombre: d.nombre, dif: Number(d.diferencia) || 0 };});
       const aj = {};ajSede.filter((a) => a.created_at > prev.created_at && a.created_at <= cur.created_at).forEach((a) => {const n = norm(idNombre[a.producto_id] || '');if (n) aj[n] = (aj[n] || 0) + (Number(a.cantidad) || 0);});
-      const t = { id: cur.id, sede, operador: String(prev.operador || '').trim(), inicio: prev.created_at, fin: cur.created_at, contadoPor: String(cur.operador || '').trim(), ultimo: i === cs.length - 1, aj, items: [] };
+      const t = { id: cur.id, sede, operador: String(prev.operador || '').trim(), inicio: prev.created_at, fin: cur.created_at, contadoPor: String(cur.operador || '').trim(), ultimo: i === cs.length - 1, aj, items: [],
+
+        entrega: prev.tipo === 'cierre', cierrePropio: cur.tipo === 'cierre' && prev.tipo !== 'cierre' && String(prev.operador || '').trim() === String(cur.operador || '').trim() };
       const claves = new Set([...Object.keys(dPrev), ...Object.keys(dCur), ...Object.keys(aj)]);
       claves.forEach((k) => {
         const antes = dPrev[k] ? dPrev[k].dif : 0,ahoraD = dCur[k] ? dCur[k].dif : 0,a = aj[k] || 0;
@@ -5337,6 +5339,7 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
         if (it.delta > 0) it.estado = it.usado > 0 ? 'subsana' : it.transitoU > 0 && it.recuperado === 0 ? 'transito' : 'recuperado';else
         if (it.perdida === 0) it.estado = it.manualU > 0 ? 'justificado' : it.subsanado > 0 ? 'subsanado' : it.sobranteU > 0 ? 'sobrante' : 'subsanado';else
         if (it.revisar) it.estado = 'revisar';else
+        if (t.entrega) it.estado = 'entrega';else
         if (ti === turnos.length - 1) it.estado = 'pendiente';else
         if (it.ventanaCerrada) it.estado = 'definitivo';else
         it.estado = 'confirmado';
@@ -5351,6 +5354,7 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
         if (it.subsanado > 0 && it.perdida > 0) notas.push('se subsanaron ' + it.subsanado + ', quedan ' + it.perdida);
         if (it.manualU > 0) notas.push('administración subsanó ' + it.manualU + (it.perdida > 0 ? ', quedan ' + it.perdida : '') + ': ' + it.manual.motivo + ' (' + String(it.manual.quien || '').split(' ')[0] + ', ' + fch(it.manual.created_at) + ')');
         if (it.estado === 'revisar') notas.push(it.revisarNota);
+        if (it.estado === 'entrega') notas.push('el cierre de ' + String(t.operador).split(' ')[0] + ' y la apertura de ' + String(t.contadoPor).split(' ')[0] + ' no coinciden: no se le carga a nadie automáticamente');
         if (it.estado === 'definitivo') notas.push(it.porArqueo ? 'lo confirmó el arqueo del ' + fch(it.arqueoEn) : it.porTope ? 'pasaron 7 días sin reaparecer' : 'él mismo lo volvió a contar de menos el ' + fch(it.vuelveEn));
         if (it.estado === 'confirmado') notas.push(it.vuelveEn ? 'se puede subsanar hasta que vuelva a contar' : 'se puede subsanar hasta que vuelva a contar, máximo 7 días');
         it.estadoNota = notas.join(' · ');
@@ -5366,6 +5370,8 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
       t.justU = t.items.reduce((a, i) => a + (i.manualU || 0), 0);
       t.justVV = t.items.reduce((a, i) => a + (i.manualValorVenta || 0), 0);
       t.revisar = t.items.filter((i) => i.estado === 'revisar').length;
+      t.entregaU = t.items.filter((i) => i.estado === 'entrega').reduce((a, i) => a + i.perdida, 0);
+      t.entregaVV = t.items.filter((i) => i.estado === 'entrega').reduce((a, i) => a + (i.valorVenta || 0), 0);
     });
     salida.push(...turnos);
   });
@@ -5409,8 +5415,8 @@ function FaltantesTurno({ showToast, foco, admin }) {
   const todos = calcularFaltantes(data.cs, data.aj, data.idNombre, (k) => data.costo[k] || 0, tol, data.arqs, (k) => (data.precio || {})[k] || 0, manMap, data.env);
   const turnos = todos.filter((t) => t.fin >= desdeISO && t.fin <= hastaISO);
   const qn = q.trim().toUpperCase();
-  const colorEstado = { pendiente: "var(--amber)", confirmado: "var(--red)", definitivo: "var(--red)", error: "var(--td)", tolerancia: "var(--td)", recuperado: "var(--green)", subsanado: "var(--green)", justificado: "var(--green)", sobrante: "var(--td)", transito: "var(--amber)", subsana: "var(--green)", revisar: "var(--amber)" };
-  const lblEstado = { pendiente: "pendiente de confirmar", confirmado: "confirmado", definitivo: "definitivo", error: "error de conteo", tolerancia: "dentro de tolerancia", recuperado: "recuperado", subsanado: "subsanado", justificado: "subsanado por administración", sobrante: "baja de un sobrante (no es pérdida)", transito: "mercancía sin recibir en el POS", subsana: "subsana una pérdida", revisar: "revisar" };
+  const colorEstado = { pendiente: "var(--amber)", confirmado: "var(--red)", definitivo: "var(--red)", error: "var(--td)", tolerancia: "var(--td)", recuperado: "var(--green)", subsanado: "var(--green)", justificado: "var(--green)", sobrante: "var(--td)", transito: "var(--amber)", entrega: "var(--amber)", subsana: "var(--green)", revisar: "var(--amber)" };
+  const lblEstado = { pendiente: "pendiente de confirmar", confirmado: "confirmado", definitivo: "definitivo", error: "error de conteo", tolerancia: "dentro de tolerancia", recuperado: "recuperado", subsanado: "subsanado", justificado: "subsanado por administración", sobrante: "baja de un sobrante (no es pérdida)", transito: "mercancía sin recibir en el POS", entrega: "diferencia en la entrega", subsana: "subsana una pérdida", revisar: "revisar" };
   const Estado = ({ it }) => React.createElement("span", null, React.createElement("span", { className: "pill", style: { background: it.estado === 'definitivo' ? "var(--red-d)" : "transparent", border: "1px solid " + colorEstado[it.estado], color: colorEstado[it.estado] }, title: it.estadoNota || "" }, lblEstado[it.estado]), it.estadoNota && React.createElement("div", { className: "muted", style: { fontSize: 10, marginTop: 2, maxWidth: 260, whiteSpace: "normal" } }, it.estadoNota));
   const dim = (it) => it.estado === 'error' || it.estado === 'tolerancia' || it.estado === 'subsanado' || it.estado === 'justificado' || it.estado === 'sobrante' || it.estado === 'subsana';
 
@@ -5432,8 +5438,9 @@ function FaltantesTurno({ showToast, foco, admin }) {
   const totalSub = turnos.reduce((a, t) => a + t.subsanados, 0),totalRev = turnos.reduce((a, t) => a + t.revisar, 0);
   const totalJustU = turnos.reduce((a, t) => a + (t.justU || 0), 0),totalJustVV = turnos.reduce((a, t) => a + (t.justVV || 0), 0);
   const totalSobU = turnos.reduce((a, t) => a + (t.sobU || 0), 0),totalSobVV = turnos.reduce((a, t) => a + (t.sobVV || 0), 0);
+  const totalEntU = turnos.reduce((a, t) => a + (t.entregaU || 0), 0),totalEntVV = turnos.reduce((a, t) => a + (t.entregaVV || 0), 0),nCierres = turnos.filter((t) => t.cierrePropio).length;
   const porOp = {};turnos.forEach((t) => {const o = porOp[t.operador] || (porOp[t.operador] = { operador: t.operador, turnos: 0, conPerdida: 0, unidades: 0, pend: 0, valor: 0, valorVenta: 0, productos: {}, errores: 0, just: 0 });
-    o.turnos++;if (t.perdidos.length) o.conPerdida++;o.errores += t.errores;o.just += t.justU || 0;
+    if (!t.entrega) o.turnos++;if (t.perdidos.length) o.conPerdida++;o.errores += t.errores;o.just += t.justU || 0;
     t.perdidos.forEach((i) => {o.unidades += i.perdida;o.valor += i.valor;o.valorVenta += i.valorVenta || 0;if (i.estado === 'pendiente') o.pend += i.perdida;o.productos[i.nombre] = (o.productos[i.nombre] || 0) + i.perdida;});});
   const ranking = Object.values(porOp).sort((a, b) => b.valor - a.valor || b.unidades - a.unidades);
   const porProd = {};turnos.forEach((t) => {t.items.forEach((i) => {const k = i.nombre + '|' + t.sede;const p = porProd[k] || (porProd[k] = { nombre: i.nombre, sede: t.sede, unidades: 0, valor: 0, valorVenta: 0, errores: 0, turnos: [] });
@@ -5490,7 +5497,7 @@ function FaltantesTurno({ showToast, foco, admin }) {
   return (
     React.createElement("div", null,
     React.createElement("div", { className: "card", style: { background: "var(--amber-d)", border: "1px solid rgba(37,99,235,.3)", marginBottom: 12 } },
-    React.createElement("b", { style: { color: "var(--amber)" } }, "\uD83D\uDD75\uFE0F Qu\xE9 se perdi\xF3 en cada turno."), " ", React.createElement("span", { className: "muted" }, "Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdi\xF3 en el turno de quien hizo el chequeo anterior. Si el siguiente chequeo lo \"recupera\" es error de conteo. Si reaparece despu\xE9s, pero antes de que el responsable vuelva a contar la sede (m\xE1ximo 7 d\xEDas), queda subsanado; si en el medio entr\xF3 una transferencia de ese producto, queda para revisar. Cuando el responsable vuelve a contar y sigue faltando, es definitivo. Los ajustes del back office no cuentan. ", React.createElement("b", null, "Bajar de un sobrante no es p\xE9rdida:"), " si hab\xEDa unidades de m\xE1s (un sobrante, o mercanc\xEDa de bodega que lleg\xF3 y no se hab\xEDa recibido en el POS) y luego bajan, solo se cobra lo que quede por debajo del sistema. ", React.createElement("b", null, "Si un faltante tiene explicaci\xF3n"), " (producto da\xF1ado, retirado, etc.), abre el turno y usa ", React.createElement("b", null, "\u2705 Subsanar"), ": deja de contarle al operador y queda guardado el motivo.")
+    React.createElement("b", { style: { color: "var(--amber)" } }, "\uD83D\uDD75\uFE0F Qu\xE9 se perdi\xF3 en cada turno."), " ", React.createElement("span", { className: "muted" }, "Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdi\xF3 en el turno de quien hizo el chequeo anterior. Si el siguiente chequeo lo \"recupera\" es error de conteo. Si reaparece despu\xE9s, pero antes de que el responsable vuelva a contar la sede (m\xE1ximo 7 d\xEDas), queda subsanado; si en el medio entr\xF3 una transferencia de ese producto, queda para revisar. Cuando el responsable vuelve a contar y sigue faltando, es definitivo. Los ajustes del back office no cuentan. ", React.createElement("b", null, "Bajar de un sobrante no es p\xE9rdida:"), " si hab\xEDa unidades de m\xE1s (un sobrante, o mercanc\xEDa de bodega que lleg\xF3 y no se hab\xEDa recibido en el POS) y luego bajan, solo se cobra lo que quede por debajo del sistema. ", React.createElement("b", null, "Inventario de cierre (opcional):"), " si el cajero cuenta al salir, su turno se mide con su propio conteo; lo que no coincida entre su cierre y la apertura del siguiente sale como \"diferencia en la entrega\" y no se le carga a nadie autom\xE1ticamente. ", React.createElement("b", null, "Si un faltante tiene explicaci\xF3n"), " (producto da\xF1ado, retirado, etc.), abre el turno y usa ", React.createElement("b", null, "\u2705 Subsanar"), ": deja de contarle al operador y queda guardado el motivo.")
     ),
     React.createElement("div", { className: "toolbar", style: { gap: 8, flexWrap: "wrap" } },
     React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Desde"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: desde, onChange: (e) => setDesde(e.target.value) })),
@@ -5507,6 +5514,7 @@ function FaltantesTurno({ showToast, foco, admin }) {
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Valor a precio de venta"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalVV > 0 ? "var(--red)" : "var(--green)" } }, fmt(totalVV)), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "lo que se dej\xF3 de vender")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Errores de conteo detectados"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, totalErr), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "faltante que el siguiente chequeo recuper\xF3")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Subsanados"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--green)" } }, totalSub), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "reaparecieron antes de que el responsable volviera a contar")),
+    (nCierres > 0 || totalEntU > 0) && React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px", borderColor: totalEntU > 0 ? "var(--amber)" : undefined } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Diferencias en la entrega"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalEntU > 0 ? "var(--amber)" : "var(--td)" } }, totalEntU, " ", React.createElement("span", { className: "muted", style: { fontSize: 13 } }, "uds")), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totalEntU > 0 ? fmt(totalEntVV) + " entre un cierre y la apertura siguiente · sin cobrar" : "los cierres coinciden con las aperturas", " \xB7 ", nCierres, " turno(s) con inventario de cierre")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Bajas de sobrante"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--td)" } }, totalSobU, " ", React.createElement("span", { className: "muted", style: { fontSize: 13 } }, "uds")), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totalSobU > 0 ? fmt(totalSobVV) + " que no se cobran: había de más y volvió a lo normal" : "unidades que estaban de más y volvieron a lo normal")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px", borderColor: totalJustU > 0 ? "var(--green)" : undefined } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Subsanados por administraci\xF3n"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalJustU > 0 ? "var(--green)" : "var(--td)" } }, totalJustU, " ", React.createElement("span", { className: "muted", style: { fontSize: 13 } }, "uds")), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totalJustU > 0 ? fmt(totalJustVV) + " a precio de venta · con motivo" : "faltantes con explicación (dañado, retirado…)")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Para revisar"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalRev > 0 ? "var(--amber)" : "var(--td)" } }, totalRev), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "reaparecieron, pero entr\xF3 transferencia en el medio"))
@@ -5524,7 +5532,7 @@ function FaltantesTurno({ showToast, foco, admin }) {
     React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Sede"), React.createElement("th", null, "Turno de"), React.createElement("th", null, "Horario"), React.createElement("th", null, "Cont\xF3"), React.createElement("th", { className: "num" }, "Productos"), React.createElement("th", { className: "num" }, "Unidades"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", { className: "num" }, "Err. conteo"), React.createElement("th", null))),
     React.createElement("tbody", null, turnos.map((t) => React.createElement(React.Fragment, { key: t.id },
     React.createElement("tr", { style: { cursor: "pointer", background: t.unidades > 0 ? "var(--red-d)" : undefined }, onClick: () => tog(t.id) },
-    React.createElement("td", null, t.sede), React.createElement("td", { className: "row-name" }, t.operador, t.ultimo && React.createElement("span", { className: "pill pill-token", style: { marginLeft: 6 } }, "\xFAltimo")),
+    React.createElement("td", null, t.sede), React.createElement("td", { className: "row-name" }, t.operador, t.ultimo && React.createElement("span", { className: "pill pill-token", style: { marginLeft: 6 } }, "\xFAltimo"), t.cierrePropio && React.createElement("span", { className: "pill pill-prod", style: { marginLeft: 6 }, title: "Turno medido con el inventario de cierre del mismo cajero" }, "cierre propio"), t.entrega && React.createElement("span", { className: "pill", style: { marginLeft: 6, border: "1px solid var(--amber)", color: "var(--amber)" }, title: "Entre el inventario de cierre de este cajero y la apertura del siguiente" }, "entrega")),
     React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, horaT(t)), React.createElement("td", { className: "muted" }, t.contadoPor),
     React.createElement("td", { className: "num" }, t.perdidos.length || "—"),
     React.createElement("td", { className: "num", style: { fontWeight: 800, color: t.unidades > 0 ? "var(--red)" : "var(--green)" } }, t.unidades > 0 ? "-" + t.unidades : "0"),

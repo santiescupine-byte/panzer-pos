@@ -268,6 +268,13 @@ const db = {
       descuadres,  // [{nombre, sistema, contado, diferencia}]
     });
   },
+  // Inventario de CIERRE (opcional, después de liquidar). Si no se guarda, lanza el error: el POS avisa (no se pierde en silencio)
+  async enviarChequeoCierre({sede, operador, total, descuadres}){
+    const fecha = new Date().toISOString();
+    await this.guardarChequeo({sede, operador, fecha, base_recibida:0, total_items:total, n_descuadres:descuadres.length, descuadres, tipo:'cierre'});
+    try{ Promise.resolve(apiPost('chequeoInventario', { sede: sede+' (INVENTARIO DE CIERRE)', operador, correo: CORREO_REPORTES, fecha, total_items: total, base_recibida: 0, descuadres })).catch(()=>{}); }catch(e){}
+    return { success:true };
+  },
   // Registrar la liquidación de turno en el sistema de recaudo.
   // El Apps Script espera los campos ANIDADOS en `liquidacion` (igual que la app del tesorero),
   // con fecha/hora/estado. No mandar plano o responde "Datos incompletos".
@@ -346,9 +353,18 @@ const db = {
       return arr.some(c=>c.sede===sede && c.operador===operador && (c.created_at||c.fecha||'')>=desde);
     }
     const { data, error } = await sb.from('chequeos_inventario')
-      .select('id').eq('sede',sede).eq('operador',operador).gte('created_at',desde).limit(1);
+      .select('id,tipo').eq('sede',sede).eq('operador',operador).gte('created_at',desde).order('created_at',{ascending:false}).limit(1);
     if(error) return false;
-    return (data||[]).length>0;
+    // si lo último fue un inventario de CIERRE, ese turno ya terminó: al volver a entrar hace la apertura
+    return (data||[]).length>0 && data[0].tipo!=='cierre';
+  },
+  // ¿La última liquidación de este cajero sigue vigente? = la envió hace menos de 12 h y no ha vendido nada después
+  async liquidacionVigente(sede, operador){
+    if(DEMO_MODE || !sb) return false;
+    const u=await this.ultimoCierre(sede, operador);
+    if(!u || (Date.now()-new Date(u.created_at))>12*3600*1000) return false;
+    const { count, error } = await sb.from('ventas').select('id',{count:'exact',head:true}).eq('sede',sede).eq('operador',operador).gt('created_at',u.created_at);
+    if(error) return false; return (count||0)===0;
   },
   async guardarChequeo(reg){
     if(DEMO_MODE){
@@ -360,6 +376,7 @@ const db = {
     const { error } = await sb.from('chequeos_inventario').insert({
       sede:reg.sede, operador:reg.operador, base_recibida:reg.base_recibida,
       total_items:reg.total_items, n_descuadres:reg.n_descuadres, descuadres:reg.descuadres,
+      tipo:reg.tipo||'apertura',
     });
     if(error) throw error;
   },
@@ -826,6 +843,9 @@ function App(){
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
+  const [postLiq,setPostLiq]=useState(false);       // liquidación ya enviada: pantalla final (inventario de cierre opcional o salir)
+  const [invCierre,setInvCierre]=useState(false);   // contando el inventario de cierre
+  const [liqEnviada,setLiqEnviada]=useState(false); // la liquidación ya se envió y no ha vendido después → se enciende el botón del menú
   // descuentos
   const [descuentos,setDescuentos]=useState([]);     // lista de descuentos disponibles
   const [descTicket,setDescTicket]=useState(null);   // {nombre,porcentaje} aplicado al ticket
@@ -870,7 +890,9 @@ function App(){
       else {
         // Si hizo un chequeo en esta sede dentro de las últimas 12 h, no se lo volvemos a pedir
         const vigente = await db.chequeoVigente(sedeSel, nombre);
-        if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok"); }
+        if(vigente){ setChequeoHecho(true); showToast("Inventario vigente (hecho hace menos de 12 h)","ok");
+          // volvió a entrar después de liquidar (anulaciones, lavar celda…): si no ha vendido desde entonces, el inventario de cierre sigue encendido
+          db.liquidacionVigente(sedeSel, nombre).then(v=>{ if(v) setLiqEnviada(true); }).catch(()=>{}); }
       }
     }catch(e){ showToast("Error: "+(e.message||e),"err"); }
     setBusy(false);
@@ -903,12 +925,15 @@ function App(){
   useEffect(()=>{ if(!turno||!sede||!operador) return; sincronizarPendientes(); const t=setInterval(sincronizarPendientes, 60000); return ()=>clearInterval(t); },[turno&&turno.id, sede, operador]);
   useEffect(()=>{ if(showCart) sincronizarPendientes(); },[showCart]);
   const pendMem=cart.filter(c=>c.fijo).length;
+  // Inventario de cierre (2026-11-11): solo cajeros. La pantalla "liquidación enviada" se cierra sola a los 15 min.
+  const esCajero=!rol||rol==='cajero';
+  useEffect(()=>{ if(!postLiq||invCierre) return; const t=setTimeout(()=>cerrarCaja(),15*60000); return ()=>clearTimeout(t); },[postLiq,invCierre]);
 
   const cerrarCaja=()=>{
     setTurno(null); setSede(""); setOperador(""); setProductos([]);
     setCart([]); setShowCart(false); setShowCierre(false);
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
-    setChequeoHecho(false); setDescTicket(null);
+    setChequeoHecho(false); setDescTicket(null); setPostLiq(false); setInvCierre(false); setLiqEnviada(false);
     setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false); setShowDevol(false);
     setLlegada(null); setShowRostro(false);
   };
@@ -981,6 +1006,7 @@ function App(){
     try{
       const items=cart.map(c=>({...c, descuento: lineDescMonto(c)}));
       const res=await db.registrarVenta({turno,sede,operador,items,pago,descuentoTicket:descTicketMonto});
+      setLiqEnviada(false);   // vendió después de liquidar: el inventario de cierre se apaga hasta que vuelva a liquidar
       // refrescar stock
       const prods=await db.getProductos(sede);
       setProductos(prods);
@@ -1101,6 +1127,46 @@ function App(){
     );
   }
 
+  // -------- DESPUÉS DE LIQUIDAR: inventario de cierre (opcional) o salir. Aquí ya no se vende. --------
+  if(invCierre){
+    return (
+      <div className="app">
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — datos de prueba (sin Supabase)</div>}
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <ChequeoInventario modo="cierre"
+          productos={productos.filter(p=>p.controla_stock)}
+          sede={sede} operador={operador} showToast={showToast}
+          onCancelar={()=>setInvCierre(false)}
+          onListo={cerrarCaja}/>
+      </div>
+    );
+  }
+  if(postLiq){
+    return (
+      <div className="app">
+        {DEMO_MODE && <div className="demo-banner">MODO DEMO — datos de prueba (sin Supabase)</div>}
+        {toast && <div className={"toast "+toast.type}>{toast.msg}</div>}
+        <div className="page">
+          <div className="header" style={{borderRadius:14,marginBottom:14}}>
+            <div><h1>Liquidación enviada ✓</h1><div className="header-sub">{sede} · {operador}</div></div>
+          </div>
+          <div className="card">
+            <div style={{fontWeight:800,fontSize:16,marginBottom:6}}>📦 Inventario de cierre <span style={{fontWeight:500,fontSize:13,color:"var(--td)"}}>· opcional</span></div>
+            <p style={{fontSize:13,color:"var(--td)",marginBottom:12}}>Cuenta los productos antes de irte y queda guardado con cuánto entregaste la sede. Si no lo haces, vale el conteo del compañero que recibe.</p>
+            <button className="btn-primary" style={{marginTop:0}} onClick={()=>setInvCierre(true)}>📦 Hacer inventario de cierre</button>
+            <button className="btn-secondary" style={{marginTop:10}} onClick={cerrarCaja}>Salir sin inventario de cierre</button>
+          </div>
+          <div className="card">
+            <div style={{fontWeight:800,fontSize:15,marginBottom:6}}>¿Te falta algo por hacer?</div>
+            <p style={{fontSize:13,color:"var(--td)",marginBottom:12}}>Pedir una anulación, lavar una celda, una devolución, recibir mercancía… Puedes volver al POS; el inventario de cierre te queda encendido en el menú.</p>
+            <button className="btn-secondary" style={{marginTop:0}} onClick={()=>setPostLiq(false)}>↩ Volver al POS</button>
+          </div>
+          <p style={{fontSize:12,color:"var(--td)",marginTop:12,textAlign:"center"}}>Si vendes algo después de liquidar, tienes que volver a liquidar antes del inventario de cierre. Esta pantalla se cierra sola en 15 minutos.</p>
+        </div>
+      </div>
+    );
+  }
+
   // -------- CHEQUEO DE INVENTARIO (obligatorio antes de vender) --------
   if(!chequeoHecho){
     return (
@@ -1179,6 +1245,9 @@ function App(){
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowRecibos(true);}}>🧾 Mis recibos</button>
             <button className="drawer-item" onClick={()=>{setMenuOpen(false);setShowMaq(true);}}>🔧 Máquinas</button>
             <div style={{marginTop:"auto",paddingTop:10}}>
+              {esCajero && (liqEnviada
+                ? <button className="drawer-item" style={{marginBottom:8,borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{setMenuOpen(false);setInvCierre(true);}}>📦 Inventario de cierre <span style={{marginLeft:"auto",fontSize:11,fontWeight:500}}>opcional</span></button>
+                : <button className="drawer-item" style={{opacity:.55,marginBottom:8}} onClick={()=>showToast("El inventario de cierre se activa cuando envías la liquidación (Cerrar caja)","ok")}>📦 Inventario de cierre <span style={{marginLeft:"auto",fontSize:11,fontWeight:500}}>🔒 después de liquidar</span></button>)}
               <button className="drawer-item" style={{background:"var(--red-d)",borderColor:"var(--red)",color:"var(--red)"}} onClick={()=>{setMenuOpen(false);setShowCierre(true);}}>🔒 Cerrar caja</button>
             </div>
           </div>
@@ -1229,7 +1298,8 @@ function App(){
       {/* Sheet cierre de caja → liquidación */}
       {showCierre && (
         <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} turno={turno} showToast={showToast} pendMem={pendMem}
-          onClose={()=>setShowCierre(false)} onCerrar={cerrarCaja} onPend={refrescarLiqPend}/>
+          onClose={()=>setShowCierre(false)} onPend={refrescarLiqPend}
+          onCerrar={()=>{ if(esCajero){ setShowCierre(false); setShowCart(false); setMenuOpen(false); setPostLiq(true); setLiqEnviada(true); } else cerrarCaja(); }}/>
       )}
 
       {/* Teclado para precio variable */}
@@ -1277,7 +1347,8 @@ function App(){
 // ============================================================
 // PANTALLA: CHEQUEO DE INVENTARIO (al iniciar turno)
 // ============================================================
-function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo,onVerificarPago}){
+function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo,onVerificarPago,modo}){
+  const esCierre=modo==='cierre';
   const [counts,setCounts]=useState({});       // id → string
   const [base,setBase]=useState("");           // valor de base recibida (efectivo del turno anterior)
   const [q,setQ]=useState("");
@@ -1288,12 +1359,24 @@ function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo
   const total=productos.length;
   const visibles=productos.filter(p=>!q||p.nombre.toLowerCase().includes(q.toLowerCase()));
   const baseNum=Number(base)||0;
-  const listo = contados===total && base!=="";
+  const listo = contados===total && (esCierre || base!=="");
 
   // El operador NO ve el resultado de la comparación (para poder detectar fraudes).
   // Solo cuenta, se compara en silencio y se envía el reporte a administración.
   const enviarYAbrir=async()=>{
     setBusy(true);
+    if(esCierre){
+      // CIERRE: se compara contra el stock del servidor en este momento (no el que se cargó al entrar)
+      let frescos=null; try{ frescos=await db.getProductos(sede); }catch(e){ frescos=null; }
+      if(!frescos){ setBusy(false); showToast("Sin conexión: no se pudo leer el inventario. Intenta de nuevo.","err"); return; }
+      const st={}; frescos.forEach(p=>{ st[p.id]=Number(p.stock)||0; });
+      const dc=[];
+      productos.forEach(p=>{ const contado=Number(counts[p.id]); const sistema=(p.id in st)?st[p.id]:(Number(p.stock)||0);
+        if(contado!==sistema) dc.push({nombre:p.nombre, sistema, contado, diferencia:contado-sistema}); });
+      try{ await db.enviarChequeoCierre({sede, operador, total:productos.length, descuadres:dc}); }
+      catch(e){ setBusy(false); showToast("No se pudo guardar el inventario de cierre. Revisa el internet e intenta de nuevo.","err"); return; }
+      setBusy(false); showToast("Inventario de cierre enviado ✓","ok"); onListo(); return;
+    }
     const descuadres=[];
     productos.forEach(p=>{
       const contado=Number(counts[p.id]); const sistema=Number(p.stock)||0;
@@ -1309,15 +1392,16 @@ function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo
   };
 
   const btnTxt = busy ? "Enviando…"
-    : base==="" ? "Ingresa la base recibida"
+    : (!esCierre && base==="") ? "Ingresa la base recibida"
     : contados<total ? ("Faltan "+(total-contados)+" por contar")
+    : esCierre ? "Enviar inventario de cierre y salir"
     : "Enviar y abrir caja";
 
   return (
     <div className="page">
       <div className="header" style={{borderRadius:14,marginBottom:14}}>
         <div>
-          <h1>Chequeo de inventario</h1>
+          <h1>{esCierre?"Inventario de cierre":"Chequeo de inventario"}</h1>
           <div className="header-sub">{sede} · {operador}</div>
         </div>
         <div className="header-badge" style={{background:contados===total?"var(--green-d)":"var(--amber-d)",color:contados===total?"var(--green)":"var(--amber)"}}>{contados}/{total}</div>
@@ -1329,14 +1413,14 @@ function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo
         </button>
       )}
 
-      <div className="card">
+      {!esCierre && <div className="card">
         <label className="label">💵 Valor de base recibida</label>
         <input className="input" type="number" inputMode="numeric" placeholder="$0" style={{marginBottom:4}}
           value={base} onChange={e=>setBase(e.target.value.replace(/[^0-9]/g,""))}/>
         <div style={{fontSize:12,color:"var(--td)"}}>Efectivo que recibes del turno anterior. {baseNum>0 && <b style={{color:"var(--tb)"}}>{fmt(baseNum)}</b>}</div>
-      </div>
+      </div>}
 
-      <p style={{fontSize:13,color:"var(--td)",marginBottom:12}}>Cuenta físicamente cada producto y escribe la cantidad. Debes contar todos para abrir la caja.</p>
+      <p style={{fontSize:13,color:"var(--td)",marginBottom:12}}>{esCierre?"Cuenta físicamente cada producto como lo dejas al terminar tu turno. Debes contar todos; al enviarlo se cierra tu sesión.":"Cuenta físicamente cada producto y escribe la cantidad. Debes contar todos para abrir la caja."}</p>
       <div className="search">
         <span className="ico">🔍</span>
         <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar producto…"/>
@@ -1352,7 +1436,7 @@ function ChequeoInventario({productos,sede,operador,showToast,onCancelar,onListo
       </div>
 
       <button className="btn-primary" style={{marginTop:14}} disabled={!listo||busy} onClick={enviarYAbrir}>{btnTxt}</button>
-      <button className="btn-secondary" style={{marginTop:10}} onClick={onCancelar}>Cancelar y salir</button>
+      <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={onCancelar}>{esCierre?"← Volver":"Cancelar y salir"}</button>
     </div>
   );
 }

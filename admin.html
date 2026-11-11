@@ -1440,6 +1440,19 @@ const db = {
     const { data, error } = await sb.from('arqueos_inventario').select('sede,aprobado_en,created_at').in('estado', ['aprobado', 'aplicado']).order('aprobado_en', { ascending: false }).limit(500);
     if (error) return {};const m = {};(data || []).forEach((a) => {if (!m[a.sede]) m[a.sede] = a.aprobado_en || a.created_at;});return m;
   },
+
+  async listFaltantesSubsanados() {
+    if (DEMO_MODE) return [];
+    const { data, error } = await sb.from('faltantes_subsanados').select('*').order('created_at', { ascending: false }).limit(5000);
+    if (error) return [];return data || [];
+  },
+  async faltanteSubsanar(x) {
+    const { data, error } = await sb.rpc('faltante_subsanar', { p_chequeo_id: x.chequeo_id, p_sede: x.sede, p_operador: x.operador, p_producto: x.producto, p_unidades: x.unidades, p_motivo: x.motivo, p_quien: x.quien });
+    if (error) throw error;return data;
+  },
+  async faltanteSubsanarQuitar(id) {
+    const { data, error } = await sb.rpc('faltante_subsanar_quitar', { p_id: id });if (error) throw error;return data;
+  },
   async listAjustesDesde(desdeISO, sede) {
     if (DEMO_MODE) return [];
     let q = sb.from('movimientos_inventario').select('producto_id,sede,tipo,cantidad,created_at,operador,nota').in('tipo', ['ajuste', 'transferencia', 'reabastecimiento']).gte('created_at', desdeISO).order('created_at', { ascending: true }).limit(5000);
@@ -4901,7 +4914,7 @@ function InventarioHub({ showToast, admin }) {
     ),
     sub === 'stock' && React.createElement(Inventario, { showToast: showToast, admin: admin, onVerFaltantes: verFaltantes }),
     sub === 'chequeos' && React.createElement(Chequeos, { showToast: showToast, admin: admin }),
-    sub === 'faltantes' && React.createElement(FaltantesTurno, { showToast: showToast, foco: foco }),
+    sub === 'faltantes' && React.createElement(FaltantesTurno, { showToast: showToast, foco: foco, admin: admin }),
     sub === 'arqueos' && React.createElement(Arqueos, { showToast: showToast, admin: admin }),
     sub === 'muestras' && React.createElement(Muestras, { showToast: showToast })
     ));
@@ -5209,7 +5222,7 @@ function Arqueos({ showToast, admin }) {
 
 
 
-function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, precioDe) {
+function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, precioDe, manuales) {
   const norm = (x) => String(x || '').trim().toUpperCase();
   const DIA = 86400000,TOPE = 7 * DIA,ahora = Date.now();
   const porSede = {};chequeos.forEach((c) => {(porSede[c.sede] = porSede[c.sede] || []).push(c);});
@@ -5271,13 +5284,17 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
       });});
     const fch = (iso) => String(iso).slice(5, 10).replace('-', '/');
     turnos.forEach((t, ti) => {t.items.forEach((it) => {
+
+        const man = (manuales || {})[t.id + '|' + norm(it.nombre)];
+        if (man && it.delta < 0) {it.manual = man;it.perdidaSinManual = it.perdida;it.manualU = Math.min(it.perdida, Number(man.unidades) || 0);it.perdida -= it.manualU;
+          it.manualValor = it.manualU * (it.costo || 0);it.manualValorVenta = it.manualU * (it.precio || 0);}
         it.valor = it.perdida * (it.costo || 0);
         it.valorVenta = it.perdida * (it.precio || 0);
         const real = Math.abs(it.delta) - it.err;
         if (real === 0) it.estado = 'error';else
         if (Math.abs(it.delta) <= tol) it.estado = 'tolerancia';else
         if (it.delta > 0) it.estado = it.usado > 0 ? 'subsana' : 'recuperado';else
-        if (it.perdida === 0) it.estado = 'subsanado';else
+        if (it.perdida === 0) it.estado = it.manualU > 0 ? 'justificado' : 'subsanado';else
         if (it.revisar) it.estado = 'revisar';else
         if (ti === turnos.length - 1) it.estado = 'pendiente';else
         if (it.ventanaCerrada) it.estado = 'definitivo';else
@@ -5287,6 +5304,7 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
         if (it.estado === 'subsana') notas.push('subsana ' + it.usado + ' de ' + it.subsana.map((x) => x.operador.split(' ')[0] + ' (' + fch(x.fecha) + ')').join(', '));
         if (it.estado === 'subsanado') notas.push('reapareció el ' + fch(it.subsanadoEn) + ', antes de que volviera a contar');
         if (it.subsanado > 0 && it.perdida > 0) notas.push('se subsanaron ' + it.subsanado + ', quedan ' + it.perdida);
+        if (it.manualU > 0) notas.push('administración subsanó ' + it.manualU + (it.perdida > 0 ? ', quedan ' + it.perdida : '') + ': ' + it.manual.motivo + ' (' + String(it.manual.quien || '').split(' ')[0] + ', ' + fch(it.manual.created_at) + ')');
         if (it.estado === 'revisar') notas.push(it.revisarNota);
         if (it.estado === 'definitivo') notas.push(it.porArqueo ? 'lo confirmó el arqueo del ' + fch(it.arqueoEn) : it.porTope ? 'pasaron 7 días sin reaparecer' : 'él mismo lo volvió a contar de menos el ' + fch(it.vuelveEn));
         if (it.estado === 'confirmado') notas.push(it.vuelveEn ? 'se puede subsanar hasta que vuelva a contar' : 'se puede subsanar hasta que vuelva a contar, máximo 7 días');
@@ -5298,6 +5316,8 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
       t.valorVenta = t.perdidos.reduce((a, i) => a + i.valorVenta, 0);
       t.errores = t.items.filter((i) => i.estado === 'error').length;
       t.subsanados = t.items.filter((i) => i.estado === 'subsanado').length;
+      t.justU = t.items.reduce((a, i) => a + (i.manualU || 0), 0);
+      t.justVV = t.items.reduce((a, i) => a + (i.manualValorVenta || 0), 0);
       t.revisar = t.items.filter((i) => i.estado === 'revisar').length;
     });
     salida.push(...turnos);
@@ -5305,7 +5325,7 @@ function calcularFaltantes(chequeos, movs, idNombre, costoDe, tol, arqueos, prec
   return salida.sort((a, b) => b.fin.localeCompare(a.fin));
 }
 
-function FaltantesTurno({ showToast, foco }) {
+function FaltantesTurno({ showToast, foco, admin }) {
   const hoy = fLocalDia(new Date());
   const [desde, setDesde] = useState(() => {const d = new Date();d.setDate(d.getDate() - 13);return fLocalDia(d);});
   const [hasta, setHasta] = useState(hoy);
@@ -5317,6 +5337,8 @@ function FaltantesTurno({ showToast, foco }) {
   const [data, setData] = useState(null);
   const [abierto, setAbierto] = useState({});
   const [ultArq, setUltArq] = useState({});
+  const [subM, setSubM] = useState(null);
+  const [busyS, setBusyS] = useState(false);
   useEffect(() => {db.listSedes().then((s) => setSedes(s.filter((x) => !x.es_bodega))).catch(() => {});if (!DEMO_MODE) db.ultimosArqueos().then(setUltArq).catch(() => {});}, []);
 
   const arqRef = sede ? ultArq[sede] : Object.values(ultArq).sort()[0] || null;
@@ -5326,29 +5348,43 @@ function FaltantesTurno({ showToast, foco }) {
     try {
       const d0 = new Date(desde + 'T00:00:00');d0.setDate(d0.getDate() - 10);
       const dISO = d0.toISOString();
-      const [cs, aj, ps, arqs] = await Promise.all([db.listChequeosDesde(dISO, sede || undefined), db.listAjustesDesde(dISO, sede || undefined), db.listProductos(), db.listArqueos({}).catch(() => [])]);
+      const [cs, aj, ps, arqs, sm] = await Promise.all([db.listChequeosDesde(dISO, sede || undefined), db.listAjustesDesde(dISO, sede || undefined), db.listProductos(), db.listArqueos({}).catch(() => []), db.listFaltantesSubsanados().catch(() => [])]);
       const idNombre = {},costo = {},precio = {};(ps || []).forEach((p) => {idNombre[p.id] = p.nombre;const k = String(p.nombre).trim().toUpperCase();costo[k] = Number(p.costo) || 0;precio[k] = Number(p.precio) || 0;});
-      setData({ cs, aj, idNombre, costo, precio, arqs });
+      setData({ cs, aj, idNombre, costo, precio, arqs, sm });
     } catch (e) {showToast("" + (e.message || e), "err");setData({ cs: [], aj: [], idNombre: {}, costo: {} });}};
   useEffect(() => {cargar();}, [desde, sede]);
   const preset = (k) => {const h = new Date();const d = new Date();if (k === '7') d.setDate(d.getDate() - 6);else if (k === '14') d.setDate(d.getDate() - 13);else if (k === '30') d.setDate(d.getDate() - 29);else if (k === 'mes') d.setDate(1);setDesde(fLocalDia(d));setHasta(fLocalDia(h));};
 
   if (data === null) return React.createElement("div", { className: "empty" }, "Comparando chequeos\u2026");
   const hastaISO = new Date(hasta + 'T23:59:59.999').toISOString(),desdeISO = new Date(desde + 'T00:00:00').toISOString();
-  const todos = calcularFaltantes(data.cs, data.aj, data.idNombre, (k) => data.costo[k] || 0, tol, data.arqs, (k) => (data.precio || {})[k] || 0);
+  const manMap = {};(data.sm || []).forEach((m) => {manMap[m.chequeo_id + '|' + m.producto_k] = m;});
+  const todos = calcularFaltantes(data.cs, data.aj, data.idNombre, (k) => data.costo[k] || 0, tol, data.arqs, (k) => (data.precio || {})[k] || 0, manMap);
   const turnos = todos.filter((t) => t.fin >= desdeISO && t.fin <= hastaISO);
   const qn = q.trim().toUpperCase();
-  const colorEstado = { pendiente: "var(--amber)", confirmado: "var(--red)", definitivo: "var(--red)", error: "var(--td)", tolerancia: "var(--td)", recuperado: "var(--green)", subsanado: "var(--green)", subsana: "var(--green)", revisar: "var(--amber)" };
-  const lblEstado = { pendiente: "pendiente de confirmar", confirmado: "confirmado", definitivo: "definitivo", error: "error de conteo", tolerancia: "dentro de tolerancia", recuperado: "recuperado", subsanado: "subsanado", subsana: "subsana una pérdida", revisar: "revisar" };
+  const colorEstado = { pendiente: "var(--amber)", confirmado: "var(--red)", definitivo: "var(--red)", error: "var(--td)", tolerancia: "var(--td)", recuperado: "var(--green)", subsanado: "var(--green)", justificado: "var(--green)", subsana: "var(--green)", revisar: "var(--amber)" };
+  const lblEstado = { pendiente: "pendiente de confirmar", confirmado: "confirmado", definitivo: "definitivo", error: "error de conteo", tolerancia: "dentro de tolerancia", recuperado: "recuperado", subsanado: "subsanado", justificado: "subsanado por administración", subsana: "subsana una pérdida", revisar: "revisar" };
   const Estado = ({ it }) => React.createElement("span", null, React.createElement("span", { className: "pill", style: { background: it.estado === 'definitivo' ? "var(--red-d)" : "transparent", border: "1px solid " + colorEstado[it.estado], color: colorEstado[it.estado] }, title: it.estadoNota || "" }, lblEstado[it.estado]), it.estadoNota && React.createElement("div", { className: "muted", style: { fontSize: 10, marginTop: 2, maxWidth: 260, whiteSpace: "normal" } }, it.estadoNota));
-  const dim = (it) => it.estado === 'error' || it.estado === 'tolerancia' || it.estado === 'subsanado' || it.estado === 'subsana';
+  const dim = (it) => it.estado === 'error' || it.estado === 'tolerancia' || it.estado === 'subsanado' || it.estado === 'justificado' || it.estado === 'subsana';
+
+  const puedeSub = (it) => it.delta < 0 && (it.manual || it.estado === 'pendiente' || it.estado === 'confirmado' || it.estado === 'definitivo' || it.estado === 'revisar');
+  const abrirSub = (t, it) => setSubM({ t, it, unidades: String(it.manual ? it.manual.unidades : it.perdida), motivo: it.manual ? it.manual.motivo : "" });
+  const recargarSub = async () => {const sm = await db.listFaltantesSubsanados();setData((d) => ({ ...d, sm }));};
+  const guardarSub = async () => {const { t, it } = subM;setBusyS(true);
+    try {await db.faltanteSubsanar({ chequeo_id: t.id, sede: t.sede, operador: t.operador, producto: it.nombre, unidades: Number(subM.unidades) || 0, motivo: subM.motivo.trim(), quien: admin || 'admin' });
+      await recargarSub();setSubM(null);showToast("Faltante subsanado: ya no le cuenta a " + t.operador);}
+    catch (e) {showToast("" + (e.message || e), "err");} finally {setBusyS(false);}};
+  const quitarSub = async () => {const { t, it } = subM;setBusyS(true);
+    try {await db.faltanteSubsanarQuitar(it.manual.id);await recargarSub();setSubM(null);showToast("Subsanación quitada: el faltante vuelve a contarle a " + t.operador);}
+    catch (e) {showToast("" + (e.message || e), "err");} finally {setBusyS(false);}};
+  const BtnSub = ({ t, it }) => puedeSub(it) ? React.createElement("button", { className: "btn btn-ghost btn-sm", style: { whiteSpace: "nowrap" }, title: it.manual ? "Ver, cambiar o quitar la subsanación" : "El faltante tiene explicación (producto dañado, retirado…): deja de contarle al operador", onClick: (e) => {e.stopPropagation();abrirSub(t, it);} }, it.manual ? "✏️ Subsanado" : "✅ Subsanar") : null;
   const horaT = (t) => fLocalDia(t.inicio) + " " + fLocalHora(t.inicio) + " → " + (fLocalDia(t.fin) !== fLocalDia(t.inicio) ? fLocalDia(t.fin) + " " : "") + fLocalHora(t.fin);
 
 
   const totalU = turnos.reduce((a, t) => a + t.unidades, 0),totalV = turnos.reduce((a, t) => a + t.valor, 0),totalVV = turnos.reduce((a, t) => a + (t.valorVenta || 0), 0),totalErr = turnos.reduce((a, t) => a + t.errores, 0);
   const totalSub = turnos.reduce((a, t) => a + t.subsanados, 0),totalRev = turnos.reduce((a, t) => a + t.revisar, 0);
-  const porOp = {};turnos.forEach((t) => {const o = porOp[t.operador] || (porOp[t.operador] = { operador: t.operador, turnos: 0, conPerdida: 0, unidades: 0, pend: 0, valor: 0, valorVenta: 0, productos: {}, errores: 0 });
-    o.turnos++;if (t.perdidos.length) o.conPerdida++;o.errores += t.errores;
+  const totalJustU = turnos.reduce((a, t) => a + (t.justU || 0), 0),totalJustVV = turnos.reduce((a, t) => a + (t.justVV || 0), 0);
+  const porOp = {};turnos.forEach((t) => {const o = porOp[t.operador] || (porOp[t.operador] = { operador: t.operador, turnos: 0, conPerdida: 0, unidades: 0, pend: 0, valor: 0, valorVenta: 0, productos: {}, errores: 0, just: 0 });
+    o.turnos++;if (t.perdidos.length) o.conPerdida++;o.errores += t.errores;o.just += t.justU || 0;
     t.perdidos.forEach((i) => {o.unidades += i.perdida;o.valor += i.valor;o.valorVenta += i.valorVenta || 0;if (i.estado === 'pendiente') o.pend += i.perdida;o.productos[i.nombre] = (o.productos[i.nombre] || 0) + i.perdida;});});
   const ranking = Object.values(porOp).sort((a, b) => b.valor - a.valor || b.unidades - a.unidades);
   const porProd = {};turnos.forEach((t) => {t.items.forEach((i) => {const k = i.nombre + '|' + t.sede;const p = porProd[k] || (porProd[k] = { nombre: i.nombre, sede: t.sede, unidades: 0, valor: 0, valorVenta: 0, errores: 0, turnos: [] });
@@ -5363,6 +5399,7 @@ function FaltantesTurno({ showToast, foco }) {
     const fechaLarga = (d) => new Date(d + 'T12:00:00').toLocaleDateString('es-CO', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
     const ts = turnos.filter((t) => t.operador === o.operador).sort((a, b) => a.inicio < b.inicio ? -1 : 1);
     const conPerd = ts.filter((t) => t.perdidos.length);
+    const just = [];ts.forEach((t) => t.items.forEach((i) => {if (i.manualU > 0) just.push({ t, i });}));
     let totU = 0,totV = 0,totPend = 0;const porProd = {};
     const bloques = conPerd.map((t) => {
       const its = [...t.perdidos].sort((a, b) => (b.valorVenta || 0) - (a.valorVenta || 0));
@@ -5390,8 +5427,10 @@ function FaltantesTurno({ showToast, foco }) {
     conPerd.length === 0 ? '<p><b>Sin pérdidas reales en este período.</b></p>' :
     '<h2>Detalle por turno</h2>' + bloques +
     '<h2>Resumen por producto</h2><table><thead><tr><th>Producto</th><th class="c">Unidades perdidas</th><th class="r">Valor venta</th></tr></thead><tbody>' + resumen + '</tbody></table>' +
-    '<div class="total">TOTAL A PRECIO DE VENTA: ' + $(totV) + ' <span style="font-size:13px;font-weight:normal">(' + totU + ' unidades)</span></div>') +
-    '<div class="pie">Cada chequeo se compara con el anterior de la misma sede: lo que falta de nuevo se perdió en el turno de quien hizo el chequeo anterior. Solo se incluyen pérdidas reales: <b>pendiente</b> (falta confirmarlo con el siguiente chequeo), <b>confirmado</b> y <b>definitivo</b> (el responsable volvió a contar y sigue faltando). No se incluyen errores de conteo, faltantes subsanados, dentro de tolerancia ni los marcados para revisar. Los ajustes del back office no cuentan. Valores a precio de venta.</div>' +
+    '<div class="total">TOTAL A PRECIO DE VENTA: ' + $(totV) + ' <span style="font-size:13px;font-weight:normal">(' + totU + ' unidades)</span></div>') + (
+    just.length ? '<h2>Subsanados por administración (no se cobran)</h2><table><thead><tr><th>Producto</th><th>Sede · turno</th><th class="c">Unidades</th><th class="r">Valor venta</th><th>Motivo</th><th>Subsanó</th></tr></thead><tbody>' +
+    just.map(({ t, i }) => '<tr><td>' + esc(i.nombre) + '</td><td>' + esc(t.sede) + ' · ' + esc(horaT(t)) + '</td><td class="c b">' + i.manualU + '</td><td class="r">' + $(i.manualValorVenta) + '</td><td>' + esc(i.manual.motivo) + '</td><td>' + esc(i.manual.quien) + '</td></tr>').join('') + '</tbody></table>' : '') +
+    '<div class="pie">Cada chequeo se compara con el anterior de la misma sede: lo que falta de nuevo se perdió en el turno de quien hizo el chequeo anterior. Solo se incluyen pérdidas reales: <b>pendiente</b> (falta confirmarlo con el siguiente chequeo), <b>confirmado</b> y <b>definitivo</b> (el responsable volvió a contar y sigue faltando). No se incluyen errores de conteo, faltantes subsanados (ni los subsanados por administración con motivo), dentro de tolerancia ni los marcados para revisar. Los ajustes del back office no cuentan. Valores a precio de venta.</div>' +
     '<div class="firmas"><div>Operador: ' + esc(o.operador) + '</div><div>Administración</div></div>' +
     '<button onclick="window.print()" style="margin-top:22px;padding:10px 16px;font-size:14px;cursor:pointer">🖨 Imprimir / guardar PDF</button>' +
     '</body></html>';
@@ -5402,7 +5441,7 @@ function FaltantesTurno({ showToast, foco }) {
   return (
     React.createElement("div", null,
     React.createElement("div", { className: "card", style: { background: "var(--amber-d)", border: "1px solid rgba(37,99,235,.3)", marginBottom: 12 } },
-    React.createElement("b", { style: { color: "var(--amber)" } }, "\uD83D\uDD75\uFE0F Qu\xE9 se perdi\xF3 en cada turno."), " ", React.createElement("span", { className: "muted" }, "Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdi\xF3 en el turno de quien hizo el chequeo anterior. Si el siguiente chequeo lo \"recupera\" es error de conteo. Si reaparece despu\xE9s, pero antes de que el responsable vuelva a contar la sede (m\xE1ximo 7 d\xEDas), queda subsanado; si en el medio entr\xF3 una transferencia de ese producto, queda para revisar. Cuando el responsable vuelve a contar y sigue faltando, es definitivo. Los ajustes del back office no cuentan.")
+    React.createElement("b", { style: { color: "var(--amber)" } }, "\uD83D\uDD75\uFE0F Qu\xE9 se perdi\xF3 en cada turno."), " ", React.createElement("span", { className: "muted" }, "Cada chequeo se compara con el anterior de la misma sede: lo que aparece de nuevo se perdi\xF3 en el turno de quien hizo el chequeo anterior. Si el siguiente chequeo lo \"recupera\" es error de conteo. Si reaparece despu\xE9s, pero antes de que el responsable vuelva a contar la sede (m\xE1ximo 7 d\xEDas), queda subsanado; si en el medio entr\xF3 una transferencia de ese producto, queda para revisar. Cuando el responsable vuelve a contar y sigue faltando, es definitivo. Los ajustes del back office no cuentan. ", React.createElement("b", null, "Si un faltante tiene explicaci\xF3n"), " (producto da\xF1ado, retirado, etc.), abre el turno y usa ", React.createElement("b", null, "\u2705 Subsanar"), ": deja de contarle al operador y queda guardado el motivo.")
     ),
     React.createElement("div", { className: "toolbar", style: { gap: 8, flexWrap: "wrap" } },
     React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Desde"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: desde, onChange: (e) => setDesde(e.target.value) })),
@@ -5419,6 +5458,7 @@ function FaltantesTurno({ showToast, foco }) {
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Valor a precio de venta"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalVV > 0 ? "var(--red)" : "var(--green)" } }, fmt(totalVV)), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "lo que se dej\xF3 de vender")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Errores de conteo detectados"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, totalErr), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "faltante que el siguiente chequeo recuper\xF3")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Subsanados"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "var(--green)" } }, totalSub), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "reaparecieron antes de que el responsable volviera a contar")),
+    React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px", borderColor: totalJustU > 0 ? "var(--green)" : undefined } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Subsanados por administraci\xF3n"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalJustU > 0 ? "var(--green)" : "var(--td)" } }, totalJustU, " ", React.createElement("span", { className: "muted", style: { fontSize: 13 } }, "uds")), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, totalJustU > 0 ? fmt(totalJustVV) + " a precio de venta · con motivo" : "faltantes con explicación (dañado, retirado…)")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Para revisar"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: totalRev > 0 ? "var(--amber)" : "var(--td)" } }, totalRev), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "reaparecieron, pero entr\xF3 transferencia en el medio"))
     ),
     React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" } },
@@ -5445,12 +5485,12 @@ function FaltantesTurno({ showToast, foco }) {
     ),
     abierto[t.id] && React.createElement("tr", null, React.createElement("td", { colSpan: "10", style: { padding: "4px 10px 10px" } },
     t.items.length === 0 ? React.createElement("div", { className: "muted" }, "Nada cambi\xF3 frente al chequeo anterior.") :
-    React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Producto"), React.createElement("th", { className: "num" }, "Dif. antes"), React.createElement("th", { className: "num" }, "Dif. ahora"), React.createElement("th", { className: "num" }, "Ajuste admin"), React.createElement("th", { className: "num" }, "Lo nuevo"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", null, "Estado"))),
+    React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Producto"), React.createElement("th", { className: "num" }, "Dif. antes"), React.createElement("th", { className: "num" }, "Dif. ahora"), React.createElement("th", { className: "num" }, "Ajuste admin"), React.createElement("th", { className: "num" }, "Lo nuevo"), React.createElement("th", { className: "num" }, "Costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", null, "Estado"), React.createElement("th", null))),
     React.createElement("tbody", null, [...t.items].sort((a, b) => a.delta - b.delta).map((it, i) =>
     React.createElement("tr", { key: i, style: { opacity: dim(it) ? 0.6 : 1 } },
     React.createElement("td", { className: "row-name" }, it.nombre), React.createElement("td", { className: "num muted" }, it.antes), React.createElement("td", { className: "num muted" }, it.ahora), React.createElement("td", { className: "num muted" }, it.ajuste ? (it.ajuste > 0 ? "+" : "") + it.ajuste : "—"),
     React.createElement("td", { className: "num", style: { fontWeight: 800, color: it.delta < 0 ? "var(--red)" : "var(--green)" } }, it.delta > 0 ? "+" : "", it.delta),
-    React.createElement("td", { className: "num" }, it.valor > 0 ? fmt(it.valor) : "—"), React.createElement("td", { className: "num" }, it.valorVenta > 0 ? fmt(it.valorVenta) : "—"), React.createElement("td", null, React.createElement(Estado, { it: it }))
+    React.createElement("td", { className: "num" }, it.valor > 0 ? fmt(it.valor) : "—"), React.createElement("td", { className: "num" }, it.valorVenta > 0 ? fmt(it.valorVenta) : "—"), React.createElement("td", null, React.createElement(Estado, { it: it })), React.createElement("td", null, React.createElement(BtnSub, { t: t, it: it }))
     ))))
     ))
     )))
@@ -5460,12 +5500,12 @@ function FaltantesTurno({ showToast, foco }) {
     vista === 'operadores' && turnos.length > 0 &&
     React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto" } },
     React.createElement("table", { className: "tbl" },
-    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "#"), React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Turnos"), React.createElement("th", { className: "num" }, "Con p\xE9rdida"), React.createElement("th", { className: "num" }, "Unidades perdidas"), React.createElement("th", { className: "num" }, "Pendientes"), React.createElement("th", { className: "num" }, "Valor al costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", { className: "num" }, "Err. conteo"), React.createElement("th", null, "Productos m\xE1s perdidos"), React.createElement("th", null))),
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "#"), React.createElement("th", null, "Operador"), React.createElement("th", { className: "num" }, "Turnos"), React.createElement("th", { className: "num" }, "Con p\xE9rdida"), React.createElement("th", { className: "num" }, "Unidades perdidas"), React.createElement("th", { className: "num" }, "Pendientes"), React.createElement("th", { className: "num" }, "Valor al costo"), React.createElement("th", { className: "num" }, "Precio venta"), React.createElement("th", { className: "num" }, "Err. conteo"), React.createElement("th", { className: "num", title: "Unidades que administraci\xF3n subsan\xF3 con motivo (no le cuentan)" }, "Subsanado admin"), React.createElement("th", null, "Productos m\xE1s perdidos"), React.createElement("th", null))),
     React.createElement("tbody", null, ranking.map((o, i) =>
     React.createElement("tr", { key: o.operador },
     React.createElement("td", { className: "muted" }, i + 1), React.createElement("td", { className: "row-name" }, o.operador), React.createElement("td", { className: "num" }, o.turnos), React.createElement("td", { className: "num" }, o.conPerdida),
     React.createElement("td", { className: "num", style: { fontWeight: 800, color: o.unidades > 0 ? "var(--red)" : "var(--green)" } }, o.unidades),
-    React.createElement("td", { className: "num muted" }, o.pend || "—"), React.createElement("td", { className: "num", style: { fontWeight: 700 } }, o.valor > 0 ? fmt(o.valor) : "—"), React.createElement("td", { className: "num", style: { fontWeight: 700 } }, o.valorVenta > 0 ? fmt(o.valorVenta) : "—"), React.createElement("td", { className: "num muted" }, o.errores || "—"),
+    React.createElement("td", { className: "num muted" }, o.pend || "—"), React.createElement("td", { className: "num", style: { fontWeight: 700 } }, o.valor > 0 ? fmt(o.valor) : "—"), React.createElement("td", { className: "num", style: { fontWeight: 700 } }, o.valorVenta > 0 ? fmt(o.valorVenta) : "—"), React.createElement("td", { className: "num muted" }, o.errores || "—"), React.createElement("td", { className: "num", style: { color: o.just > 0 ? "var(--green)" : "var(--td)" } }, o.just || "—"),
     React.createElement("td", { className: "muted", style: { fontSize: 12 } }, Object.entries(o.productos).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, u]) => n + " (" + u + ")").join(" · ") || "—"),
     React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", style: { whiteSpace: "nowrap" }, title: "Informe imprimible con el detalle de las p\xE9rdidas de este operador en el filtro actual", onClick: () => informeOperador(o) }, "\uD83D\uDCC4 Informe"))
     )))
@@ -5485,17 +5525,37 @@ function FaltantesTurno({ showToast, foco }) {
       React.createElement("td", { className: "num" }, p.valor > 0 ? fmt(p.valor) : "—"), React.createElement("td", { className: "num" }, p.valorVenta > 0 ? fmt(p.valorVenta) : "—"), React.createElement("td", { className: "num muted" }, p.errores || "—"), React.createElement("td", { className: "muted" }, abierto[k] ? "▲" : "▼")
       ),
       abierto[k] && React.createElement("tr", null, React.createElement("td", { colSpan: "7", style: { padding: "4px 10px 10px" } },
-      React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Turno de"), React.createElement("th", null, "Horario"), React.createElement("th", null, "Cont\xF3"), React.createElement("th", { className: "num" }, "Dif. antes"), React.createElement("th", { className: "num" }, "Dif. ahora"), React.createElement("th", { className: "num" }, "Lo nuevo"), React.createElement("th", null, "Estado"))),
+      React.createElement("table", { className: "tbl" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Turno de"), React.createElement("th", null, "Horario"), React.createElement("th", null, "Cont\xF3"), React.createElement("th", { className: "num" }, "Dif. antes"), React.createElement("th", { className: "num" }, "Dif. ahora"), React.createElement("th", { className: "num" }, "Lo nuevo"), React.createElement("th", null, "Estado"), React.createElement("th", null))),
       React.createElement("tbody", null, p.turnos.map(({ t, i }, j) =>
       React.createElement("tr", { key: j, style: { opacity: dim(i) ? 0.6 : 1 } },
       React.createElement("td", { className: "row-name" }, t.operador), React.createElement("td", { className: "muted", style: { whiteSpace: "nowrap" } }, horaT(t)), React.createElement("td", { className: "muted" }, t.contadoPor),
       React.createElement("td", { className: "num muted" }, i.antes), React.createElement("td", { className: "num muted" }, i.ahora),
-      React.createElement("td", { className: "num", style: { fontWeight: 800, color: i.delta < 0 ? "var(--red)" : "var(--green)" } }, i.delta > 0 ? "+" : "", i.delta), React.createElement("td", null, React.createElement(Estado, { it: i }))
+      React.createElement("td", { className: "num", style: { fontWeight: 800, color: i.delta < 0 ? "var(--red)" : "var(--green)" } }, i.delta > 0 ? "+" : "", i.delta), React.createElement("td", null, React.createElement(Estado, { it: i })), React.createElement("td", null, React.createElement(BtnSub, { t: t, it: i }))
       ))))
       ))
       );}))
     )
-    )
+    ),
+
+    subM && (() => {const it = subM.it,t = subM.t;const max = it.manual ? it.perdidaSinManual : it.perdida;const u = Number(subM.unidades);
+      const ok = Number.isInteger(u) && u >= 1 && u <= max && subM.motivo.trim().length >= 5;return (
+        React.createElement("div", { className: "modal-bg", onClick: () => {if (!busyS) setSubM(null);} },
+        React.createElement("div", { className: "modal", onClick: (e) => e.stopPropagation(), style: { maxWidth: 480 } },
+        React.createElement("div", { className: "modal-t" }, "\u2705 Subsanar faltante"),
+        React.createElement("div", { className: "muted", style: { marginBottom: 10, lineHeight: 1.5 } }, React.createElement("b", { style: { color: "var(--t)" } }, it.nombre), " \xB7 ", t.sede, React.createElement("br", null), "Turno de ", React.createElement("b", { style: { color: "var(--t)" } }, t.operador), " \xB7 ", horaT(t), React.createElement("br", null), "Faltante del turno: ", React.createElement("b", { style: { color: "var(--red)" } }, max), " unidad(es)", it.precio ? " · " + fmt(max * it.precio) + " a precio de venta" : ""),
+        React.createElement("label", { className: "label" }, "Unidades que se subsanan (m\xE1ximo ", max, ")"),
+        React.createElement("input", { className: "input", type: "number", min: "1", max: max, value: subM.unidades, onChange: (e) => setSubM({ ...subM, unidades: e.target.value }) }),
+        React.createElement("label", { className: "label" }, "Motivo ", React.createElement("span", { style: { color: "var(--red)" } }, "*obligatorio")),
+        React.createElement("textarea", { className: "input", rows: "3", style: { resize: "none" }, placeholder: "Ej: producto retirado de la sede por estar da\xF1ado", value: subM.motivo, onChange: (e) => setSubM({ ...subM, motivo: e.target.value }) }),
+        it.manual && React.createElement("div", { className: "muted", style: { fontSize: 11, marginBottom: 6 } }, "Subsanado por ", it.manual.quien, " el ", fLocalDia(it.manual.created_at), "."),
+        React.createElement("div", { className: "muted", style: { fontSize: 11, marginBottom: 8 } }, "Estas unidades dejan de contarle al operador en Faltantes y en su informe, y queda guardado qui\xE9n lo subsan\xF3 y por qu\xE9. No cambia el stock: si el producto sali\xF3 de la sede, ajusta el inventario aparte."),
+        React.createElement("div", { className: "modal-actions" },
+        it.manual && React.createElement("button", { className: "btn btn-danger", style: { marginRight: "auto" }, disabled: busyS, onClick: quitarSub }, "Quitar subsanaci\xF3n"),
+        React.createElement("button", { className: "btn btn-ghost", disabled: busyS, onClick: () => setSubM(null) }, "Cancelar"),
+        React.createElement("button", { className: "btn btn-amber", disabled: busyS || !ok, onClick: guardarSub }, busyS ? "Guardando…" : it.manual ? "Guardar cambios" : "✅ Subsanar")
+        )
+        )
+        ));})()
     ));
 
 }

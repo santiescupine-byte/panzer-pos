@@ -251,6 +251,15 @@ function liqPendientes() {try {return JSON.parse(localStorage.getItem(LIQ_KEY) |
 function liqSave(arr) {try {localStorage.setItem(LIQ_KEY, JSON.stringify(arr));} catch (e) {}}
 function liqEncolar(liq) {const a = liqPendientes();a.push(liq);liqSave(a);}
 
+const CART_KEY = 'panzer_carrito_v1';
+const cartKey = (sede, operador) => CART_KEY + ':' + sede + ':' + operador;
+function cartGuardado(sede, operador) {try {const c = JSON.parse(localStorage.getItem(cartKey(sede, operador)) || 'null');if (c && Date.now() - c.ts < 20 * 3600 * 1000 && Array.isArray(c.cart)) return c;} catch (e) {}return null;}
+function cartGuardar(sede, operador, cart, descTicket) {try {localStorage.setItem(cartKey(sede, operador), JSON.stringify({ ts: Date.now(), cart: (cart || []).filter((c) => !c.fijo), descTicket: descTicket || null }));} catch (e) {}}
+
+const LIQIDS_KEY = 'panzer_liq_ids_v1';
+function liqIdsGet(sede, operador) {try {const c = JSON.parse(localStorage.getItem(LIQIDS_KEY + ':' + sede + ':' + operador) || 'null');if (c && Date.now() - c.ts < 20 * 3600 * 1000) return c.ids || [];} catch (e) {}return [];}
+function liqIdsAdd(sede, operador, ids) {try {const prev = liqIdsGet(sede, operador);localStorage.setItem(LIQIDS_KEY + ':' + sede + ':' + operador, JSON.stringify({ ts: Date.now(), ids: [...new Set([...prev, ...(ids || [])])] }));} catch (e) {}}
+
 const db = {
   async getConfig() {
     const data = await apiGet('getConfig');
@@ -314,6 +323,17 @@ const db = {
     if (error) return null;return data || null;
   },
 
+
+  async ventasParaLiquidar(sede, operador) {
+    if (DEMO_MODE || !sb) return null;
+    const { data, error } = await sb.rpc('ventas_para_liquidar', { p_sede: sede, p_operador: operador });if (error) return null;return data;
+  },
+
+  async corregirReciboPropio(ventaId, operador) {
+    if (DEMO_MODE || !sb) return { ok: false, error: "No disponible en modo demo." };
+    const { data, error } = await sb.rpc('corregir_recibo_propio', { p_venta_id: ventaId, p_operador: operador });
+    if (error) return { ok: false, error: "Sin conexión con el sistema. Intenta de nuevo." };return data;
+  },
   async ventasParaCorreccion(liqId) {
     if (DEMO_MODE || !sb) return null;
     const { data, error } = await sb.rpc('ventas_para_correccion', { p_liq_id: liqId });if (error) return null;return data;
@@ -844,6 +864,7 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const [chequeoHecho, setChequeoHecho] = useState(false);
+  const cartListo = React.useRef(false);
   const [postLiq, setPostLiq] = useState(false);
   const [invCierre, setInvCierre] = useState(false);
   const [liqEnviada, setLiqEnviada] = useState(false);
@@ -880,6 +901,11 @@ function App() {
       }
       const t = await db.abrirTurno(sedeSel, nombre);
       setSede(sedeSel);setOperador(nombre);setTurno(t);
+
+      {const cg = cartGuardado(sedeSel, nombre);
+        if (cg && cg.cart.length) {setCart(cg.cart);if (cg.descTicket) setDescTicket(cg.descTicket);
+          setTimeout(() => showToast("Recuperé tu carrito: " + cg.cart.length + " línea(s) que no habías cobrado", "ok"), 1500);}
+        cartListo.current = true;}
       const prods = await db.getProductos(sedeSel);
       setProductos(prods);
       db.getDescuentos().then(setDescuentos).catch(() => {});
@@ -927,6 +953,8 @@ function App() {
   useEffect(() => {if (showCart) sincronizarPendientes();}, [showCart]);
   const pendMem = cart.filter((c) => c.fijo).length;
 
+  useEffect(() => {if (!cartListo.current || !sede || !operador) return;cartGuardar(sede, operador, cart, descTicket);}, [cart, descTicket, sede, operador]);
+
   const esCajero = !rol || rol === 'cajero';
   useEffect(() => {if (!postLiq || invCierre) return;const t = setTimeout(() => cerrarCaja(), 15 * 60000);return () => clearTimeout(t);}, [postLiq, invCierre]);
 
@@ -934,7 +962,7 @@ function App() {
     setTurno(null);setSede("");setOperador("");setProductos([]);
     setCart([]);setShowCart(false);setShowCierre(false);
     setVentasTurno([]);setPin("");setPinEmp(null);setCat("Todos");setQ("");
-    setChequeoHecho(false);setDescTicket(null);setPostLiq(false);setInvCierre(false);setLiqEnviada(false);
+    cartListo.current = false;setChequeoHecho(false);setDescTicket(null);setPostLiq(false);setInvCierre(false);setLiqEnviada(false);
     setRol("");setShowVip(false);setShowMaq(false);setShowPedido(false);setShowDevol(false);
     setLlegada(null);setShowRostro(false);
   };
@@ -1022,6 +1050,27 @@ function App() {
       if (montoProductos > 0) cargarMiMeta(operador);
     } catch (e) {showToast("" + (e.message || e), "err");}
     setBusy(false);
+  };
+
+
+  const corregirRecibo = async (r) => {
+    const res = await db.corregirReciboPropio(r.id, operador);
+    if (!res || !res.ok) {showToast(res && res.error || "No se pudo corregir el recibo", "err");return false;}
+    const nuevos = [];let conDesc = Number(res.descuento_ticket) > 0;
+    (res.items || []).forEach((it, i) => {if (Number(it.descuento) > 0) conDesc = true;
+      const libre = (Number(it.cantidad) || 0) - (Number(it.pendientes) || 0);if (libre <= 0) return;
+      const p = productos.find((x) => x.id === it.producto_id);const variable = !!(p && p.precio_variable);
+      nuevos.push({ producto_id: it.producto_id, key: variable ? it.producto_id + "-c" + i + "-" + Date.now() : it.producto_id, nombre: it.nombre, tipo: it.tipo || p && p.tipo || 'producto',
+        precio: Number(it.precio_unit) || 0, controla_stock: p ? !!p.controla_stock : !!it.controla_stock, cantidad: libre });});
+    setCart((prev) => {const out = prev.map((c) => ({ ...c }));
+      nuevos.forEach((n) => {const ex = out.find((c) => !c.fijo && (c.key || c.producto_id) === n.key && c.precio === n.precio);if (ex) ex.cantidad += n.cantidad;else out.push(n);});
+      return out;});
+    setVentasTurno((prev) => prev.filter((v) => v.recibo !== res.numero_recibo));
+    setShowCierre(false);setShowRecibos(false);setShowCart(true);
+    db.getProductos(sede).then(setProductos).catch(() => {});
+    setTimeout(() => sincronizarPendientes(), 800);
+    showToast("Recibo " + (res.numero_recibo || "") + " anulado: quedó en el carrito. Corrígelo y vuelve a cobrar." + (conDesc ? " Tenía descuentos: ponlos de nuevo." : ""), "ok");
+    return true;
   };
 
 
@@ -1299,8 +1348,10 @@ function App() {
 
     showCierre &&
     React.createElement(CierreSheet, { ventas: ventasTurno, sede: sede, operador: operador, turno: turno, showToast: showToast, pendMem: pendMem,
+      onCorregirRecibo: corregirRecibo, onIrCarrito: () => setShowCierre(false),
       onClose: () => setShowCierre(false), onPend: refrescarLiqPend,
-      onCerrar: () => {if (esCajero) {setShowCierre(false);setShowCart(false);setMenuOpen(false);setPostLiq(true);setLiqEnviada(true);} else cerrarCaja();} }),
+      onCerrar: () => {setVentasTurno([]);
+        if (esCajero) {setShowCierre(false);setShowCart(false);setMenuOpen(false);setPostLiq(true);setLiqEnviada(true);} else cerrarCaja();} }),
 
 
 
@@ -1327,7 +1378,7 @@ function App() {
     asistenciaOn && showRostro && React.createElement(RostroSheet, { sede: sede, quien: operador, onClose: () => setShowRostro(false) }),
     devolBleOn && showDevolBLE && React.createElement(DevolucionBLESheet, { sede: sede, operador: operador, turno: turno, onClose: () => setShowDevolBLE(false) }),
     showRecibos &&
-    React.createElement(RecibosSheet, { sede: sede, operador: operador, onClose: () => setShowRecibos(false) }),
+    React.createElement(RecibosSheet, { sede: sede, operador: operador, onClose: () => setShowRecibos(false), onCorregir: corregirRecibo }),
 
 
 
@@ -1478,9 +1529,15 @@ function PrecioSheet({ producto, onClose, onConfirm }) {
 
 
 
-function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerrar, onPend, pendMem }) {
+function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerrar, onPend, pendMem, onCorregirRecibo, onIrCarrito }) {
 
-  const numReciboTurno = ventas.length ? ventas[ventas.length - 1].recibo || '—' : '—';
+
+  const [paso, setPaso] = useState(1);
+  const [srv, setSrv] = useState(null);
+  const [abiertoR, setAbiertoR] = useState(null);
+  const [corrR, setCorrR] = useState(null);
+  const [corrBusy, setCorrBusy] = useState(false);
+  const [confQr, setConfQr] = useState(false);
 
   const [tokensBase, setTokensBase] = useState("");
   const [tokensVendidos, setTokensVendidos] = useState("");
@@ -1492,8 +1549,8 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
   const [memAuto, setMemAuto] = useState(false);
   const [abonosTurno, setAbonosTurno] = useState(null);
   const [devBLE, setDevBLE] = useState([]);
-  useEffect(() => {if (DEMO_MODE) return;const d = turno && turno.created_at ? turno.created_at : new Date(Date.now() - 14 * 3600 * 1000).toISOString();
-    db.misDevolucionesBLE(operador, d).then(setDevBLE).catch(() => setDevBLE([]));}, []);
+  const desdeSesion = () => turno && turno.created_at ? turno.created_at : new Date(Date.now() - 14 * 3600 * 1000).toISOString();
+  useEffect(() => {if (DEMO_MODE) return;db.misDevolucionesBLE(operador, desdeSesion()).then(setDevBLE).catch(() => setDevBLE([]));}, []);
   const devB3 = devBLE.filter((m) => Number(m.ciclos) === 3).length,devB2 = devBLE.filter((m) => Number(m.ciclos) === 2).length,devB1 = devBLE.filter((m) => Number(m.ciclos) === 1).length,devBCred = devBLE.reduce((a, m) => a + (Number(m.ciclos) || 0), 0);
   const devBTxt = devBLE.length ? "Dev. Bluetooth: " + devB3 + "×3 + " + devB2 + "×2 + " + devB1 + "×1 = " + devBCred + " créditos" : "";
 
@@ -1502,12 +1559,21 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
   const [confirmo, setConfirmo] = useState(false);
   const [modo, setModo] = useState('nuevo');
   const [corr, setCorr] = useState(null);
-  useEffect(() => {if (DEMO_MODE) return;
-    db.ultimoCierre(sede, operador).then((u) => {setUltimo(u);
+  useEffect(() => {if (DEMO_MODE) return;db.ultimoCierre(sede, operador).then(setUltimo).catch(() => {});}, []);
 
-      if (u && u.tokens_restantes != null && Date.now() - new Date(u.created_at) < 20 * 3600 * 1000) {
-        setTokensBase((prev) => prev === "" ? String(Math.max(0, Number(u.tokens_restantes) || 0)) : prev);setBaseAuto(true);}
-    }).catch(() => {});}, []);
+  useEffect(() => {let vivo = true;
+    if (DEMO_MODE) {setSrv({ ok: false });return;}
+    db.ventasParaLiquidar(sede, operador).then((r) => {if (vivo) setSrv(r && r.ok ? r : { ok: false });}).catch(() => {if (vivo) setSrv({ ok: false });});
+    return () => {vivo = false;};}, []);
+  const baseSis = srv && srv.ok && srv.base_sugerida != null ? Math.max(0, Number(srv.base_sugerida) || 0) : null;
+
+  useEffect(() => {if (srv === null || tokensBase !== "" || modo !== 'nuevo') return;
+    if (baseSis != null) {setTokensBase(String(baseSis));setBaseAuto(true);} else
+    if (!srv.ok && ultimo && ultimo.tokens_restantes != null && Date.now() - new Date(ultimo.created_at) < 20 * 3600 * 1000) {
+      setTokensBase(String(Math.max(0, Number(ultimo.tokens_restantes) || 0)));setBaseAuto(true);}
+  }, [srv, ultimo]);
+  const desdeTurno = () => srv && srv.ok && srv.desde ? srv.desde : desdeSesion();
+  useEffect(() => {if (DEMO_MODE || srv === null) return;db.misAbonos(operador, desdeTurno()).then(setAbonosTurno).catch(() => setAbonosTurno([]));}, [srv]);
 
   const corregible = !!(ultimo && ultimo.estado === 'pendiente' && !ultimo.ciclo_id && Date.now() - new Date(ultimo.created_at) < 60 * 60000);
   const elegirModo = async (m) => {
@@ -1517,66 +1583,81 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
       if (!c || !c.ok) {showToast(c && c.error || "No se pudo cargar el cierre anterior", "err");setModo('nuevo');return;}
       setCorr(c);setBaseAuto(false);
       setTokensBase(String(ultimo.tokens_base != null ? ultimo.tokens_base : ""));
+      setTokensVendidos(String(ultimo.tokens_vendidos != null ? ultimo.tokens_vendidos : ""));
       try {setAbonosTurno(await db.misAbonos(operador, c.desde));} catch (e) {}
     } else {
       setCorr(null);
-
+      if (baseSis != null) {setTokensBase(String(baseSis));setBaseAuto(true);} else
       if (ultimo && ultimo.tokens_restantes != null) {setTokensBase(String(Math.max(0, Number(ultimo.tokens_restantes) || 0)));setBaseAuto(true);}
-      const d = turno && turno.created_at ? turno.created_at : new Date(Date.now() - 14 * 3600 * 1000).toISOString();
-      try {setAbonosTurno(await db.misAbonos(operador, d));} catch (e) {}
+      try {setAbonosTurno(await db.misAbonos(operador, desdeTurno()));} catch (e) {}
     }
   };
-  useEffect(() => {if (DEMO_MODE) return;
-    const d = turno && turno.created_at ? turno.created_at : new Date(Date.now() - 14 * 3600 * 1000).toISOString();
-    db.misAbonos(operador, d).then(setAbonosTurno).catch(() => setAbonosTurno([]));}, []);
-
 
 
   useEffect(() => {
-    if (DEMO_MODE) return;
-    const desde = turno && turno.created_at ? new Date(turno.created_at).getTime() : Date.now() - 12 * 3600 * 1000;
+    if (DEMO_MODE || srv === null) return;
+    const desde = srv.ok && srv.desde ? new Date(srv.desde).getTime() : turno && turno.created_at ? new Date(turno.created_at).getTime() : Date.now() - 12 * 3600 * 1000;
     vipApi({ accion: 'reporte_turno', operador, sede: vipSedeNombre(sede), fecha_desde: desde }).
     then((r) => {if (r && r.ok && typeof r.tokens_canjeados === 'number' && r.tokens_canjeados > 0) {
         setTokensMembresia((prev) => prev === "" ? String(r.tokens_canjeados) : prev);setMemAuto(true);
       }}).
     catch(() => {});
-  }, []);
+  }, [srv]);
 
 
-
+  const liqIds = liqIdsGet(sede, operador);
+  const recibos = srv && srv.ok ? (srv.recibos || []).filter((r) => !liqIds.includes(r.id)) : null;
+  const S = (f) => recibos.reduce((a, r) => a + (Number(f(r)) || 0), 0);
   const usaCorr = modo === 'corregir' && corr;
-  const nVentas = usaCorr ? Number(corr.n) || 0 : ventas.length;
-  const productosVal = usaCorr ? Number(corr.productos) || 0 : ventas.reduce((s, v) => s + (v.productos || 0), 0);
-  const tokensVal = usaCorr ? Number(corr.tokens) || 0 : ventas.reduce((s, v) => s + (v.tokens || 0), 0);
-  const membresiasVal = usaCorr ? Number(corr.membresias) || 0 : ventas.reduce((s, v) => s + (v.membresias || 0), 0);
+  const cargando = srv === null;
+  const nVentas = usaCorr ? Number(corr.n) || 0 : recibos ? recibos.length : ventas.length;
+  const tokensVal = usaCorr ? Number(corr.tokens) || 0 : recibos ? S((r) => r.tokens) : ventas.reduce((s, v) => s + (v.tokens || 0), 0);
+  const membresiasVal = usaCorr ? Number(corr.membresias) || 0 : recibos ? S((r) => r.membresias) : ventas.reduce((s, v) => s + (v.membresias || 0), 0);
+  const productosVal = usaCorr ? Number(corr.productos) || 0 : recibos ? S((r) => r.total) - tokensVal - membresiasVal : ventas.reduce((s, v) => s + (v.productos || 0), 0);
   const valor = productosVal + tokensVal + membresiasVal;
-  const qr = usaCorr ? Number(corr.qr) || 0 : ventas.reduce((s, v) => s + (v.pago.qr || 0) + (v.pago.tarjeta || 0), 0);
-  const efectivo = usaCorr ? Number(corr.efectivo) || 0 : ventas.reduce((s, v) => s + (v.pago.efectivo || 0), 0);
-  const qrSolo = usaCorr ? Number(corr.qr_solo) || 0 : ventas.reduce((s, v) => s + (v.pago.qr || 0), 0);
+  const qr = usaCorr ? Number(corr.qr) || 0 : recibos ? S((r) => (Number(r.qr) || 0) + (Number(r.tarjeta) || 0)) : ventas.reduce((s, v) => s + (v.pago.qr || 0) + (v.pago.tarjeta || 0), 0);
+  const efectivo = usaCorr ? Number(corr.efectivo) || 0 : recibos ? S((r) => r.efectivo) : ventas.reduce((s, v) => s + (v.pago.efectivo || 0), 0);
+  const qrSolo = usaCorr ? Number(corr.qr_solo) || 0 : recibos ? S((r) => r.qr) : ventas.reduce((s, v) => s + (v.pago.qr || 0), 0);
   const qrVerificado = (abonosTurno || []).reduce((s, a) => s + Number(a.valor || 0), 0);
   const qrSinVerificar = Math.max(0, qrSolo - qrVerificado);
+  const qrDeMenos = abonosTurno ? Math.max(0, qrVerificado - qrSolo) : 0;
   const dev = Number(devoluciones) || 0;
   const efectivoEsperado = efectivo - dev;
-  const tokensRestantes = (Number(tokensBase) || 0) - (Number(tokensVendidos) || 0) - (Number(devTokens) || 0) - (Number(tokensMembresia) || 0);
+
+  const tokensUnid = !usaCorr && recibos ? S((r) => r.tokens_unidades) : null;
+  const vendidosAuto = tokensUnid != null;
+  const vendidosNum = vendidosAuto ? tokensUnid : Number(tokensVendidos) || 0;
+  const vendidosOk = vendidosAuto || tokensVendidos !== "";
+  const tokensRestantes = (Number(tokensBase) || 0) - vendidosNum - (Number(devTokens) || 0) - (Number(tokensMembresia) || 0);
+  const baseCambiada = modo === 'nuevo' && baseSis != null && tokensBase !== "" && Number(tokensBase) !== baseSis;
+  const numReciboTurno = recibos ? recibos.length ? recibos[recibos.length - 1].numero_recibo || '—' : '—' : ventas.length ? ventas[ventas.length - 1].recibo || '—' : '—';
   const numRecibo = usaCorr ? corr.ultimo_recibo || numReciboTurno : numReciboTurno;
   const sinVentas = nVentas === 0;
   const haceMin = ultimo ? Math.round((Date.now() - new Date(ultimo.created_at)) / 60000) : null;
   const reciente = ultimo && haceMin != null && haceMin < 180;
-  const tokensRepetidos = !!(!usaCorr && ultimo && tokensBase !== "" && tokensVendidos !== "" && Number(tokensVendidos) > 0 &&
-  Number(tokensBase) === Number(ultimo.tokens_base) && Number(tokensVendidos) === Number(ultimo.tokens_vendidos));
+  const yaLiquidado = !usaCorr && !!recibos && sinVentas && !!reciente;
+  const tokensRepetidos = !!(!usaCorr && ultimo && tokensBase !== "" && vendidosOk && vendidosNum > 0 &&
+  Number(tokensBase) === Number(ultimo.tokens_base) && vendidosNum === Number(ultimo.tokens_vendidos));
   const hayAlerta = sinVentas || tokensRepetidos;
-  const listo = tokensBase !== "" && tokensVendidos !== "" && (!hayAlerta || confirmo) && !(pendMem > 0);
+  const paso1Ok = !cargando && !(pendMem > 0) && !yaLiquidado && (!sinVentas || confirmo);
+  const paso2Ok = !(qrDeMenos > 0) || confQr;
+  const paso3Ok = tokensBase !== "" && vendidosOk && (!tokensRepetidos || confirmo);
+  const listo = paso1Ok && paso2Ok && paso3Ok && (!hayAlerta || confirmo);
   const horaDe = (iso) => new Date(iso).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
 
   const payload = () => ({
     sede, operador, numRecibo,
-    tokensBase: Number(tokensBase) || 0, tokensVendidos: Number(tokensVendidos) || 0,
+    tokensBase: Number(tokensBase) || 0, tokensVendidos: vendidosNum,
     devTokens: Number(devTokens) || 0, tokensMembresia: Number(tokensMembresia) || 0, tokensRestantes,
     valor, valorProductos: productosVal, valorTokens: tokensVal, valorMembresias: membresiasVal,
     qr, efectivoVentas: efectivo, devoluciones: dev, efectivo: efectivoEsperado,
 
     qrVerificado: abonosTurno ? qrVerificado : null, qrSinVerificar: abonosTurno ? qrSinVerificar : null,
-    observaciones: (observaciones || "") + (abonosTurno && qrSolo > 0 ? (observaciones ? " | " : "") + "QR verificado " + fmt(qrVerificado) + " de " + fmt(qrSolo) + (qrSinVerificar > 0 ? " — SIN VERIFICAR " + fmt(qrSinVerificar) : " ✓") : "") + (devBTxt ? (observaciones || abonosTurno && qrSolo > 0 ? " | " : "") + devBTxt : "")
+    observaciones: [observaciones || "",
+    abonosTurno && qrSolo > 0 ? "QR verificado " + fmt(qrVerificado) + " de " + fmt(qrSolo) + (qrSinVerificar > 0 ? " — SIN VERIFICAR " + fmt(qrSinVerificar) : " ✓") : "",
+    qrDeMenos > 0 ? "OJO: " + fmt(qrDeMenos) + " verificados por QR que no están en el recibo" : "",
+    baseCambiada ? "Base digitada " + (Number(tokensBase) || 0) + " (el sistema decía " + baseSis + ")" : "",
+    devBTxt].filter(Boolean).join(" | ")
   });
 
   const mensajeWA = () => {
@@ -1594,7 +1675,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     'Efectivo: ' + fmt(efectivo) + '\n' + (
     abonosTurno && qrSolo > 0 ? 'QR verificado: ' + fmt(qrVerificado) + ' de ' + fmt(qrSolo) + (qrSinVerificar > 0 ? ' ⚠ sin verificar ' + fmt(qrSinVerificar) : ' ✓') + '\n' : '') +
     '———\n' +
-    'Tokens vendidos: ' + p.tokensVendidos + ' · Dev: ' + p.devTokens + ' · Membresía: ' + p.tokensMembresia + '\n' +
+    'Tokens base: ' + p.tokensBase + ' · Vendidos: ' + p.tokensVendidos + ' · Dev: ' + p.devTokens + ' · Membresía: ' + p.tokensMembresia + '\n' +
     'Tokens restantes: ' + p.tokensRestantes + '\n' +
     'Devoluciones: ' + fmt(dev) + '\n' + (
     devBLE.length ? 'Devoluciones Bluetooth: ' + devB3 + ' de 3 créditos · ' + devB2 + ' de 2 · ' + devB1 + ' de 1 (' + devBCred + ' créditos)\n' : '') +
@@ -1603,14 +1684,17 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
   };
 
   const registrarLiq = async () => {
+    const ids = (recibos || []).map((r) => r.id);
     if (usaCorr) {
       const r = await db.corregirLiquidacion(ultimo.id, operador, payload());
       if (!r || !r.ok) {showToast(r && r.error || "No se pudo corregir el cierre", "err");throw new Error('no-corregido');}
+      liqIdsAdd(sede, operador, ids);
       if (onPend) {onPend();setTimeout(onPend, 3000);}
       showToast("Cierre corregido ✓ (reemplazó el de las " + horaDe(ultimo.created_at) + ")", "ok");
       return;
     }
     try {await db.enviarLiquidacion(payload());} catch (e) {}
+    liqIdsAdd(sede, operador, ids);
     if (onPend) {onPend();setTimeout(onPend, 3000);}
     showToast("Liquidación guardada ✓", "ok");
   };
@@ -1629,6 +1713,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     try {await registrarLiq();} catch (e) {setSending(false);return;}
     onCerrar();
   };
+  const hacerCorreccion = async () => {if (corrBusy || !corrR) return;setCorrBusy(true);const ok = await onCorregirRecibo(corrR);setCorrBusy(false);if (!ok) setCorrR(null);};
 
   const tokenInput = (lbl, val, setter, extra) =>
   React.createElement("div", { style: { flex: 1 } },
@@ -1637,98 +1722,180 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
   );
 
   const row = (l, v, color, bold) => React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label", style: bold ? { fontWeight: 800, color: "var(--tb)" } : null }, l), React.createElement("span", { className: "result-value", style: color ? { color } : null }, fmt(v)));
+  const caja = (col, hijos) => React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--" + col + ")", background: "var(--" + col + "-d)", fontSize: 13, color: col === 'red' ? "var(--red)" : undefined } }, hijos);
+  const metodoR = (r) => {const m = [];if (r.efectivo > 0) m.push("Efectivo " + fmt(r.efectivo));if (r.qr > 0) m.push("QR " + fmt(r.qr));if (r.tarjeta > 0) m.push("Tarjeta " + fmt(r.tarjeta));return m.join(" + ") || "—";};
+  const PASOS = ["Recibo", "Pagos", "Tokens", "Enviar"];
 
   return (
     React.createElement("div", { className: "sheet-bg", onClick: onClose },
     React.createElement("div", { className: "sheet", onClick: (e) => e.stopPropagation() },
     React.createElement("div", { className: "sheet-handle" }),
-    React.createElement("div", { className: "card-t" }, "\uD83E\uDDFE Liquidaci\xF3n de turno"),
-    React.createElement("div", { className: "header-sub", style: { marginBottom: 6 } }, sede, " \xB7 ", operador, " \xB7 Recibo ", numRecibo),
+    React.createElement("div", { className: "card-t" }, "\uD83E\uDDFE Cierre de turno"),
+    React.createElement("div", { className: "header-sub" }, sede, " \xB7 ", operador, " \xB7 Recibo ", numRecibo),
+    React.createElement("div", { style: { display: "flex", gap: 6, margin: "10px 0 12px" } },
+    PASOS.map((t, i) => {const n = i + 1,on = paso === n,hecho = paso > n;return (
+        React.createElement("div", { key: n, onClick: () => {if (n < paso) setPaso(n);}, style: { flex: 1, textAlign: "center", padding: "7px 2px", borderRadius: 10, fontSize: 12, fontWeight: 800, cursor: n < paso ? "pointer" : "default",
+            border: "1px solid " + (on ? "var(--blue)" : hecho ? "var(--green)" : "var(--bd)"), background: hecho ? "var(--green-d)" : "var(--sf2)", color: on ? "var(--blue)" : hecho ? "var(--green)" : "var(--td)" } }, hecho ? "✓" : n, " ", t));})
+    ),
 
-    reciente &&
-    React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--amber)", background: "var(--amber-d)", fontSize: 13 } },
-    React.createElement("b", null, "\u26A0 Ya cerraste caja a las ", horaDe(ultimo.created_at)), " (hace ", haceMin < 60 ? haceMin + " min" : Math.round(haceMin / 60) + " h", ") con ", fmt(ultimo.valor), " vendidos", ultimo.tokens_restantes != null ? " y te quedaron " + ultimo.tokens_restantes + " tokens" : "", ". Si ese cierre ya qued\xF3 bien, no hace falta otro.",
+
+    paso === 1 && React.createElement("div", null,
+    reciente && caja('amber', React.createElement("div", null,
+    React.createElement("b", null, "\u26A0 Ya cerraste caja a las ", horaDe(ultimo.created_at)), " (hace ", haceMin < 60 ? haceMin + " min" : Math.round(haceMin / 60) + " h", ") con ", fmt(ultimo.valor), " vendidos", ultimo.tokens_restantes != null ? " y te quedaron " + ultimo.tokens_restantes + " tokens" : "", ".",
     corregible && React.createElement("div", { style: { marginTop: 8, display: "flex", flexDirection: "column", gap: 6 } },
     React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 700 } }, React.createElement("input", { type: "radio", name: "modoCierre", checked: modo === 'corregir', onChange: () => elegirModo('corregir') }), " \u270F\uFE0F Corregir mi cierre de las ", horaDe(ultimo.created_at), " (lo reemplaza)"),
     React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontWeight: 700 } }, React.createElement("input", { type: "radio", name: "modoCierre", checked: modo === 'nuevo', onChange: () => elegirModo('nuevo') }), " Es otro cierre distinto")
     ),
     !corregible && ultimo.estado !== 'pendiente' && React.createElement("div", { style: { marginTop: 6, fontSize: 12 } }, "Ese cierre ya lo tom\xF3 el recaudo: si est\xE1 mal, p\xEDdele la correcci\xF3n al administrador.")
-    ),
-    usaCorr &&
-    React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--green)", background: "var(--green-d)", fontSize: 13 } },
-    React.createElement("b", null, "\u270F\uFE0F Corrigiendo el cierre de las ", horaDe(ultimo.created_at)), " \xB7 Las ventas de abajo son ", React.createElement("b", null, "todas"), " las tuyas en ", sede, " desde ", horaDe(corr.desde), " (", nVentas, " ventas). Revisa los tokens y registra: se reemplaza el cierre anterior, no se crea otro."
-    ),
-    pendMem > 0 &&
-    React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--red)", background: "var(--red-d)", fontSize: 13, color: "var(--red)" } },
-    React.createElement("b", null, "\u26D4 Tienes ", pendMem, " membres\xEDa(s) por cobrar en el carrito."), " C\xF3bralas en un recibo antes de cerrar caja. Si la recarga no se hizo, p\xEDdele al administrador que la descarte."
-    ),
-    sinVentas &&
-    React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--red)", background: "var(--red-d)", fontSize: 13, color: "var(--red)" } },
-    React.createElement("b", null, "\u26D4 No has registrado ventas en este turno."), " Si vendiste, toca ", React.createElement("b", null, "Seguir vendiendo"), ", registra las ventas y luego cierra. Un cierre en $0 queda en el recaudo como si no hubieras vendido nada."
-    ),
+    )),
+    usaCorr && caja('green', React.createElement("div", null, React.createElement("b", null, "\u270F\uFE0F Corrigiendo el cierre de las ", horaDe(ultimo.created_at)), " \xB7 Se toman ", React.createElement("b", null, "todas"), " tus ventas en ", sede, " desde ", horaDe(corr.desde), " (", nVentas, " ventas). Se reemplaza el cierre anterior, no se crea otro.")),
+    pendMem > 0 && caja('red', React.createElement("div", null, React.createElement("b", null, "\u26D4 Tienes ", pendMem, " membres\xEDa(s) por cobrar en el carrito."), " C\xF3bralas en un recibo antes de cerrar caja. Si la recarga no se hizo, p\xEDdele al administrador que la descarte.")),
+    cargando && React.createElement("div", { className: "empty" }, "Buscando tus ventas del turno\u2026"),
+    !cargando && !recibos && !usaCorr && !DEMO_MODE && caja('amber', React.createElement("div", null, React.createElement("b", null, "Sin conexi\xF3n con el sistema."), " Se usan las ventas registradas en esta sesi\xF3n. Revisa que el total sea el de todo tu turno.")),
+    yaLiquidado && caja('red', React.createElement("div", null, React.createElement("b", null, "\u26D4 No tienes ventas nuevas desde tu cierre de las ", horaDe(ultimo.created_at), "."), " No hace falta otra liquidaci\xF3n. ", corregible ? "Si ese cierre quedó mal, elige arriba \"Corregir mi cierre\"." : "")),
+    !cargando && sinVentas && !yaLiquidado && !usaCorr && caja('red', React.createElement("div", null,
+    React.createElement("b", null, "\u26D4 No has registrado el recibo de tu turno."), " Agrega los tokens y productos que vendiste, cobra, y luego vuelve aqu\xED.",
+    React.createElement("button", { className: "btn-primary", style: { marginTop: 10 }, onClick: onIrCarrito }, "\uD83D\uDED2 Ir a registrar el recibo"),
+    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, paddingTop: 10, fontSize: 13, fontWeight: 700, cursor: "pointer" } },
+    React.createElement("input", { type: "checkbox", checked: confirmo, onChange: (e) => setConfirmo(e.target.checked), style: { width: 18, height: 18 } }), " De verdad no vend\xED nada y quiero cerrar en $0"
+    )
+    )),
 
 
-    React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "N\xBA de ventas"), React.createElement("span", { className: "result-value" }, nVentas)),
+    recibos && !usaCorr && recibos.map((r) => {const exp = abiertoR === r.id;return (
+        React.createElement("div", { key: r.id, style: { marginBottom: 8, borderRadius: 12, border: "1px solid var(--bd)", background: "var(--sf2)", overflow: "hidden" } },
+        React.createElement("div", { onClick: () => setAbiertoR(exp ? null : r.id), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", cursor: "pointer" } },
+        React.createElement("div", { style: { flex: 1 } },
+        React.createElement("div", { style: { fontWeight: 800 } }, r.numero_recibo || "(sin Nº)", " ", React.createElement("span", { className: "header-sub", style: { fontWeight: 500 } }, "\xB7 ", horaDe(r.created_at))),
+        React.createElement("div", { className: "header-sub" }, Number(r.tokens_unidades) || 0, " tokens \xB7 ", metodoR(r))
+        ),
+        React.createElement("div", { style: { textAlign: "right" } }, React.createElement("div", { style: { fontWeight: 800, fontSize: 16 } }, fmt(r.total)), React.createElement("div", { className: "header-sub" }, exp ? "▲" : "▼ ver"))
+        ),
+        exp && React.createElement("div", { style: { padding: "0 13px 12px", borderTop: "1px solid var(--bd)" } },
+        (r.items || []).map((it, i) => React.createElement("div", { key: i, style: { display: "flex", justifyContent: "space-between", padding: "5px 0", fontSize: 13 } }, React.createElement("span", null, Number(it.cantidad), "\xD7 ", it.nombre), React.createElement("span", null, fmt(it.valor)))),
+        corrR && corrR.id === r.id ?
+        React.createElement("div", { style: { marginTop: 10, padding: 12, borderRadius: 12, border: "1px solid var(--amber)", background: "var(--sf)" } },
+        React.createElement("div", { style: { fontWeight: 800, marginBottom: 4 } }, "\xBFCorregir el recibo ", r.numero_recibo, "?"),
+        React.createElement("div", { className: "header-sub", style: { marginBottom: 8 } }, "Se anula este recibo y todo lo que ten\xEDa vuelve al carrito. Cambias lo que est\xE9 mal (cantidades o forma de pago) y lo cobras de nuevo. Queda registrado que lo corregiste."),
+        React.createElement("div", { style: { display: "flex", gap: 8 } },
+        React.createElement("button", { className: "btn-secondary", style: { flex: 1, marginTop: 0 }, disabled: corrBusy, onClick: () => setCorrR(null) }, "No"),
+        React.createElement("button", { className: "btn-primary", style: { flex: 1, marginTop: 0 }, disabled: corrBusy, onClick: hacerCorreccion }, corrBusy ? "Un momento…" : "Sí, corregir")
+        )
+        ) :
+
+        React.createElement("button", { className: "btn-secondary", style: { marginTop: 10, borderColor: "var(--amber)", color: "var(--amber)" }, onClick: () => setCorrR(r) }, "\u270F\uFE0F Corregir este recibo")
+
+        )
+        ));}),
+
+    !cargando && !sinVentas && React.createElement("div", { style: { marginTop: 6 } },
+    React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "N\xBA de recibos"), React.createElement("span", { className: "result-value" }, nVentas)),
     row("Productos", productosVal),
-    row("Tokens", tokensVal, "var(--amber)"),
+    row("Tokens" + (vendidosAuto ? " (" + tokensUnid + " unidades)" : ""), tokensVal, "var(--amber)"),
     membresiasVal > 0 && row("Membresías", membresiasVal, "var(--amber)"),
-    row("Total vendido", valor, "var(--tb)", true),
+    row("Total vendido", valor, "var(--tb)", true)
+    ),
+    !cargando && !sinVentas && !usaCorr && recibos && React.createElement("div", { className: "header-sub", style: { marginTop: 6 } }, "\xBFAlgo est\xE1 mal? Abre el recibo y toca ", React.createElement("b", null, "Corregir"), ". No hace falta pedir anulaci\xF3n mientras no hayas liquidado."),
+
+    React.createElement("button", { className: "btn-primary", style: { marginTop: 14 }, disabled: !paso1Ok, onClick: () => setPaso(2) }, cargando ? "Cargando…" : "El recibo está bien · Siguiente →")
+    ),
+
+
+    paso === 2 && React.createElement("div", null,
     row("QR / Transferencia / Tarjeta", qr, "var(--blue)"),
     row("Efectivo", efectivo, "var(--green)"),
 
 
     abonosTurno && (qrSolo > 0 || qrVerificado > 0) &&
-    React.createElement("div", { style: { margin: "10px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid " + (qrSinVerificar > 0 ? "var(--red)" : "var(--green)"), background: qrSinVerificar > 0 ? "var(--red-d)" : "var(--green-d)" } },
-    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13 } }, React.createElement("span", null, "QR / transferencia registrado"), React.createElement("b", null, fmt(qrSolo))),
-    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13 } }, React.createElement("span", null, "Pagos QR verificados (", abonosTurno.length, ")"), React.createElement("b", null, fmt(qrVerificado))),
-    qrSinVerificar > 0 ?
-    React.createElement("div", { style: { marginTop: 6, fontWeight: 800, color: "var(--red)", fontSize: 13 } }, "\u26A0 Hay ", fmt(qrSinVerificar), " por QR sin verificar. \xC1brelos en \uD83D\uDCB8 Verificar pago antes de cerrar: lo que no aparezca ah\xED no entr\xF3 a la cuenta.") :
-    React.createElement("div", { style: { marginTop: 6, fontWeight: 800, color: "var(--green)", fontSize: 13 } }, "\u2713 Todo lo de QR est\xE1 verificado")
+    React.createElement("div", { style: { margin: "10px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid " + (qrSinVerificar > 0 || qrDeMenos > 0 ? "var(--red)" : "var(--green)"), background: qrSinVerificar > 0 || qrDeMenos > 0 ? "var(--red-d)" : "var(--green-d)" } },
+    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13 } }, React.createElement("span", null, "QR / transferencia en el recibo"), React.createElement("b", null, fmt(qrSolo))),
+    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13 } }, React.createElement("span", null, "Pagos QR que verificaste (", abonosTurno.length, ")"), React.createElement("b", null, fmt(qrVerificado))),
+    qrSinVerificar > 0 && React.createElement("div", { style: { marginTop: 6, fontWeight: 800, color: "var(--red)", fontSize: 13 } }, "\u26A0 Hay ", fmt(qrSinVerificar), " por QR sin verificar. \xC1brelos en \uD83D\uDCB8 Verificar pago antes de cerrar: lo que no aparezca ah\xED no entr\xF3 a la cuenta."),
+    qrDeMenos > 0 && React.createElement("div", { style: { marginTop: 6, fontWeight: 800, color: "var(--red)", fontSize: 13 } }, "\u26A0 Verificaste ", fmt(qrDeMenos), " por QR que NO est\xE1n en el recibo. Lo m\xE1s probable es que hayas registrado ese dinero como efectivo."),
+    qrSinVerificar === 0 && qrDeMenos === 0 && React.createElement("div", { style: { marginTop: 6, fontWeight: 800, color: "var(--green)", fontSize: 13 } }, "\u2713 El QR del recibo coincide con lo verificado")
+    ),
+    qrDeMenos > 0 && React.createElement("div", null,
+    !usaCorr && recibos && React.createElement("button", { className: "btn-secondary", style: { marginTop: 0, borderColor: "var(--amber)", color: "var(--amber)" }, onClick: () => setPaso(1) }, "\u2190 Volver y corregir el recibo"),
+    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" } },
+    React.createElement("input", { type: "checkbox", checked: confQr, onChange: (e) => setConfQr(e.target.checked), style: { width: 18, height: 18 } }), " Revis\xE9: esos pagos no son de las ventas de este recibo"
+    )
+    ),
+
+    React.createElement("label", { className: "label", style: { marginTop: 8 } }, "Devoluciones en plata $ ", React.createElement("span", { className: "header-sub", style: { fontWeight: 500 } }, "\xB7 efectivo que le devolviste a un cliente")),
+    React.createElement("input", { className: "input", type: "number", inputMode: "numeric", placeholder: "$0", value: devoluciones, onChange: (e) => setDevoluciones(e.target.value.replace(/[^0-9]/g, "")) }),
+    devBLE.length > 0 && React.createElement("div", { className: "header-sub", style: { marginTop: -4, marginBottom: 8 } }, "\u21A9\uFE0F Las devoluciones por Bluetooth (", devBCred, " cr\xE9ditos) no van aqu\xED: no son plata."),
+
+    React.createElement("div", { className: "result-row", style: { borderTop: "1px solid var(--bd)", marginTop: 4 } },
+    React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "Efectivo que debes entregar"),
+    React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: "var(--green)" } }, fmt(efectivoEsperado))
+    ),
+    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+    React.createElement("button", { className: "btn-secondary", style: { flex: 1, marginTop: 0 }, onClick: () => setPaso(1) }, "\u2190 Atr\xE1s"),
+    React.createElement("button", { className: "btn-primary", style: { flex: 2, marginTop: 0 }, disabled: !paso2Ok, onClick: () => setPaso(3) }, "Siguiente \u2192")
+    )
     ),
 
 
-    React.createElement("div", { className: "card-t", style: { fontSize: 14, marginTop: 14 } }, "\uD83E\uDE99 Control de tokens"),
+    paso === 3 && React.createElement("div", null,
     React.createElement("div", { style: { display: "flex", gap: 10 } },
-    tokenInput("Base", tokensBase, setTokensBase),
+    tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase),
+    vendidosAuto ?
+    React.createElement("div", { style: { flex: 1 } }, React.createElement("label", { className: "label" }, "Vendidos"),
+    React.createElement("div", { className: "input", style: { display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--sf3)", fontWeight: 800 } }, tokensUnid, React.createElement("span", { className: "header-sub", style: { fontWeight: 500 } }, "del recibo"))) :
     tokenInput("Vendidos", tokensVendidos, setTokensVendidos)
     ),
+    baseAuto && baseSis != null && !baseCambiada && React.createElement("div", { style: { fontSize: 11, color: "var(--amber)", marginBottom: 6 } }, "\uD83E\uDE99 Base precargada: ", srv.base_origen === 'ciclo' ? "los tokens que te dejó el tesorero en el último recaudo" : "los tokens que te quedaron en tu último cierre", ". C\xE1mbiala solo si de verdad recibiste otra cantidad."),
+    baseCambiada && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", fontWeight: 700, marginBottom: 6 } }, "\u26A0 El sistema dice que tu base es ", baseSis, ". Si la dejas en ", Number(tokensBase) || 0, " queda anotado en la liquidaci\xF3n para revisi\xF3n. ", React.createElement("span", { style: { textDecoration: "underline", cursor: "pointer" }, onClick: () => setTokensBase(String(baseSis)) }, "Volver a ", baseSis)),
+    vendidosAuto && React.createElement("div", { style: { fontSize: 11, color: "var(--td)", marginBottom: 6 } }, "\"Vendidos\" sale del recibo del turno, ya no se digita. Si no es el n\xFAmero correcto, vuelve al paso 1 y corrige el recibo."),
     React.createElement("div", { style: { display: "flex", gap: 10 } },
-    tokenInput("Dev. tokens", devTokens, setDevTokens),
+    tokenInput("Devueltos a clientes", devTokens, setDevTokens),
     tokenInput("Membresía", tokensMembresia, setTokensMembresia, { borderColor: "var(--purple)" })
     ),
     memAuto && React.createElement("div", { style: { fontSize: 11, color: "var(--purple)", marginBottom: 6 } }, "\uD83D\uDCB3 \"Membres\xEDa\" se trajo autom\xE1tico de los canjes VIP del turno. Puedes ajustarlo."),
     devBLE.length > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "\u21A9\uFE0F Devoluciones por Bluetooth"), React.createElement("span", { className: "result-value" }, devB3, " de 3 \xB7 ", devB2, " de 2 \xB7 ", devB1, " de 1 ", React.createElement("span", { className: "header-sub" }, "(", devBCred, " cr\xE9ditos)"))),
-    baseAuto && ultimo && React.createElement("div", { style: { fontSize: 11, color: "var(--amber)", marginBottom: 6 } }, "\uD83E\uDE99 Base sugerida: los ", ultimo.tokens_restantes, " tokens que quedaron en tu \xFAltimo cierre (", horaDe(ultimo.created_at), "). Corr\xEDgela si no coincide con lo que recibiste."),
-    tokensRepetidos &&
-    React.createElement("div", { style: { margin: "6px 0", padding: "10px 12px", borderRadius: 12, border: "1px solid var(--red)", background: "var(--red-d)", fontSize: 13, color: "var(--red)" } },
-    React.createElement("b", null, "\u26D4 Base ", ultimo.tokens_base, " y vendidos ", ultimo.tokens_vendidos, " son los mismos de tu cierre anterior."), " Si los repites, esos tokens quedan contados dos veces. Revisa: la base de este turno deber\xEDa ser lo que te qued\xF3 (", ultimo.tokens_restantes, ")."
-    ),
-    hayAlerta &&
-    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, padding: "8px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" } },
+    tokensRepetidos && caja('red', React.createElement("div", null,
+    React.createElement("b", null, "\u26D4 Base ", ultimo.tokens_base, " y vendidos ", ultimo.tokens_vendidos, " son los mismos de tu cierre anterior."), " Si los repites, esos tokens quedan contados dos veces. La base de este turno deber\xEDa ser lo que te qued\xF3 (", ultimo.tokens_restantes, ").",
+    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, paddingTop: 8, fontSize: 13, fontWeight: 700, cursor: "pointer" } },
     React.createElement("input", { type: "checkbox", checked: confirmo, onChange: (e) => setConfirmo(e.target.checked), style: { width: 18, height: 18 } }), " Revis\xE9 la advertencia y quiero cerrar de todas formas"
+    ))),
+    React.createElement("div", { className: "result-row", style: { borderTop: "1px solid var(--bd)", marginTop: 6 } },
+    React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "\uD83E\uDE99 Tokens que te deben quedar"),
+    React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: tokensRestantes < 0 ? "var(--red)" : "var(--amber)" } }, tokensRestantes)
     ),
-    React.createElement("div", { style: { fontSize: 12, color: "var(--amber)", fontWeight: 700, marginBottom: 10 } }, "\uD83E\uDE99 Tokens restantes: ", tokensRestantes),
-
-
-    React.createElement("label", { className: "label" }, "Devoluciones $"),
-    React.createElement("input", { className: "input", type: "number", inputMode: "numeric", placeholder: "$0", value: devoluciones, onChange: (e) => setDevoluciones(e.target.value.replace(/[^0-9]/g, "")) }),
-    React.createElement("label", { className: "label" }, "Observaciones"),
-    React.createElement("textarea", { className: "input", style: { minHeight: 60, resize: "vertical" }, placeholder: "Notas del turno\u2026", value: observaciones, onChange: (e) => setObservaciones(e.target.value) }),
-
-
-    React.createElement("div", { className: "result-row", style: { borderTop: "1px solid var(--bd)", marginTop: 4 } },
-    React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "Efectivo esperado"),
-    React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: "var(--green)" } }, fmt(efectivoEsperado))
+    tokensRestantes < 0 && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", fontWeight: 700 } }, "No puede quedar en negativo: revisa la base o el recibo."),
+    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+    React.createElement("button", { className: "btn-secondary", style: { flex: 1, marginTop: 0 }, onClick: () => setPaso(2) }, "\u2190 Atr\xE1s"),
+    React.createElement("button", { className: "btn-primary", style: { flex: 2, marginTop: 0 }, disabled: !paso3Ok, onClick: () => setPaso(4) }, paso3Ok ? "Siguiente →" : "Completa los tokens")
+    )
     ),
 
 
-    React.createElement("button", { className: "btn-primary", style: { marginTop: 14, background: "#25D366", border: "none" }, disabled: !listo || sending, onClick: registrarYWhatsApp },
-    sending ? "Registrando…" : listo ? "📲 Registrar y enviar por WhatsApp" : hayAlerta && tokensBase !== "" && tokensVendidos !== "" ? "Revisa la advertencia para cerrar" : "Completa el control de tokens"
+    paso === 4 && React.createElement("div", null,
+    React.createElement("div", { style: { padding: "10px 12px", borderRadius: 12, border: "1px solid var(--bd)", background: "var(--sf2)" } },
+    row("Total vendido", valor, "var(--tb)", true),
+    row("QR / Transferencia / Tarjeta", qr, "var(--blue)"),
+    row("Efectivo", efectivo, "var(--green)"),
+    dev > 0 && row("− Devoluciones", dev, "var(--red)"),
+    React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "Tokens"), React.createElement("span", { className: "result-value", style: { fontSize: 13 } }, "base ", Number(tokensBase) || 0, " \u2212 vendidos ", vendidosNum, (Number(devTokens) || 0) > 0 ? " − dev " + Number(devTokens) : "", (Number(tokensMembresia) || 0) > 0 ? " − memb " + Number(tokensMembresia) : "", " = ", React.createElement("b", null, tokensRestantes))),
+    React.createElement("div", { className: "result-row", style: { borderBottom: "none" } },
+    React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "Efectivo que entregas"),
+    React.createElement("span", { style: { fontWeight: 800, fontSize: 24, color: "var(--green)" } }, fmt(efectivoEsperado))
+    )
+    ),
+    React.createElement("label", { className: "label", style: { marginTop: 10 } }, "Observaciones"),
+    React.createElement("textarea", { className: "input", style: { minHeight: 54, resize: "vertical" }, placeholder: "Notas del turno\u2026", value: observaciones, onChange: (e) => setObservaciones(e.target.value) }),
+
+
+    React.createElement("button", { className: "btn-primary", style: { marginTop: 10, background: "#25D366", border: "none" }, disabled: !listo || sending, onClick: registrarYWhatsApp },
+    sending ? "Registrando…" : listo ? "📲 Registrar y enviar por WhatsApp" : "Revisa los pasos anteriores"
     ),
 
     React.createElement("button", { className: "btn-secondary", style: { marginTop: 10 }, disabled: !listo || sending, onClick: registrarYCerrar },
-    listo ? "Registrar y cerrar caja (sin WhatsApp)" : hayAlerta && tokensBase !== "" && tokensVendidos !== "" ? "Revisa la advertencia para cerrar" : "Completa el control de tokens"
+    listo ? "Registrar y cerrar caja (sin WhatsApp)" : "Revisa los pasos anteriores"
     ),
+    React.createElement("button", { className: "btn-secondary", style: { marginTop: 10 }, disabled: sending, onClick: () => setPaso(3) }, "\u2190 Atr\xE1s")
+    ),
+
     React.createElement("button", { className: "btn-secondary", style: { marginTop: 10 }, onClick: onClose }, "Seguir vendiendo")
     )
     ));
@@ -1753,7 +1920,8 @@ function CartSheet({ cart, total, bruto, descTotal, busy, descuentos, descTicket
   const [paso, setPaso] = useState("carrito");
   const hayDesc = (descuentos || []).length > 0;
   const selStyle = { background: "var(--sf2)", border: "1px solid var(--bd)", borderRadius: 8, color: "var(--blue)", fontSize: 11, fontWeight: 600, padding: "2px 4px", marginTop: 2 };
-  const [metodo, setMetodo] = useState("efectivo");
+  const [metodo, setMetodo] = useState("");
+  const [efOk, setEfOk] = useState(false);
   const [ef, setEf] = useState("");const [qr, setQr] = useState("");const [tj, setTj] = useState("");
 
 
@@ -1770,11 +1938,16 @@ function CartSheet({ cart, total, bruto, descTotal, busy, descuentos, descTicket
   }, [paso]);
   const sugQr = qrInfo ? Math.min(qrInfo.disponible, total) : 0;
   const usarSugeridoMixto = () => {setMetodo("mixto");setQr(sugQr ? String(sugQr) : "");setEf(String(Math.max(0, total - sugQr)));setTj("");};
-  const elegirMetodo = (k) => {setMetodo(k);
+  const elegirMetodo = (k) => {setMetodo(k);setEfOk(false);
 
     if (k === "mixto" && qrInfo && ef === "" && qr === "" && tj === "") {setQr(sugQr ? String(sugQr) : "");setEf(String(Math.max(0, total - sugQr)));}};
 
+
+  useEffect(() => {if (paso !== "pago" || !qrInfo || metodo !== "") return;
+    if (qrInfo.disponible > 0) {if (qrInfo.disponible >= total) setMetodo("qr");else usarSugeridoMixto();}}, [qrInfo, paso]);
+
   const pago = () => {
+    if (metodo === "") return { efectivo: 0, qr: 0, tarjeta: 0 };
     if (metodo === "efectivo") return { efectivo: total, qr: 0, tarjeta: 0 };
     if (metodo === "qr") return { efectivo: 0, qr: total, tarjeta: 0 };
     if (metodo === "tarjeta") return { efectivo: 0, qr: 0, tarjeta: total };
@@ -1783,6 +1956,13 @@ function CartSheet({ cart, total, bruto, descTotal, busy, descuentos, descTicket
   const p = pago();
   const sumaMixto = p.efectivo + p.qr + p.tarjeta;
   const mixtoOk = metodo !== "mixto" || sumaMixto === total;
+  const qrPend = qrInfo ? qrInfo.disponible : 0;
+  const avisoEf = metodo !== "" && qrPend > 0 && p.qr === 0;
+  const puedeSeguir = metodo !== "" && mixtoOk && (!avisoEf || efOk);
+  const esMem = (c) => /^MEMBRESIA/i.test((c.nombre || '').trim());
+  const nTok = cart.filter((c) => c.tipo === "token" && !esMem(c)).reduce((a, c) => a + c.cantidad, 0);
+  const nMem = cart.filter(esMem).reduce((a, c) => a + c.cantidad, 0);
+  const nOtros = cart.filter((c) => c.tipo !== "token").reduce((a, c) => a + c.cantidad, 0);
 
   return (
     React.createElement("div", { className: "sheet-bg", onClick: onClose },
@@ -1902,11 +2082,40 @@ function CartSheet({ cart, total, bruto, descTotal, busy, descuentos, descTicket
     React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "A cobrar"),
     React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: "var(--green)" } }, fmt(total))
     ),
-    React.createElement("button", { className: "btn-primary", style: { marginTop: 14 }, disabled: busy || !mixtoOk,
-      onClick: () => onCobrar(p) },
-    busy ? "Registrando..." : "✅ Confirmar venta"
+    avisoEf &&
+    React.createElement("div", { style: { marginTop: 10, padding: "10px 12px", borderRadius: 12, border: "1px solid var(--red)", background: "var(--red-d)" } },
+    React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: "var(--red)" } }, "\u26A0 Tienes ", fmt(qrPend), " en pagos QR verificados y este recibo va sin nada por QR."),
+    React.createElement("button", { className: "btn-secondary", style: { marginTop: 8, padding: "9px", borderColor: "var(--green)", color: "var(--green)" }, onClick: usarSugeridoMixto }, "Usar: ", fmt(sugQr), " QR", total - sugQr > 0 ? " + " + fmt(total - sugQr) + " efectivo" : ""),
+    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, paddingTop: 10, fontSize: 13, fontWeight: 700, cursor: "pointer" } },
+    React.createElement("input", { type: "checkbox", checked: efOk, onChange: (e) => setEfOk(e.target.checked), style: { width: 18, height: 18 } }), " Es correcto: nada de este recibo fue por QR"
+    )
+    ),
+    React.createElement("button", { className: "btn-primary", style: { marginTop: 14 }, disabled: busy || !puedeSeguir,
+      onClick: () => setPaso("confirmar") },
+    metodo === "" ? "Elige cómo te pagaron" : !mixtoOk ? "La suma no da el total" : "Revisar y confirmar →"
     ),
     React.createElement("button", { className: "btn-secondary", style: { marginTop: 10 }, onClick: () => setPaso("carrito") }, "\u2190 Volver al carrito")
+    ),
+
+    paso === "confirmar" &&
+    React.createElement("div", null,
+    React.createElement("div", { className: "card-t" }, "\u2705 Revisa antes de registrar"),
+    React.createElement("div", { className: "header-sub", style: { marginBottom: 10 } }, "Este recibo es el que se va a liquidar. Si algo no cuadra, corr\xEDgelo ahora."),
+    React.createElement("div", { style: { padding: "10px 12px", borderRadius: 12, border: "1px solid var(--bd)", background: "var(--sf2)" } },
+    nTok > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "Tokens"), React.createElement("span", { className: "result-value" }, nTok)),
+    nMem > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "Membres\xEDas"), React.createElement("span", { className: "result-value" }, nMem)),
+    nOtros > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "Productos y otros"), React.createElement("span", { className: "result-value" }, nOtros, " unidad(es)")),
+    descTotal > 0 && React.createElement("div", { className: "result-row" }, React.createElement("span", { className: "result-label" }, "Descuentos"), React.createElement("span", { className: "result-value", style: { color: "var(--red)" } }, "-", fmt(descTotal))),
+    React.createElement("div", { className: "result-row", style: { borderBottom: "none" } }, React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "Total"), React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: "var(--tb)" } }, fmt(total)))
+    ),
+    React.createElement("div", { style: { marginTop: 10, padding: "10px 12px", borderRadius: 12, border: "2px solid var(--green)", background: "var(--green-d)" } },
+    React.createElement("div", { style: { fontSize: 12, fontWeight: 800, marginBottom: 4 } }, "C\xD3MO TE PAGARON"),
+    p.efectivo > 0 && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, padding: "3px 0" } }, React.createElement("span", null, "\uD83D\uDCB5 Efectivo"), React.createElement("span", null, fmt(p.efectivo))),
+    p.qr > 0 && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, padding: "3px 0" } }, React.createElement("span", null, "\uD83D\uDCF2 QR / Transf."), React.createElement("span", null, fmt(p.qr))),
+    p.tarjeta > 0 && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, padding: "3px 0" } }, React.createElement("span", null, "\uD83D\uDCB3 Tarjeta"), React.createElement("span", null, fmt(p.tarjeta)))
+    ),
+    React.createElement("button", { className: "btn-primary", style: { marginTop: 14 }, disabled: busy, onClick: () => onCobrar(p) }, busy ? "Registrando..." : "✅ Sí, registrar la venta"),
+    React.createElement("button", { className: "btn-secondary", style: { marginTop: 10 }, disabled: busy, onClick: () => setPaso("pago") }, "\u2190 Corregir")
     )
 
     )
@@ -2886,7 +3095,12 @@ function CeldaSheet({ sede, operador, onClose }) {
 
 }
 
-function RecibosSheet({ sede, operador, onClose }) {
+function RecibosSheet({ sede, operador, onClose, onCorregir }) {
+  const [ultLiq, setUltLiq] = useState(undefined);
+  const [confCorr, setConfCorr] = useState(null);
+  useEffect(() => {if (DEMO_MODE) {setUltLiq(null);return;}db.ultimoCierre(sede, operador).then((u) => setUltLiq(u || null)).catch(() => setUltLiq(null));}, []);
+
+  const sinLiquidar = (r) => !!onCorregir && ultLiq !== undefined && !r.anulada && Date.now() - new Date(r.created_at) < 20 * 3600 * 1000 && (!ultLiq || new Date(r.created_at) > new Date(ultLiq.created_at));
   const [recibos, setRecibos] = useState(null);
   const [abierto, setAbierto] = useState(null);
   const [sols, setSols] = useState({});
@@ -2926,7 +3140,7 @@ function RecibosSheet({ sede, operador, onClose }) {
     React.createElement("div", { className: "sheet", onClick: (e) => e.stopPropagation() },
     React.createElement("div", { className: "sheet-handle" }),
     React.createElement("div", { className: "card-t" }, "\uD83E\uDDFE Mis \xFAltimos recibos"),
-    React.createElement("div", { className: "header-sub", style: { marginBottom: 10 } }, operador, " \xB7 ", sede, " \xB7 \xBFte equivocaste en uno? \xC1brelo y pide la anulaci\xF3n."),
+    React.createElement("div", { className: "header-sub", style: { marginBottom: 10 } }, operador, " \xB7 ", sede, " \xB7 \xBFte equivocaste en uno? Si a\xFAn no has liquidado, \xE1brelo y corr\xEDgelo t\xFA mismo. Si ya liquidaste, pide la anulaci\xF3n."),
     msg && React.createElement("div", { style: { marginBottom: 10, padding: "9px 12px", borderRadius: 10, fontSize: 13, fontWeight: 700,
         background: msg.tipo === 'ok' ? "var(--green-d)" : "var(--red-d)", color: msg.tipo === 'ok' ? "var(--green)" : "var(--red)" } }, msg.txt),
 
@@ -2962,6 +3176,17 @@ function RecibosSheet({ sede, operador, onClose }) {
         React.createElement("b", null, "\u23F3 Anulaci\xF3n solicitada."), " Administraci\xF3n la est\xE1 revisando.", React.createElement("div", { style: { opacity: .85, marginTop: 3 } }, "Motivo: ", sol.motivo)),
         rech && React.createElement("div", { style: { marginTop: 10, padding: "9px 11px", borderRadius: 10, background: "var(--sf3)", fontSize: 12.5 } },
         React.createElement("b", null, "Solicitud rechazada."), sol.respuesta ? " " + sol.respuesta : " El recibo sigue activo."),
+        sinLiquidar(r) && !pend && pidiendo !== r.id && (confCorr === r.id ?
+        React.createElement("div", { style: { marginTop: 10, padding: 12, borderRadius: 12, border: "1px solid var(--amber)", background: "var(--sf)" } },
+        React.createElement("div", { style: { fontWeight: 800, marginBottom: 4 } }, "\xBFCorregir el recibo ", r.numero_recibo, "?"),
+        React.createElement("div", { className: "header-sub", style: { marginBottom: 8 } }, "Se anula y todo lo que ten\xEDa vuelve al carrito para que lo cobres bien. Queda registrado que lo corregiste."),
+        React.createElement("div", { style: { display: "flex", gap: 8 } },
+        React.createElement("button", { className: "btn-secondary", style: { flex: 1, marginTop: 0 }, disabled: busy, onClick: () => setConfCorr(null) }, "No"),
+        React.createElement("button", { className: "btn-primary", style: { flex: 1, marginTop: 0 }, disabled: busy, onClick: async () => {setBusy(true);const ok = await onCorregir(r);setBusy(false);if (!ok) {setConfCorr(null);cargar();}} }, busy ? "Un momento…" : "Sí, corregir")
+        )
+        ) :
+
+        React.createElement("button", { className: "btn-secondary", style: { marginTop: 10, borderColor: "var(--amber)", color: "var(--amber)" }, onClick: () => {setConfCorr(r.id);setMsg(null);} }, "\u270F\uFE0F Corregir este recibo (a\xFAn no lo has liquidado)")),
         !r.anulada && !pend && pidiendo !== r.id &&
         React.createElement("button", { className: "btn-secondary", style: { marginTop: 10, borderColor: "var(--red)", color: "var(--red)" },
           onClick: () => {setPidiendo(r.id);setMotivo("");setMsg(null);} }, "\u26A0 Solicitar anulaci\xF3n de este recibo"),

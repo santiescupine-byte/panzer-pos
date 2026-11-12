@@ -249,6 +249,15 @@ const LIQ_KEY='panzer_liq_pendientes';
 function liqPendientes(){ try{ return JSON.parse(localStorage.getItem(LIQ_KEY)||'[]'); }catch(e){ return []; } }
 function liqSave(arr){ try{ localStorage.setItem(LIQ_KEY, JSON.stringify(arr)); }catch(e){} }
 function liqEncolar(liq){ const a=liqPendientes(); a.push(liq); liqSave(a); }
+// Carrito guardado en la tablet (2026-11-12): no se pierde si la tablet se bloquea, se recarga la página o se sale por error.
+const CART_KEY='panzer_carrito_v1';
+const cartKey=(sede,operador)=>CART_KEY+':'+sede+':'+operador;
+function cartGuardado(sede,operador){ try{ const c=JSON.parse(localStorage.getItem(cartKey(sede,operador))||'null'); if(c && (Date.now()-c.ts)<20*3600*1000 && Array.isArray(c.cart)) return c; }catch(e){} return null; }
+function cartGuardar(sede,operador,cart,descTicket){ try{ localStorage.setItem(cartKey(sede,operador), JSON.stringify({ts:Date.now(),cart:(cart||[]).filter(c=>!c.fijo),descTicket:descTicket||null})); }catch(e){} }
+// Recibos que ya entraron en una liquidación enviada desde esta tablet: no se vuelven a liquidar aunque el servidor todavía no la tenga
+const LIQIDS_KEY='panzer_liq_ids_v1';
+function liqIdsGet(sede,operador){ try{ const c=JSON.parse(localStorage.getItem(LIQIDS_KEY+':'+sede+':'+operador)||'null'); if(c && (Date.now()-c.ts)<20*3600*1000) return c.ids||[]; }catch(e){} return []; }
+function liqIdsAdd(sede,operador,ids){ try{ const prev=liqIdsGet(sede,operador); localStorage.setItem(LIQIDS_KEY+':'+sede+':'+operador, JSON.stringify({ts:Date.now(),ids:[...new Set([...prev,...(ids||[])])]})); }catch(e){} }
 
 const db = {
   async getConfig(){
@@ -313,6 +322,17 @@ const db = {
     if(error) return null; return data||null;
   },
   // Corrección del último cierre: ventas desde el turno original (las calcula el servidor) y reemplazo de la liquidación
+  // Liquidación v2 (2026-11-12): los recibos del cajero desde su última liquidación, calculados por el servidor
+  async ventasParaLiquidar(sede, operador){
+    if(DEMO_MODE || !sb) return null;
+    const { data, error } = await sb.rpc('ventas_para_liquidar',{ p_sede:sede, p_operador:operador }); if(error) return null; return data;
+  },
+  // El cajero corrige su propio recibo ANTES de liquidar: se anula y sus productos vuelven al carrito
+  async corregirReciboPropio(ventaId, operador){
+    if(DEMO_MODE || !sb) return {ok:false,error:"No disponible en modo demo."};
+    const { data, error } = await sb.rpc('corregir_recibo_propio',{ p_venta_id:ventaId, p_operador:operador });
+    if(error) return {ok:false,error:"Sin conexión con el sistema. Intenta de nuevo."}; return data;
+  },
   async ventasParaCorreccion(liqId){
     if(DEMO_MODE || !sb) return null;
     const { data, error } = await sb.rpc('ventas_para_correccion',{ p_liq_id:liqId }); if(error) return null; return data;
@@ -843,6 +863,7 @@ function App(){
   const [menuOpen,setMenuOpen]=useState(false);            // menú lateral de acciones
   // chequeo de inventario obligatorio al iniciar turno
   const [chequeoHecho,setChequeoHecho]=useState(false);
+  const cartListo=React.useRef(false);              // el carrito guardado ya se restauró en esta sesión (no pisarlo antes)
   const [postLiq,setPostLiq]=useState(false);       // liquidación ya enviada: pantalla final (inventario de cierre opcional o salir)
   const [invCierre,setInvCierre]=useState(false);   // contando el inventario de cierre
   const [liqEnviada,setLiqEnviada]=useState(false); // la liquidación ya se envió y no ha vendido después → se enciende el botón del menú
@@ -879,6 +900,11 @@ function App(){
       }
       const t=await db.abrirTurno(sedeSel,nombre);
       setSede(sedeSel); setOperador(nombre); setTurno(t);
+      // carrito que quedó a medias (tablet bloqueada, página recargada, salida por error)
+      { const cg=cartGuardado(sedeSel,nombre);
+        if(cg && cg.cart.length){ setCart(cg.cart); if(cg.descTicket) setDescTicket(cg.descTicket);
+          setTimeout(()=>showToast("Recuperé tu carrito: "+cg.cart.length+" línea(s) que no habías cobrado","ok"),1500); }
+        cartListo.current=true; }
       const prods=await db.getProductos(sedeSel);
       setProductos(prods);
       db.getDescuentos().then(setDescuentos).catch(()=>{});
@@ -925,6 +951,8 @@ function App(){
   useEffect(()=>{ if(!turno||!sede||!operador) return; sincronizarPendientes(); const t=setInterval(sincronizarPendientes, 60000); return ()=>clearInterval(t); },[turno&&turno.id, sede, operador]);
   useEffect(()=>{ if(showCart) sincronizarPendientes(); },[showCart]);
   const pendMem=cart.filter(c=>c.fijo).length;
+  // (2026-11-12) el carrito se guarda en la tablet cada vez que cambia
+  useEffect(()=>{ if(!cartListo.current||!sede||!operador) return; cartGuardar(sede,operador,cart,descTicket); },[cart,descTicket,sede,operador]);
   // Inventario de cierre (2026-11-11): solo cajeros. La pantalla "liquidación enviada" se cierra sola a los 15 min.
   const esCajero=!rol||rol==='cajero';
   useEffect(()=>{ if(!postLiq||invCierre) return; const t=setTimeout(()=>cerrarCaja(),15*60000); return ()=>clearTimeout(t); },[postLiq,invCierre]);
@@ -933,7 +961,7 @@ function App(){
     setTurno(null); setSede(""); setOperador(""); setProductos([]);
     setCart([]); setShowCart(false); setShowCierre(false);
     setVentasTurno([]); setPin(""); setPinEmp(null); setCat("Todos"); setQ("");
-    setChequeoHecho(false); setDescTicket(null); setPostLiq(false); setInvCierre(false); setLiqEnviada(false);
+    cartListo.current=false; setChequeoHecho(false); setDescTicket(null); setPostLiq(false); setInvCierre(false); setLiqEnviada(false);
     setRol(""); setShowVip(false); setShowMaq(false); setShowPedido(false); setShowDevol(false);
     setLlegada(null); setShowRostro(false);
   };
@@ -1021,6 +1049,27 @@ function App(){
       if(montoProductos>0) cargarMiMeta(operador);   // su avance de meta se mueve con esta venta
     }catch(e){ showToast(""+(e.message||e),"err"); }
     setBusy(false);
+  };
+
+  // (2026-11-12) Corregir en vez de anular: el recibo que todavía no se ha liquidado se anula y vuelve al carrito
+  const corregirRecibo=async(r)=>{
+    const res=await db.corregirReciboPropio(r.id, operador);
+    if(!res || !res.ok){ showToast((res&&res.error)||"No se pudo corregir el recibo","err"); return false; }
+    const nuevos=[]; let conDesc=Number(res.descuento_ticket)>0;
+    (res.items||[]).forEach((it,i)=>{ if(Number(it.descuento)>0) conDesc=true;
+      const libre=(Number(it.cantidad)||0)-(Number(it.pendientes)||0); if(libre<=0) return;   // las membresías VIP por cobrar vuelven solas como línea fija
+      const p=productos.find(x=>x.id===it.producto_id); const variable=!!(p&&p.precio_variable);
+      nuevos.push({producto_id:it.producto_id, key:variable?(it.producto_id+"-c"+i+"-"+Date.now()):it.producto_id, nombre:it.nombre, tipo:it.tipo||(p&&p.tipo)||'producto',
+        precio:Number(it.precio_unit)||0, controla_stock:p?!!p.controla_stock:!!it.controla_stock, cantidad:libre}); });
+    setCart(prev=>{ const out=prev.map(c=>({...c}));
+      nuevos.forEach(n=>{ const ex=out.find(c=>!c.fijo && (c.key||c.producto_id)===n.key && c.precio===n.precio); if(ex) ex.cantidad+=n.cantidad; else out.push(n); });
+      return out; });
+    setVentasTurno(prev=>prev.filter(v=>v.recibo!==res.numero_recibo));
+    setShowCierre(false); setShowRecibos(false); setShowCart(true);
+    db.getProductos(sede).then(setProductos).catch(()=>{});
+    setTimeout(()=>sincronizarPendientes(), 800);
+    showToast("Recibo "+(res.numero_recibo||"")+" anulado: quedó en el carrito. Corrígelo y vuelve a cobrar."+(conDesc?" Tenía descuentos: ponlos de nuevo.":""),"ok");
+    return true;
   };
 
   // -------- LOGIN (PIN) --------
@@ -1298,8 +1347,10 @@ function App(){
       {/* Sheet cierre de caja → liquidación */}
       {showCierre && (
         <CierreSheet ventas={ventasTurno} sede={sede} operador={operador} turno={turno} showToast={showToast} pendMem={pendMem}
+          onCorregirRecibo={corregirRecibo} onIrCarrito={()=>setShowCierre(false)}
           onClose={()=>setShowCierre(false)} onPend={refrescarLiqPend}
-          onCerrar={()=>{ if(esCajero){ setShowCierre(false); setShowCart(false); setMenuOpen(false); setPostLiq(true); setLiqEnviada(true); } else cerrarCaja(); }}/>
+          onCerrar={()=>{ setVentasTurno([]);   /* ya se liquidaron: si vuelve al POS no se envían otra vez */
+            if(esCajero){ setShowCierre(false); setShowCart(false); setMenuOpen(false); setPostLiq(true); setLiqEnviada(true); } else cerrarCaja(); }}/>
       )}
 
       {/* Teclado para precio variable */}
@@ -1326,7 +1377,7 @@ function App(){
       {asistenciaOn && showRostro && <RostroSheet sede={sede} quien={operador} onClose={()=>setShowRostro(false)}/>}
       {devolBleOn && showDevolBLE && <DevolucionBLESheet sede={sede} operador={operador} turno={turno} onClose={()=>setShowDevolBLE(false)}/>}
       {showRecibos && (
-        <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)}/>
+        <RecibosSheet sede={sede} operador={operador} onClose={()=>setShowRecibos(false)} onCorregir={corregirRecibo}/>
       )}
 
       {/* Módulo VIP / Membresías */}
@@ -1477,12 +1528,18 @@ function PrecioSheet({producto,onClose,onConfirm}){
 // Auto: sede, operador, Nº recibo, valor total, QR/tarjeta, efectivo esperado.
 // Manual: control de tokens, devoluciones $, observaciones.
 // ============================================================
-function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPend,pendMem}){
-  // Nº de recibo = el de la última venta del turno (el mismo que se ve en el back office)
-  const numReciboTurno = ventas.length ? (ventas[ventas.length-1].recibo || '—') : '—';
+function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPend,pendMem,onCorregirRecibo,onIrCarrito}){
+  // ---- Asistente de cierre en 4 pasos (2026-11-12): Recibo · Pagos · Tokens · Enviar ----
+  // Las ventas ya no salen de la memoria de la página: las calcula el servidor desde la última liquidación del cajero.
+  const [paso,setPaso]=useState(1);
+  const [srv,setSrv]=useState(null);              // null = cargando · {ok:true,recibos,…} · {ok:false} = sin conexión (se usan las ventas de esta sesión)
+  const [abiertoR,setAbiertoR]=useState(null);    // recibo expandido
+  const [corrR,setCorrR]=useState(null);          // recibo que se va a corregir (pide confirmación)
+  const [corrBusy,setCorrBusy]=useState(false);
+  const [confQr,setConfQr]=useState(false);       // "revisé: esos pagos QR no son de este recibo"
   // manuales (control de tokens + devoluciones + observaciones)
   const [tokensBase,setTokensBase]=useState("");
-  const [tokensVendidos,setTokensVendidos]=useState("");
+  const [tokensVendidos,setTokensVendidos]=useState("");   // solo se digita si no hay datos del servidor
   const [devTokens,setDevTokens]=useState("");
   const [tokensMembresia,setTokensMembresia]=useState("");
   const [devoluciones,setDevoluciones]=useState("");
@@ -1491,22 +1548,31 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
   const [abonosTurno,setAbonosTurno]=useState(null);   // pagos QR que este cajero verificó en el turno
   const [devBLE,setDevBLE]=useState([]);               // devoluciones de créditos por Bluetooth en el turno (informativo)
-  useEffect(()=>{ if(DEMO_MODE) return; const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
-    db.misDevolucionesBLE(operador,d).then(setDevBLE).catch(()=>setDevBLE([])); },[]);
+  const desdeSesion=()=>(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
+  useEffect(()=>{ if(DEMO_MODE) return; db.misDevolucionesBLE(operador,desdeSesion()).then(setDevBLE).catch(()=>setDevBLE([])); },[]);
   const devB3=devBLE.filter(m=>Number(m.ciclos)===3).length, devB2=devBLE.filter(m=>Number(m.ciclos)===2).length, devB1=devBLE.filter(m=>Number(m.ciclos)===1).length, devBCred=devBLE.reduce((a,m)=>a+(Number(m.ciclos)||0),0);
   const devBTxt=devBLE.length?("Dev. Bluetooth: "+devB3+"×3 + "+devB2+"×2 + "+devB1+"×1 = "+devBCred+" créditos"):"";
   // Protecciones (2026-10-18): cierres vacíos y cierres repetidos
   const [ultimo,setUltimo]=useState(null);        // último cierre de este cajero en esta sede
-  const [baseAuto,setBaseAuto]=useState(false);   // la base se sugirió desde el último cierre
+  const [baseAuto,setBaseAuto]=useState(false);   // la base vino precargada
   const [confirmo,setConfirmo]=useState(false);   // "entiendo y quiero cerrar igual"
   const [modo,setModo]=useState('nuevo');         // 'nuevo' | 'corregir' (reemplaza el último cierre)
   const [corr,setCorr]=useState(null);            // ventas desde el turno original (servidor), cuando se corrige
-  useEffect(()=>{ if(DEMO_MODE) return;
-    db.ultimoCierre(sede,operador).then(u=>{ setUltimo(u);
-      // base sugerida = lo que quedó en el último cierre, si fue hace menos de 20 h
-      if(u && u.tokens_restantes!=null && (Date.now()-new Date(u.created_at))<20*3600*1000){
-        setTokensBase(prev=> prev===""? String(Math.max(0,Number(u.tokens_restantes)||0)) : prev); setBaseAuto(true); }
-    }).catch(()=>{}); },[]);
+  useEffect(()=>{ if(DEMO_MODE) return; db.ultimoCierre(sede,operador).then(setUltimo).catch(()=>{}); },[]);
+  // Ventas del turno: recibos desde la última liquidación, calculados por el servidor
+  useEffect(()=>{ let vivo=true;
+    if(DEMO_MODE){ setSrv({ok:false}); return; }
+    db.ventasParaLiquidar(sede,operador).then(r=>{ if(vivo) setSrv(r&&r.ok?r:{ok:false}); }).catch(()=>{ if(vivo) setSrv({ok:false}); });
+    return ()=>{ vivo=false; }; },[]);
+  const baseSis=(srv&&srv.ok&&srv.base_sugerida!=null)?Math.max(0,Number(srv.base_sugerida)||0):null;   // la base que dice el sistema
+  // Base precargada: del servidor; si no hay conexión, lo que quedó en el último cierre (menos de 20 h)
+  useEffect(()=>{ if(srv===null || tokensBase!=="" || modo!=='nuevo') return;
+    if(baseSis!=null){ setTokensBase(String(baseSis)); setBaseAuto(true); }
+    else if(!srv.ok && ultimo && ultimo.tokens_restantes!=null && (Date.now()-new Date(ultimo.created_at))<20*3600*1000){
+      setTokensBase(String(Math.max(0,Number(ultimo.tokens_restantes)||0))); setBaseAuto(true); }
+  },[srv,ultimo]);
+  const desdeTurno=()=>(srv&&srv.ok&&srv.desde)?srv.desde:desdeSesion();
+  useEffect(()=>{ if(DEMO_MODE||srv===null) return; db.misAbonos(operador,desdeTurno()).then(setAbonosTurno).catch(()=>setAbonosTurno([])); },[srv]);
   // ¿se puede corregir el último cierre? suyo, pendiente, sin ciclo y de hace menos de 1 h
   const corregible=!!(ultimo && ultimo.estado==='pendiente' && !ultimo.ciclo_id && (Date.now()-new Date(ultimo.created_at))<60*60000);
   const elegirModo=async(m)=>{
@@ -1516,66 +1582,81 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
       if(!c||!c.ok){ showToast((c&&c.error)||"No se pudo cargar el cierre anterior","err"); setModo('nuevo'); return; }
       setCorr(c); setBaseAuto(false);
       setTokensBase(String(ultimo.tokens_base!=null?ultimo.tokens_base:""));   // la base del turno original
+      setTokensVendidos(String(ultimo.tokens_vendidos!=null?ultimo.tokens_vendidos:""));
       try{ setAbonosTurno(await db.misAbonos(operador, c.desde)); }catch(e){}
     } else {
       setCorr(null);
-      // de vuelta a "otro cierre": base sugerida = lo que quedó en el anterior, y abonos solo de este turno
-      if(ultimo && ultimo.tokens_restantes!=null){ setTokensBase(String(Math.max(0,Number(ultimo.tokens_restantes)||0))); setBaseAuto(true); }
-      const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
-      try{ setAbonosTurno(await db.misAbonos(operador,d)); }catch(e){}
+      if(baseSis!=null){ setTokensBase(String(baseSis)); setBaseAuto(true); }
+      else if(ultimo && ultimo.tokens_restantes!=null){ setTokensBase(String(Math.max(0,Number(ultimo.tokens_restantes)||0))); setBaseAuto(true); }
+      try{ setAbonosTurno(await db.misAbonos(operador,desdeTurno())); }catch(e){}
     }
   };
-  useEffect(()=>{ if(DEMO_MODE) return;
-    const d=(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
-    db.misAbonos(operador,d).then(setAbonosTurno).catch(()=>setAbonosTurno([])); },[]);
 
   // Auto-llenar "tokens membresía" con los canjes VIP del turno (reporte_turno → tokens_canjeados).
-  // Es una sugerencia: el operador puede ajustarla. No bloquea el cierre si falla.
   useEffect(()=>{
-    if(DEMO_MODE) return;
-    const desde = (turno && turno.created_at) ? new Date(turno.created_at).getTime() : (Date.now()-12*3600*1000);
+    if(DEMO_MODE||srv===null) return;
+    const desde=(srv.ok&&srv.desde)?new Date(srv.desde).getTime():((turno && turno.created_at) ? new Date(turno.created_at).getTime() : (Date.now()-12*3600*1000));
     vipApi({accion:'reporte_turno', operador, sede:vipSedeNombre(sede), fecha_desde:desde})
       .then(r=>{ if(r && r.ok && typeof r.tokens_canjeados==='number' && r.tokens_canjeados>0){
         setTokensMembresia(prev=> prev===""? String(r.tokens_canjeados) : prev); setMemAuto(true);
       }})
       .catch(()=>{});
-  },[]);
+  },[srv]);
 
-  // automáticos desde las ventas del turno
-  // En modo "corregir" los totales vienen del servidor: TODAS las ventas desde el turno original
-  const usaCorr=modo==='corregir' && corr;
-  const nVentas=usaCorr?Number(corr.n)||0:ventas.length;
-  const productosVal=usaCorr?Number(corr.productos)||0:ventas.reduce((s,v)=>s+(v.productos||0),0);  // productos (NO tokens, NO membresías)
-  const tokensVal=usaCorr?Number(corr.tokens)||0:ventas.reduce((s,v)=>s+(v.tokens||0),0);        // solo tokens (fichas)
-  const membresiasVal=usaCorr?Number(corr.membresias)||0:ventas.reduce((s,v)=>s+(v.membresias||0),0); // membresías VIP vendidas
+  // ---- números del turno ----
+  const liqIds=liqIdsGet(sede,operador);
+  const recibos=(srv&&srv.ok)?(srv.recibos||[]).filter(r=>!liqIds.includes(r.id)):null;   // null → se usan las ventas de esta sesión
+  const S=f=>recibos.reduce((a,r)=>a+(Number(f(r))||0),0);
+  const usaCorr=modo==='corregir' && corr;     // "corregir": los totales los da el servidor desde el turno original
+  const cargando=srv===null;
+  const nVentas=usaCorr?Number(corr.n)||0:(recibos?recibos.length:ventas.length);
+  const tokensVal=usaCorr?Number(corr.tokens)||0:(recibos?S(r=>r.tokens):ventas.reduce((s,v)=>s+(v.tokens||0),0));                 // solo tokens (fichas)
+  const membresiasVal=usaCorr?Number(corr.membresias)||0:(recibos?S(r=>r.membresias):ventas.reduce((s,v)=>s+(v.membresias||0),0)); // membresías VIP vendidas
+  const productosVal=usaCorr?Number(corr.productos)||0:(recibos?(S(r=>r.total)-tokensVal-membresiasVal):ventas.reduce((s,v)=>s+(v.productos||0),0));  // productos (NO tokens, NO membresías)
   const valor=productosVal+tokensVal+membresiasVal;                // total
-  const qr=usaCorr?Number(corr.qr)||0:ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0);  // electrónico (QR/transf./tarjeta)
-  const efectivo=usaCorr?Number(corr.efectivo)||0:ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0);  // efectivo cobrado
-  const qrSolo=usaCorr?Number(corr.qr_solo)||0:ventas.reduce((s,v)=>s+(v.pago.qr||0),0);          // solo QR/transferencia (sin tarjeta)
+  const qr=usaCorr?Number(corr.qr)||0:(recibos?S(r=>(Number(r.qr)||0)+(Number(r.tarjeta)||0)):ventas.reduce((s,v)=>s+(v.pago.qr||0)+(v.pago.tarjeta||0),0));  // electrónico (QR/transf./tarjeta)
+  const efectivo=usaCorr?Number(corr.efectivo)||0:(recibos?S(r=>r.efectivo):ventas.reduce((s,v)=>s+(v.pago.efectivo||0),0));  // efectivo cobrado
+  const qrSolo=usaCorr?Number(corr.qr_solo)||0:(recibos?S(r=>r.qr):ventas.reduce((s,v)=>s+(v.pago.qr||0),0));          // solo QR/transferencia (sin tarjeta)
   const qrVerificado=(abonosTurno||[]).reduce((s,a)=>s+Number(a.valor||0),0);
   const qrSinVerificar=Math.max(0,qrSolo-qrVerificado);
+  const qrDeMenos=abonosTurno?Math.max(0,qrVerificado-qrSolo):0;    // verificó pagos QR que NO están en el recibo (típico: lo registró todo en efectivo)
   const dev=Number(devoluciones)||0;
   const efectivoEsperado=efectivo-dev;
-  const tokensRestantes=(Number(tokensBase)||0)-(Number(tokensVendidos)||0)-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
+  // Tokens vendidos: salen del recibo (una sola vez). Solo se digitan si no hay datos del servidor o se corrige un cierre viejo.
+  const tokensUnid=(!usaCorr && recibos)?S(r=>r.tokens_unidades):null;
+  const vendidosAuto=tokensUnid!=null;
+  const vendidosNum=vendidosAuto?tokensUnid:(Number(tokensVendidos)||0);
+  const vendidosOk=vendidosAuto||tokensVendidos!=="";
+  const tokensRestantes=(Number(tokensBase)||0)-vendidosNum-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
+  const baseCambiada=modo==='nuevo' && baseSis!=null && tokensBase!=="" && Number(tokensBase)!==baseSis;
+  const numReciboTurno=recibos?(recibos.length?(recibos[recibos.length-1].numero_recibo||'—'):'—'):(ventas.length?(ventas[ventas.length-1].recibo||'—'):'—');
   const numRecibo = usaCorr ? (corr.ultimo_recibo||numReciboTurno) : numReciboTurno;
   const sinVentas=nVentas===0;
   const haceMin=ultimo?Math.round((Date.now()-new Date(ultimo.created_at))/60000):null;
   const reciente=ultimo && haceMin!=null && haceMin<180;     // cerró hace menos de 3 h
-  const tokensRepetidos=!!(!usaCorr && ultimo && tokensBase!=="" && tokensVendidos!=="" && Number(tokensVendidos)>0 &&
-    Number(tokensBase)===Number(ultimo.tokens_base) && Number(tokensVendidos)===Number(ultimo.tokens_vendidos));
+  const yaLiquidado=!usaCorr && !!recibos && sinVentas && !!reciente;   // liquidó hace poco y no hay ventas nuevas: otro cierre sería repetido
+  const tokensRepetidos=!!(!usaCorr && ultimo && tokensBase!=="" && vendidosOk && vendidosNum>0 &&
+    Number(tokensBase)===Number(ultimo.tokens_base) && vendidosNum===Number(ultimo.tokens_vendidos));
   const hayAlerta=sinVentas||tokensRepetidos;
-  const listo=tokensBase!=="" && tokensVendidos!=="" && (!hayAlerta||confirmo) && !(pendMem>0);
+  const paso1Ok=!cargando && !(pendMem>0) && !yaLiquidado && (!sinVentas||confirmo);
+  const paso2Ok=!(qrDeMenos>0) || confQr;
+  const paso3Ok=tokensBase!=="" && vendidosOk && (!tokensRepetidos||confirmo);
+  const listo=paso1Ok && paso2Ok && paso3Ok && (!hayAlerta||confirmo);
   const horaDe=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
 
   const payload=()=>({
     sede, operador, numRecibo,
-    tokensBase:Number(tokensBase)||0, tokensVendidos:Number(tokensVendidos)||0,
+    tokensBase:Number(tokensBase)||0, tokensVendidos:vendidosNum,
     devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
     valor, valorProductos:productosVal, valorTokens:tokensVal, valorMembresias:membresiasVal,
     qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado,
     // seguimiento por cajero: cuánto del QR registrado quedó respaldado por abonos verificados
     qrVerificado: abonosTurno ? qrVerificado : null, qrSinVerificar: abonosTurno ? qrSinVerificar : null,
-    observaciones:(observaciones||"")+((abonosTurno&&qrSolo>0)?((observaciones?" | ":"")+"QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):"")+(devBTxt?(((observaciones||(abonosTurno&&qrSolo>0))?" | ":"")+devBTxt):""),
+    observaciones:[observaciones||"",
+      (abonosTurno&&qrSolo>0)?("QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):"",
+      (qrDeMenos>0)?("OJO: "+fmt(qrDeMenos)+" verificados por QR que no están en el recibo"):"",
+      baseCambiada?("Base digitada "+(Number(tokensBase)||0)+" (el sistema decía "+baseSis+")"):"",
+      devBTxt].filter(Boolean).join(" | "),
   });
 
   const mensajeWA=()=>{
@@ -1593,7 +1674,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
       'Efectivo: '+fmt(efectivo)+'\n'+
       ((abonosTurno&&qrSolo>0)?('QR verificado: '+fmt(qrVerificado)+' de '+fmt(qrSolo)+(qrSinVerificar>0?(' ⚠ sin verificar '+fmt(qrSinVerificar)):' ✓')+'\n'):'')+
       '———\n'+
-      'Tokens vendidos: '+p.tokensVendidos+' · Dev: '+p.devTokens+' · Membresía: '+p.tokensMembresia+'\n'+
+      'Tokens base: '+p.tokensBase+' · Vendidos: '+p.tokensVendidos+' · Dev: '+p.devTokens+' · Membresía: '+p.tokensMembresia+'\n'+
       'Tokens restantes: '+p.tokensRestantes+'\n'+
       'Devoluciones: '+fmt(dev)+'\n'+
       (devBLE.length?('Devoluciones Bluetooth: '+devB3+' de 3 créditos · '+devB2+' de 2 · '+devB1+' de 1 ('+devBCred+' créditos)\n'):'')+
@@ -1602,14 +1683,17 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   };
   // Registra la liquidación (Supabase + Sheets) y devuelve el resultado. Usado por ambos botones.
   const registrarLiq=async()=>{
+    const ids=(recibos||[]).map(r=>r.id);
     if(usaCorr){
       const r=await db.corregirLiquidacion(ultimo.id, operador, payload());
       if(!r||!r.ok){ showToast((r&&r.error)||"No se pudo corregir el cierre","err"); throw new Error('no-corregido'); }
+      liqIdsAdd(sede,operador,ids);
       if(onPend){ onPend(); setTimeout(onPend,3000); }
       showToast("Cierre corregido ✓ (reemplazó el de las "+horaDe(ultimo.created_at)+")","ok");
       return;
     }
     try{ await db.enviarLiquidacion(payload()); }catch(e){}
+    liqIdsAdd(sede,operador,ids);   // estos recibos ya quedaron liquidados: no se vuelven a enviar
     if(onPend){ onPend(); setTimeout(onPend,3000); }   // refresca el banner ahora y tras el envío en segundo plano
     showToast("Liquidación guardada ✓","ok");
   };
@@ -1628,6 +1712,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
     try{ await registrarLiq(); }catch(e){ setSending(false); return; }   // si la corrección falla, no cierra caja
     onCerrar();   // cierra caja igual — la liquidación no se pierde (queda en cola)
   };
+  const hacerCorreccion=async()=>{ if(corrBusy||!corrR) return; setCorrBusy(true); const ok=await onCorregirRecibo(corrR); setCorrBusy(false); if(!ok) setCorrR(null); };
 
   const tokenInput=(lbl,val,setter,extra)=>(
     <div style={{flex:1}}>
@@ -1636,98 +1721,180 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
     </div>
   );
   const row=(l,v,color,bold)=>(<div className="result-row"><span className="result-label" style={bold?{fontWeight:800,color:"var(--tb)"}:null}>{l}</span><span className="result-value" style={color?{color}:null}>{fmt(v)}</span></div>);
+  const caja=(col,hijos)=>(<div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--"+col+")",background:"var(--"+col+"-d)",fontSize:13,color:col==='red'?"var(--red)":undefined}}>{hijos}</div>);
+  const metodoR=r=>{ const m=[]; if(r.efectivo>0)m.push("Efectivo "+fmt(r.efectivo)); if(r.qr>0)m.push("QR "+fmt(r.qr)); if(r.tarjeta>0)m.push("Tarjeta "+fmt(r.tarjeta)); return m.join(" + ")||"—"; };
+  const PASOS=["Recibo","Pagos","Tokens","Enviar"];
 
   return (
     <div className="sheet-bg" onClick={onClose}>
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
-        <div className="card-t">🧾 Liquidación de turno</div>
-        <div className="header-sub" style={{marginBottom:6}}>{sede} · {operador} · Recibo {numRecibo}</div>
+        <div className="card-t">🧾 Cierre de turno</div>
+        <div className="header-sub">{sede} · {operador} · Recibo {numRecibo}</div>
+        <div style={{display:"flex",gap:6,margin:"10px 0 12px"}}>
+          {PASOS.map((t,i)=>{ const n=i+1, on=paso===n, hecho=paso>n; return (
+            <div key={n} onClick={()=>{ if(n<paso) setPaso(n); }} style={{flex:1,textAlign:"center",padding:"7px 2px",borderRadius:10,fontSize:12,fontWeight:800,cursor:n<paso?"pointer":"default",
+              border:"1px solid "+(on?"var(--blue)":hecho?"var(--green)":"var(--bd)"),background:hecho?"var(--green-d)":"var(--sf2)",color:on?"var(--blue)":hecho?"var(--green)":"var(--td)"}}>{hecho?"✓":n} {t}</div>); })}
+        </div>
 
-        {reciente && (
-          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--amber)",background:"var(--amber-d)",fontSize:13}}>
-            <b>⚠ Ya cerraste caja a las {horaDe(ultimo.created_at)}</b> (hace {haceMin<60?(haceMin+" min"):(Math.round(haceMin/60)+" h")}) con {fmt(ultimo.valor)} vendidos{ultimo.tokens_restantes!=null?(" y te quedaron "+ultimo.tokens_restantes+" tokens"):""}. Si ese cierre ya quedó bien, no hace falta otro.
+        {/* ===================== PASO 1 · RECIBO DEL TURNO ===================== */}
+        {paso===1 && (<div>
+          {reciente && caja('amber',<div>
+            <b>⚠ Ya cerraste caja a las {horaDe(ultimo.created_at)}</b> (hace {haceMin<60?(haceMin+" min"):(Math.round(haceMin/60)+" h")}) con {fmt(ultimo.valor)} vendidos{ultimo.tokens_restantes!=null?(" y te quedaron "+ultimo.tokens_restantes+" tokens"):""}.
             {corregible && (<div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
               <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:700}}><input type="radio" name="modoCierre" checked={modo==='corregir'} onChange={()=>elegirModo('corregir')}/> ✏️ Corregir mi cierre de las {horaDe(ultimo.created_at)} (lo reemplaza)</label>
               <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontWeight:700}}><input type="radio" name="modoCierre" checked={modo==='nuevo'} onChange={()=>elegirModo('nuevo')}/> Es otro cierre distinto</label>
             </div>)}
             {!corregible && ultimo.estado!=='pendiente' && <div style={{marginTop:6,fontSize:12}}>Ese cierre ya lo tomó el recaudo: si está mal, pídele la corrección al administrador.</div>}
           </div>)}
-        {usaCorr && (
-          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--green)",background:"var(--green-d)",fontSize:13}}>
-            <b>✏️ Corrigiendo el cierre de las {horaDe(ultimo.created_at)}</b> · Las ventas de abajo son <b>todas</b> las tuyas en {sede} desde {horaDe(corr.desde)} ({nVentas} ventas). Revisa los tokens y registra: se reemplaza el cierre anterior, no se crea otro.
-          </div>)}
-        {pendMem>0 && (
-          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
-            <b>⛔ Tienes {pendMem} membresía(s) por cobrar en el carrito.</b> Cóbralas en un recibo antes de cerrar caja. Si la recarga no se hizo, pídele al administrador que la descarte.
-          </div>)}
-        {sinVentas && (
-          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
-            <b>⛔ No has registrado ventas en este turno.</b> Si vendiste, toca <b>Seguir vendiendo</b>, registra las ventas y luego cierra. Un cierre en $0 queda en el recaudo como si no hubieras vendido nada.
-          </div>)}
-
-        {/* Desglose automático */}
-        <div className="result-row"><span className="result-label">Nº de ventas</span><span className="result-value">{nVentas}</span></div>
-        {row("Productos", productosVal)}
-        {row("Tokens", tokensVal, "var(--amber)")}
-        {membresiasVal>0 && row("Membresías", membresiasVal, "var(--amber)")}
-        {row("Total vendido", valor, "var(--tb)", true)}
-        {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
-        {row("Efectivo", efectivo, "var(--green)")}
-
-        {/* QR registrado vs pagos que de verdad verificó en "Verificar pago" */}
-        {abonosTurno && (qrSolo>0 || qrVerificado>0) && (
-          <div style={{margin:"10px 0",padding:"10px 12px",borderRadius:12,border:"1px solid "+(qrSinVerificar>0?"var(--red)":"var(--green)"),background:qrSinVerificar>0?"var(--red-d)":"var(--green-d)"}}>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>QR / transferencia registrado</span><b>{fmt(qrSolo)}</b></div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>Pagos QR verificados ({abonosTurno.length})</span><b>{fmt(qrVerificado)}</b></div>
-            {qrSinVerificar>0
-              ? <div style={{marginTop:6,fontWeight:800,color:"var(--red)",fontSize:13}}>⚠ Hay {fmt(qrSinVerificar)} por QR sin verificar. Ábrelos en 💸 Verificar pago antes de cerrar: lo que no aparezca ahí no entró a la cuenta.</div>
-              : <div style={{marginTop:6,fontWeight:800,color:"var(--green)",fontSize:13}}>✓ Todo lo de QR está verificado</div>}
+          {usaCorr && caja('green',<div><b>✏️ Corrigiendo el cierre de las {horaDe(ultimo.created_at)}</b> · Se toman <b>todas</b> tus ventas en {sede} desde {horaDe(corr.desde)} ({nVentas} ventas). Se reemplaza el cierre anterior, no se crea otro.</div>)}
+          {pendMem>0 && caja('red',<div><b>⛔ Tienes {pendMem} membresía(s) por cobrar en el carrito.</b> Cóbralas en un recibo antes de cerrar caja. Si la recarga no se hizo, pídele al administrador que la descarte.</div>)}
+          {cargando && <div className="empty">Buscando tus ventas del turno…</div>}
+          {!cargando && !recibos && !usaCorr && !DEMO_MODE && caja('amber',<div><b>Sin conexión con el sistema.</b> Se usan las ventas registradas en esta sesión. Revisa que el total sea el de todo tu turno.</div>)}
+          {yaLiquidado && caja('red',<div><b>⛔ No tienes ventas nuevas desde tu cierre de las {horaDe(ultimo.created_at)}.</b> No hace falta otra liquidación. {corregible?"Si ese cierre quedó mal, elige arriba \"Corregir mi cierre\".":""}</div>)}
+          {!cargando && sinVentas && !yaLiquidado && !usaCorr && caja('red',<div>
+            <b>⛔ No has registrado el recibo de tu turno.</b> Agrega los tokens y productos que vendiste, cobra, y luego vuelve aquí.
+            <button className="btn-primary" style={{marginTop:10}} onClick={onIrCarrito}>🛒 Ir a registrar el recibo</button>
+            <label style={{display:"flex",alignItems:"center",gap:9,paddingTop:10,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+              <input type="checkbox" checked={confirmo} onChange={e=>setConfirmo(e.target.checked)} style={{width:18,height:18}}/> De verdad no vendí nada y quiero cerrar en $0
+            </label>
           </div>)}
 
-        {/* Tokens (manual) */}
-        <div className="card-t" style={{fontSize:14,marginTop:14}}>🪙 Control de tokens</div>
-        <div style={{display:"flex",gap:10}}>
-          {tokenInput("Base", tokensBase, setTokensBase)}
-          {tokenInput("Vendidos", tokensVendidos, setTokensVendidos)}
-        </div>
-        <div style={{display:"flex",gap:10}}>
-          {tokenInput("Dev. tokens", devTokens, setDevTokens)}
-          {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
-        </div>
-        {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
-        {devBLE.length>0 && <div className="result-row"><span className="result-label">↩️ Devoluciones por Bluetooth</span><span className="result-value">{devB3} de 3 · {devB2} de 2 · {devB1} de 1 <span className="header-sub">({devBCred} créditos)</span></span></div>}
-        {baseAuto && ultimo && <div style={{fontSize:11,color:"var(--amber)",marginBottom:6}}>🪙 Base sugerida: los {ultimo.tokens_restantes} tokens que quedaron en tu último cierre ({horaDe(ultimo.created_at)}). Corrígela si no coincide con lo que recibiste.</div>}
-        {tokensRepetidos && (
-          <div style={{margin:"6px 0",padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)",fontSize:13,color:"var(--red)"}}>
-            <b>⛔ Base {ultimo.tokens_base} y vendidos {ultimo.tokens_vendidos} son los mismos de tu cierre anterior.</b> Si los repites, esos tokens quedan contados dos veces. Revisa: la base de este turno debería ser lo que te quedó ({ultimo.tokens_restantes}).
+          {/* Recibos del turno (del servidor): se pueden corregir antes de liquidar */}
+          {recibos && !usaCorr && recibos.map(r=>{ const exp=abiertoR===r.id; return (
+            <div key={r.id} style={{marginBottom:8,borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)",overflow:"hidden"}}>
+              <div onClick={()=>setAbiertoR(exp?null:r.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px",cursor:"pointer"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:800}}>{r.numero_recibo||"(sin Nº)"} <span className="header-sub" style={{fontWeight:500}}>· {horaDe(r.created_at)}</span></div>
+                  <div className="header-sub">{Number(r.tokens_unidades)||0} tokens · {metodoR(r)}</div>
+                </div>
+                <div style={{textAlign:"right"}}><div style={{fontWeight:800,fontSize:16}}>{fmt(r.total)}</div><div className="header-sub">{exp?"▲":"▼ ver"}</div></div>
+              </div>
+              {exp && (<div style={{padding:"0 13px 12px",borderTop:"1px solid var(--bd)"}}>
+                {(r.items||[]).map((it,i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",fontSize:13}}><span>{Number(it.cantidad)}× {it.nombre}</span><span>{fmt(it.valor)}</span></div>))}
+                {corrR && corrR.id===r.id ? (
+                  <div style={{marginTop:10,padding:12,borderRadius:12,border:"1px solid var(--amber)",background:"var(--sf)"}}>
+                    <div style={{fontWeight:800,marginBottom:4}}>¿Corregir el recibo {r.numero_recibo}?</div>
+                    <div className="header-sub" style={{marginBottom:8}}>Se anula este recibo y todo lo que tenía vuelve al carrito. Cambias lo que esté mal (cantidades o forma de pago) y lo cobras de nuevo. Queda registrado que lo corregiste.</div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={corrBusy} onClick={()=>setCorrR(null)}>No</button>
+                      <button className="btn-primary" style={{flex:1,marginTop:0}} disabled={corrBusy} onClick={hacerCorreccion}>{corrBusy?"Un momento…":"Sí, corregir"}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="btn-secondary" style={{marginTop:10,borderColor:"var(--amber)",color:"var(--amber)"}} onClick={()=>setCorrR(r)}>✏️ Corregir este recibo</button>
+                )}
+              </div>)}
+            </div>); })}
+
+          {!cargando && !sinVentas && (<div style={{marginTop:6}}>
+            <div className="result-row"><span className="result-label">Nº de recibos</span><span className="result-value">{nVentas}</span></div>
+            {row("Productos", productosVal)}
+            {row("Tokens"+(vendidosAuto?(" ("+tokensUnid+" unidades)"):""), tokensVal, "var(--amber)")}
+            {membresiasVal>0 && row("Membresías", membresiasVal, "var(--amber)")}
+            {row("Total vendido", valor, "var(--tb)", true)}
           </div>)}
-        {hayAlerta && (
-          <label style={{display:"flex",alignItems:"center",gap:9,padding:"8px 0",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-            <input type="checkbox" checked={confirmo} onChange={e=>setConfirmo(e.target.checked)} style={{width:18,height:18}}/> Revisé la advertencia y quiero cerrar de todas formas
-          </label>)}
-        <div style={{fontSize:12,color:"var(--amber)",fontWeight:700,marginBottom:10}}>🪙 Tokens restantes: {tokensRestantes}</div>
+          {!cargando && !sinVentas && !usaCorr && recibos && <div className="header-sub" style={{marginTop:6}}>¿Algo está mal? Abre el recibo y toca <b>Corregir</b>. No hace falta pedir anulación mientras no hayas liquidado.</div>}
 
-        {/* Devoluciones + observaciones (manual) */}
-        <label className="label">Devoluciones $</label>
-        <input className="input" type="number" inputMode="numeric" placeholder="$0" value={devoluciones} onChange={e=>setDevoluciones(e.target.value.replace(/[^0-9]/g,""))}/>
-        <label className="label">Observaciones</label>
-        <textarea className="input" style={{minHeight:60,resize:"vertical"}} placeholder="Notas del turno…" value={observaciones} onChange={e=>setObservaciones(e.target.value)}/>
+          <button className="btn-primary" style={{marginTop:14}} disabled={!paso1Ok} onClick={()=>setPaso(2)}>{cargando?"Cargando…":"El recibo está bien · Siguiente →"}</button>
+        </div>)}
 
-        {/* Efectivo esperado */}
-        <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:4}}>
-          <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Efectivo esperado</span>
-          <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>
-        </div>
+        {/* ===================== PASO 2 · PAGOS ===================== */}
+        {paso===2 && (<div>
+          {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
+          {row("Efectivo", efectivo, "var(--green)")}
 
-        {/* Acción principal: registra la liquidación Y la envía por WhatsApp (no se pierde) */}
-        <button className="btn-primary" style={{marginTop:14,background:"#25D366",border:"none"}} disabled={!listo||sending} onClick={registrarYWhatsApp}>
-          {sending?"Registrando…":(listo?"📲 Registrar y enviar por WhatsApp":(hayAlerta&&tokensBase!==""&&tokensVendidos!==""?"Revisa la advertencia para cerrar":"Completa el control de tokens"))}
-        </button>
-        {/* Alternativa: registrar sin enviar WhatsApp */}
-        <button className="btn-secondary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
-          {listo?"Registrar y cerrar caja (sin WhatsApp)":(hayAlerta&&tokensBase!==""&&tokensVendidos!==""?"Revisa la advertencia para cerrar":"Completa el control de tokens")}
-        </button>
+          {/* QR registrado vs pagos que de verdad verificó en "Verificar pago" */}
+          {abonosTurno && (qrSolo>0 || qrVerificado>0) && (
+            <div style={{margin:"10px 0",padding:"10px 12px",borderRadius:12,border:"1px solid "+((qrSinVerificar>0||qrDeMenos>0)?"var(--red)":"var(--green)"),background:(qrSinVerificar>0||qrDeMenos>0)?"var(--red-d)":"var(--green-d)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>QR / transferencia en el recibo</span><b>{fmt(qrSolo)}</b></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}><span>Pagos QR que verificaste ({abonosTurno.length})</span><b>{fmt(qrVerificado)}</b></div>
+              {qrSinVerificar>0 && <div style={{marginTop:6,fontWeight:800,color:"var(--red)",fontSize:13}}>⚠ Hay {fmt(qrSinVerificar)} por QR sin verificar. Ábrelos en 💸 Verificar pago antes de cerrar: lo que no aparezca ahí no entró a la cuenta.</div>}
+              {qrDeMenos>0 && <div style={{marginTop:6,fontWeight:800,color:"var(--red)",fontSize:13}}>⚠ Verificaste {fmt(qrDeMenos)} por QR que NO están en el recibo. Lo más probable es que hayas registrado ese dinero como efectivo.</div>}
+              {qrSinVerificar===0 && qrDeMenos===0 && <div style={{marginTop:6,fontWeight:800,color:"var(--green)",fontSize:13}}>✓ El QR del recibo coincide con lo verificado</div>}
+            </div>)}
+          {qrDeMenos>0 && (<div>
+            {!usaCorr && recibos && <button className="btn-secondary" style={{marginTop:0,borderColor:"var(--amber)",color:"var(--amber)"}} onClick={()=>setPaso(1)}>← Volver y corregir el recibo</button>}
+            <label style={{display:"flex",alignItems:"center",gap:9,padding:"10px 0",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+              <input type="checkbox" checked={confQr} onChange={e=>setConfQr(e.target.checked)} style={{width:18,height:18}}/> Revisé: esos pagos no son de las ventas de este recibo
+            </label>
+          </div>)}
+
+          <label className="label" style={{marginTop:8}}>Devoluciones en plata $ <span className="header-sub" style={{fontWeight:500}}>· efectivo que le devolviste a un cliente</span></label>
+          <input className="input" type="number" inputMode="numeric" placeholder="$0" value={devoluciones} onChange={e=>setDevoluciones(e.target.value.replace(/[^0-9]/g,""))}/>
+          {devBLE.length>0 && <div className="header-sub" style={{marginTop:-4,marginBottom:8}}>↩️ Las devoluciones por Bluetooth ({devBCred} créditos) no van aquí: no son plata.</div>}
+
+          <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:4}}>
+            <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Efectivo que debes entregar</span>
+            <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:14}}>
+            <button className="btn-secondary" style={{flex:1,marginTop:0}} onClick={()=>setPaso(1)}>← Atrás</button>
+            <button className="btn-primary" style={{flex:2,marginTop:0}} disabled={!paso2Ok} onClick={()=>setPaso(3)}>Siguiente →</button>
+          </div>
+        </div>)}
+
+        {/* ===================== PASO 3 · TOKENS ===================== */}
+        {paso===3 && (<div>
+          <div style={{display:"flex",gap:10}}>
+            {tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase)}
+            {vendidosAuto
+              ? <div style={{flex:1}}><label className="label">Vendidos</label>
+                  <div className="input" style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--sf3)",fontWeight:800}}>{tokensUnid}<span className="header-sub" style={{fontWeight:500}}>del recibo</span></div></div>
+              : tokenInput("Vendidos", tokensVendidos, setTokensVendidos)}
+          </div>
+          {baseAuto && baseSis!=null && !baseCambiada && <div style={{fontSize:11,color:"var(--amber)",marginBottom:6}}>🪙 Base precargada: {srv.base_origen==='ciclo'?"los tokens que te dejó el tesorero en el último recaudo":"los tokens que te quedaron en tu último cierre"}. Cámbiala solo si de verdad recibiste otra cantidad.</div>}
+          {baseCambiada && <div style={{fontSize:12,color:"var(--red)",fontWeight:700,marginBottom:6}}>⚠ El sistema dice que tu base es {baseSis}. Si la dejas en {Number(tokensBase)||0} queda anotado en la liquidación para revisión. <span style={{textDecoration:"underline",cursor:"pointer"}} onClick={()=>setTokensBase(String(baseSis))}>Volver a {baseSis}</span></div>}
+          {vendidosAuto && <div style={{fontSize:11,color:"var(--td)",marginBottom:6}}>"Vendidos" sale del recibo del turno, ya no se digita. Si no es el número correcto, vuelve al paso 1 y corrige el recibo.</div>}
+          <div style={{display:"flex",gap:10}}>
+            {tokenInput("Devueltos a clientes", devTokens, setDevTokens)}
+            {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
+          </div>
+          {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
+          {devBLE.length>0 && <div className="result-row"><span className="result-label">↩️ Devoluciones por Bluetooth</span><span className="result-value">{devB3} de 3 · {devB2} de 2 · {devB1} de 1 <span className="header-sub">({devBCred} créditos)</span></span></div>}
+          {tokensRepetidos && caja('red',<div>
+            <b>⛔ Base {ultimo.tokens_base} y vendidos {ultimo.tokens_vendidos} son los mismos de tu cierre anterior.</b> Si los repites, esos tokens quedan contados dos veces. La base de este turno debería ser lo que te quedó ({ultimo.tokens_restantes}).
+            <label style={{display:"flex",alignItems:"center",gap:9,paddingTop:8,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+              <input type="checkbox" checked={confirmo} onChange={e=>setConfirmo(e.target.checked)} style={{width:18,height:18}}/> Revisé la advertencia y quiero cerrar de todas formas
+            </label></div>)}
+          <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:6}}>
+            <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>🪙 Tokens que te deben quedar</span>
+            <span style={{fontWeight:800,fontSize:22,color:tokensRestantes<0?"var(--red)":"var(--amber)"}}>{tokensRestantes}</span>
+          </div>
+          {tokensRestantes<0 && <div style={{fontSize:12,color:"var(--red)",fontWeight:700}}>No puede quedar en negativo: revisa la base o el recibo.</div>}
+          <div style={{display:"flex",gap:8,marginTop:14}}>
+            <button className="btn-secondary" style={{flex:1,marginTop:0}} onClick={()=>setPaso(2)}>← Atrás</button>
+            <button className="btn-primary" style={{flex:2,marginTop:0}} disabled={!paso3Ok} onClick={()=>setPaso(4)}>{paso3Ok?"Siguiente →":"Completa los tokens"}</button>
+          </div>
+        </div>)}
+
+        {/* ===================== PASO 4 · REVISAR Y ENVIAR ===================== */}
+        {paso===4 && (<div>
+          <div style={{padding:"10px 12px",borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)"}}>
+            {row("Total vendido", valor, "var(--tb)", true)}
+            {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
+            {row("Efectivo", efectivo, "var(--green)")}
+            {dev>0 && row("− Devoluciones", dev, "var(--red)")}
+            <div className="result-row"><span className="result-label">Tokens</span><span className="result-value" style={{fontSize:13}}>base {Number(tokensBase)||0} − vendidos {vendidosNum}{(Number(devTokens)||0)>0?(" − dev "+Number(devTokens)):""}{(Number(tokensMembresia)||0)>0?(" − memb "+Number(tokensMembresia)):""} = <b>{tokensRestantes}</b></span></div>
+            <div className="result-row" style={{borderBottom:"none"}}>
+              <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Efectivo que entregas</span>
+              <span style={{fontWeight:800,fontSize:24,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>
+            </div>
+          </div>
+          <label className="label" style={{marginTop:10}}>Observaciones</label>
+          <textarea className="input" style={{minHeight:54,resize:"vertical"}} placeholder="Notas del turno…" value={observaciones} onChange={e=>setObservaciones(e.target.value)}/>
+
+          {/* Acción principal: registra la liquidación Y la envía por WhatsApp (no se pierde) */}
+          <button className="btn-primary" style={{marginTop:10,background:"#25D366",border:"none"}} disabled={!listo||sending} onClick={registrarYWhatsApp}>
+            {sending?"Registrando…":(listo?"📲 Registrar y enviar por WhatsApp":"Revisa los pasos anteriores")}
+          </button>
+          {/* Alternativa: registrar sin enviar WhatsApp */}
+          <button className="btn-secondary" style={{marginTop:10}} disabled={!listo||sending} onClick={registrarYCerrar}>
+            {listo?"Registrar y cerrar caja (sin WhatsApp)":"Revisa los pasos anteriores"}
+          </button>
+          <button className="btn-secondary" style={{marginTop:10}} disabled={sending} onClick={()=>setPaso(3)}>← Atrás</button>
+        </div>)}
+
         <button className="btn-secondary" style={{marginTop:10}} onClick={onClose}>Seguir vendiendo</button>
       </div>
     </div>
@@ -1749,10 +1916,11 @@ function QtyInput({value,onSet}){
     style={{width:54,textAlign:"center",background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--tb)",fontSize:15,fontWeight:800,padding:"6px 2px"}}/>;
 }
 function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDescTicket,onLineDesc,lineFull,lineNet,sede,operador,turno,onClose,onQty,onSetQty,onSplit,onCobrar}){
-  const [paso,setPaso]=useState("carrito"); // carrito | pago
+  const [paso,setPaso]=useState("carrito"); // carrito | pago | confirmar
   const hayDesc = (descuentos||[]).length>0;
   const selStyle={background:"var(--sf2)",border:"1px solid var(--bd)",borderRadius:8,color:"var(--blue)",fontSize:11,fontWeight:600,padding:"2px 4px",marginTop:2};
-  const [metodo,setMetodo]=useState("efectivo"); // efectivo | qr | tarjeta | mixto
+  const [metodo,setMetodo]=useState("");   // "" (sin elegir, 2026-11-12) | efectivo | qr | tarjeta | mixto
+  const [efOk,setEfOk]=useState(false);    // "es correcto: nada de este recibo fue por QR" 
   const [ef,setEf]=useState(""); const [qr,setQr]=useState(""); const [tj,setTj]=useState("");
 
   // ---- SUGERIDO DE QR: lo verificado en "Verificar pago" que todavía no está en ningún recibo ----
@@ -1769,11 +1937,16 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
   },[paso]);
   const sugQr = qrInfo ? Math.min(qrInfo.disponible, total) : 0;      // lo que cabe en este recibo
   const usarSugeridoMixto=()=>{ setMetodo("mixto"); setQr(sugQr?String(sugQr):""); setEf(String(Math.max(0,total-sugQr))); setTj(""); };
-  const elegirMetodo=k=>{ setMetodo(k);
+  const elegirMetodo=k=>{ setMetodo(k); setEfOk(false);
     // al entrar a mixto con los campos vacíos, se propone el QR verificado y el resto en efectivo
     if(k==="mixto" && qrInfo && ef==="" && qr==="" && tj===""){ setQr(sugQr?String(sugQr):""); setEf(String(Math.max(0,total-sugQr))); } };
 
+  // (2026-11-12) sin método por defecto: si hay pagos QR verificados sin registrar, se propone el reparto correcto
+  useEffect(()=>{ if(paso!=="pago" || !qrInfo || metodo!=="") return;
+    if(qrInfo.disponible>0){ if(qrInfo.disponible>=total) setMetodo("qr"); else usarSugeridoMixto(); } },[qrInfo,paso]);
+
   const pago = ()=>{
+    if(metodo==="") return {efectivo:0,qr:0,tarjeta:0};
     if(metodo==="efectivo") return {efectivo:total,qr:0,tarjeta:0};
     if(metodo==="qr") return {efectivo:0,qr:total,tarjeta:0};
     if(metodo==="tarjeta") return {efectivo:0,qr:0,tarjeta:total};
@@ -1782,6 +1955,13 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
   const p=pago();
   const sumaMixto=p.efectivo+p.qr+p.tarjeta;
   const mixtoOk = metodo!=="mixto" || sumaMixto===total;
+  const qrPend = qrInfo ? qrInfo.disponible : 0;
+  const avisoEf = metodo!=="" && qrPend>0 && p.qr===0;          // tiene pagos QR verificados y este recibo no lleva nada por QR
+  const puedeSeguir = metodo!=="" && mixtoOk && (!avisoEf || efOk);
+  const esMem = c => /^MEMBRESIA/i.test((c.nombre||'').trim());
+  const nTok = cart.filter(c=>c.tipo==="token" && !esMem(c)).reduce((a,c)=>a+c.cantidad,0);
+  const nMem = cart.filter(esMem).reduce((a,c)=>a+c.cantidad,0);
+  const nOtros = cart.filter(c=>c.tipo!=="token").reduce((a,c)=>a+c.cantidad,0);
 
   return (
     <div className="sheet-bg" onClick={onClose}>
@@ -1901,11 +2081,40 @@ function CartSheet({cart,total,bruto,descTotal,busy,descuentos,descTicket,setDes
               <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>A cobrar</span>
               <span style={{fontWeight:800,fontSize:22,color:"var(--green)"}}>{fmt(total)}</span>
             </div>
-            <button className="btn-primary" style={{marginTop:14}} disabled={busy||!mixtoOk}
-              onClick={()=>onCobrar(p)}>
-              {busy?"Registrando...":"✅ Confirmar venta"}
+            {avisoEf && (
+              <div style={{marginTop:10,padding:"10px 12px",borderRadius:12,border:"1px solid var(--red)",background:"var(--red-d)"}}>
+                <div style={{fontSize:13,fontWeight:800,color:"var(--red)"}}>⚠ Tienes {fmt(qrPend)} en pagos QR verificados y este recibo va sin nada por QR.</div>
+                <button className="btn-secondary" style={{marginTop:8,padding:"9px",borderColor:"var(--green)",color:"var(--green)"}} onClick={usarSugeridoMixto}>Usar: {fmt(sugQr)} QR{total-sugQr>0?(" + "+fmt(total-sugQr)+" efectivo"):""}</button>
+                <label style={{display:"flex",alignItems:"center",gap:9,paddingTop:10,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  <input type="checkbox" checked={efOk} onChange={e=>setEfOk(e.target.checked)} style={{width:18,height:18}}/> Es correcto: nada de este recibo fue por QR
+                </label>
+              </div>)}
+            <button className="btn-primary" style={{marginTop:14}} disabled={busy||!puedeSeguir}
+              onClick={()=>setPaso("confirmar")}>
+              {metodo===""?"Elige cómo te pagaron":(!mixtoOk?"La suma no da el total":"Revisar y confirmar →")}
             </button>
             <button className="btn-secondary" style={{marginTop:10}} onClick={()=>setPaso("carrito")}>← Volver al carrito</button>
+          </div>
+        )}
+        {paso==="confirmar" && (
+          <div>
+            <div className="card-t">✅ Revisa antes de registrar</div>
+            <div className="header-sub" style={{marginBottom:10}}>Este recibo es el que se va a liquidar. Si algo no cuadra, corrígelo ahora.</div>
+            <div style={{padding:"10px 12px",borderRadius:12,border:"1px solid var(--bd)",background:"var(--sf2)"}}>
+              {nTok>0 && <div className="result-row"><span className="result-label">Tokens</span><span className="result-value">{nTok}</span></div>}
+              {nMem>0 && <div className="result-row"><span className="result-label">Membresías</span><span className="result-value">{nMem}</span></div>}
+              {nOtros>0 && <div className="result-row"><span className="result-label">Productos y otros</span><span className="result-value">{nOtros} unidad(es)</span></div>}
+              {descTotal>0 && <div className="result-row"><span className="result-label">Descuentos</span><span className="result-value" style={{color:"var(--red)"}}>-{fmt(descTotal)}</span></div>}
+              <div className="result-row" style={{borderBottom:"none"}}><span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Total</span><span style={{fontWeight:800,fontSize:22,color:"var(--tb)"}}>{fmt(total)}</span></div>
+            </div>
+            <div style={{marginTop:10,padding:"10px 12px",borderRadius:12,border:"2px solid var(--green)",background:"var(--green-d)"}}>
+              <div style={{fontSize:12,fontWeight:800,marginBottom:4}}>CÓMO TE PAGARON</div>
+              {p.efectivo>0 && <div style={{display:"flex",justifyContent:"space-between",fontSize:18,fontWeight:800,padding:"3px 0"}}><span>💵 Efectivo</span><span>{fmt(p.efectivo)}</span></div>}
+              {p.qr>0 && <div style={{display:"flex",justifyContent:"space-between",fontSize:18,fontWeight:800,padding:"3px 0"}}><span>📲 QR / Transf.</span><span>{fmt(p.qr)}</span></div>}
+              {p.tarjeta>0 && <div style={{display:"flex",justifyContent:"space-between",fontSize:18,fontWeight:800,padding:"3px 0"}}><span>💳 Tarjeta</span><span>{fmt(p.tarjeta)}</span></div>}
+            </div>
+            <button className="btn-primary" style={{marginTop:14}} disabled={busy} onClick={()=>onCobrar(p)}>{busy?"Registrando...":"✅ Sí, registrar la venta"}</button>
+            <button className="btn-secondary" style={{marginTop:10}} disabled={busy} onClick={()=>setPaso("pago")}>← Corregir</button>
           </div>
         )}
       </div>
@@ -2885,7 +3094,12 @@ function CeldaSheet({sede,operador,onClose}){
   );
 }
 
-function RecibosSheet({sede,operador,onClose}){
+function RecibosSheet({sede,operador,onClose,onCorregir}){
+  const [ultLiq,setUltLiq]=useState(undefined);   // última liquidación del cajero (undefined = cargando)
+  const [confCorr,setConfCorr]=useState(null);    // id del recibo que pide confirmación para corregir
+  useEffect(()=>{ if(DEMO_MODE){ setUltLiq(null); return; } db.ultimoCierre(sede,operador).then(u=>setUltLiq(u||null)).catch(()=>setUltLiq(null)); },[]);
+  // se puede corregir sin pedir anulación: recibo propio, de este turno y posterior a la última liquidación
+  const sinLiquidar=r=>!!onCorregir && ultLiq!==undefined && !r.anulada && (Date.now()-new Date(r.created_at))<20*3600*1000 && (!ultLiq || new Date(r.created_at)>new Date(ultLiq.created_at));
   const [recibos,setRecibos]=useState(null);
   const [abierto,setAbierto]=useState(null); // id del recibo expandido
   const [sols,setSols]=useState({});          // venta_id -> última solicitud de anulación
@@ -2925,7 +3139,7 @@ function RecibosSheet({sede,operador,onClose}){
       <div className="sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-handle"/>
         <div className="card-t">🧾 Mis últimos recibos</div>
-        <div className="header-sub" style={{marginBottom:10}}>{operador} · {sede} · ¿te equivocaste en uno? Ábrelo y pide la anulación.</div>
+        <div className="header-sub" style={{marginBottom:10}}>{operador} · {sede} · ¿te equivocaste en uno? Si aún no has liquidado, ábrelo y corrígelo tú mismo. Si ya liquidaste, pide la anulación.</div>
         {msg && <div style={{marginBottom:10,padding:"9px 12px",borderRadius:10,fontSize:13,fontWeight:700,
           background:msg.tipo==='ok'?"var(--green-d)":"var(--red-d)",color:msg.tipo==='ok'?"var(--green)":"var(--red)"}}>{msg.txt}</div>}
 
@@ -2961,6 +3175,17 @@ function RecibosSheet({sede,operador,onClose}){
                   <b>⏳ Anulación solicitada.</b> Administración la está revisando.<div style={{opacity:.85,marginTop:3}}>Motivo: {sol.motivo}</div></div>}
                 {rech && <div style={{marginTop:10,padding:"9px 11px",borderRadius:10,background:"var(--sf3)",fontSize:12.5}}>
                   <b>Solicitud rechazada.</b>{sol.respuesta?(" "+sol.respuesta):" El recibo sigue activo."}</div>}
+                {sinLiquidar(r) && !pend && pidiendo!==r.id && (confCorr===r.id ? (
+                  <div style={{marginTop:10,padding:12,borderRadius:12,border:"1px solid var(--amber)",background:"var(--sf)"}}>
+                    <div style={{fontWeight:800,marginBottom:4}}>¿Corregir el recibo {r.numero_recibo}?</div>
+                    <div className="header-sub" style={{marginBottom:8}}>Se anula y todo lo que tenía vuelve al carrito para que lo cobres bien. Queda registrado que lo corregiste.</div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button className="btn-secondary" style={{flex:1,marginTop:0}} disabled={busy} onClick={()=>setConfCorr(null)}>No</button>
+                      <button className="btn-primary" style={{flex:1,marginTop:0}} disabled={busy} onClick={async()=>{ setBusy(true); const ok=await onCorregir(r); setBusy(false); if(!ok){ setConfCorr(null); cargar(); } }}>{busy?"Un momento…":"Sí, corregir"}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="btn-secondary" style={{marginTop:10,borderColor:"var(--amber)",color:"var(--amber)"}} onClick={()=>{ setConfCorr(r.id); setMsg(null); }}>✏️ Corregir este recibo (aún no lo has liquidado)</button>))}
                 {!r.anulada && !pend && pidiendo!==r.id && (
                   <button className="btn-secondary" style={{marginTop:10,borderColor:"var(--red)",color:"var(--red)"}}
                     onClick={()=>{ setPidiendo(r.id); setMotivo(""); setMsg(null); }}>⚠ Solicitar anulación de este recibo</button>)}

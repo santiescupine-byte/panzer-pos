@@ -1661,6 +1661,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
       (qrDeMenos>0)?("OJO: "+fmt(qrDeMenos)+" verificados por QR que no están en el recibo"):"",
       baseCambiada?("Base digitada "+(Number(tokensBase)||0)+" (el sistema decía "+baseSis+")"):"",
       (!memAuto && memNum>0)?("Membresía digitada a mano: "+memNum+" (no se pudo consultar el sistema VIP)"):"",
+      (tokensRestantes<0)?("Tokens en negativo: "+tokensRestantes):"",
       devBTxt].filter(Boolean).join(" | "),
   });
 
@@ -1842,7 +1843,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
         {/* ===================== PASO 3 · TOKENS ===================== */}
         {paso===3 && (<div>
           <div style={{display:"flex",gap:10}}>
-            {tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase)}
+            {tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase, tokensBase===""?{borderColor:"var(--red)"}:undefined)}
             {vendidosAuto
               ? <div style={{flex:1}}><label className="label">Vendidos</label>
                   <div className="input" style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--sf3)",fontWeight:800}}>{tokensUnid}<span className="header-sub" style={{fontWeight:500}}>del recibo</span></div></div>
@@ -1871,12 +1872,13 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
             </label></div>)}
           <div className="result-row" style={{borderTop:"1px solid var(--bd)",marginTop:6}}>
             <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>🪙 Tokens que te deben quedar</span>
-            <span style={{fontWeight:800,fontSize:22,color:tokensRestantes<0?"var(--red)":"var(--amber)"}}>{tokensRestantes}</span>
+            <span style={{fontWeight:800,fontSize:22,color:"var(--amber)"}}>{tokensBase===""?"—":tokensRestantes}</span>
           </div>
-          {tokensRestantes<0 && <div style={{fontSize:12,color:"var(--red)",fontWeight:700}}>No puede quedar en negativo: revisa la base o el recibo.</div>}
+          {tokensBase==="" && <div style={{fontSize:12,color:"var(--red)",fontWeight:700}}>Falta la base: escribe con cuántos tokens empezaste el turno. Si empezaste sin tokens, escribe 0.</div>}
+          {tokensBase!=="" && tokensRestantes<0 && <div style={{fontSize:12,color:"var(--amber)",fontWeight:700}}>Quedas en {tokensRestantes}: vendiste más tokens de los que tenías en la base. Puedes registrar así; queda anotado en la liquidación.</div>}
           <div style={{display:"flex",gap:8,marginTop:14}}>
             <button className="btn-secondary" style={{flex:1,marginTop:0}} onClick={()=>setPaso(2)}>← Atrás</button>
-            <button className="btn-primary" style={{flex:2,marginTop:0}} disabled={!paso3Ok} onClick={()=>setPaso(4)}>{paso3Ok?"Siguiente →":"Completa los tokens"}</button>
+            <button className="btn-primary" style={{flex:2,marginTop:0}} disabled={!paso3Ok} onClick={()=>setPaso(4)}>{paso3Ok?"Siguiente →":(tokensBase===""?"Escribe la base de tokens":(!vendidosOk?"Escribe los tokens vendidos":(memSis===null?"Consultando membresías…":"Revisa la advertencia")))}</button>
           </div>
         </div>)}
 

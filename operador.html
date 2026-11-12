@@ -1662,6 +1662,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     qrDeMenos > 0 ? "OJO: " + fmt(qrDeMenos) + " verificados por QR que no están en el recibo" : "",
     baseCambiada ? "Base digitada " + (Number(tokensBase) || 0) + " (el sistema decía " + baseSis + ")" : "",
     !memAuto && memNum > 0 ? "Membresía digitada a mano: " + memNum + " (no se pudo consultar el sistema VIP)" : "",
+    tokensRestantes < 0 ? "Tokens en negativo: " + tokensRestantes : "",
     devBTxt].filter(Boolean).join(" | ")
   });
 
@@ -1843,7 +1844,7 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
 
     paso === 3 && React.createElement("div", null,
     React.createElement("div", { style: { display: "flex", gap: 10 } },
-    tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase),
+    tokenInput("Base (con cuántos empezaste)", tokensBase, setTokensBase, tokensBase === "" ? { borderColor: "var(--red)" } : undefined),
     vendidosAuto ?
     React.createElement("div", { style: { flex: 1 } }, React.createElement("label", { className: "label" }, "Vendidos"),
     React.createElement("div", { className: "input", style: { display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--sf3)", fontWeight: 800 } }, tokensUnid, React.createElement("span", { className: "header-sub", style: { fontWeight: 500 } }, "del recibo"))) :
@@ -1872,12 +1873,13 @@ function CierreSheet({ ventas, sede, operador, turno, showToast, onClose, onCerr
     ))),
     React.createElement("div", { className: "result-row", style: { borderTop: "1px solid var(--bd)", marginTop: 6 } },
     React.createElement("span", { className: "result-label", style: { fontWeight: 800, fontSize: 15, color: "var(--tb)" } }, "\uD83E\uDE99 Tokens que te deben quedar"),
-    React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: tokensRestantes < 0 ? "var(--red)" : "var(--amber)" } }, tokensRestantes)
+    React.createElement("span", { style: { fontWeight: 800, fontSize: 22, color: "var(--amber)" } }, tokensBase === "" ? "—" : tokensRestantes)
     ),
-    tokensRestantes < 0 && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", fontWeight: 700 } }, "No puede quedar en negativo: revisa la base o el recibo."),
+    tokensBase === "" && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", fontWeight: 700 } }, "Falta la base: escribe con cu\xE1ntos tokens empezaste el turno. Si empezaste sin tokens, escribe 0."),
+    tokensBase !== "" && tokensRestantes < 0 && React.createElement("div", { style: { fontSize: 12, color: "var(--amber)", fontWeight: 700 } }, "Quedas en ", tokensRestantes, ": vendiste m\xE1s tokens de los que ten\xEDas en la base. Puedes registrar as\xED; queda anotado en la liquidaci\xF3n."),
     React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
     React.createElement("button", { className: "btn-secondary", style: { flex: 1, marginTop: 0 }, onClick: () => setPaso(2) }, "\u2190 Atr\xE1s"),
-    React.createElement("button", { className: "btn-primary", style: { flex: 2, marginTop: 0 }, disabled: !paso3Ok, onClick: () => setPaso(4) }, paso3Ok ? "Siguiente →" : "Completa los tokens")
+    React.createElement("button", { className: "btn-primary", style: { flex: 2, marginTop: 0 }, disabled: !paso3Ok, onClick: () => setPaso(4) }, paso3Ok ? "Siguiente →" : tokensBase === "" ? "Escribe la base de tokens" : !vendidosOk ? "Escribe los tokens vendidos" : memSis === null ? "Consultando membresías…" : "Revisa la advertencia")
     )
     ),
 

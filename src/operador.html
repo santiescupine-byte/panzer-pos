@@ -1545,7 +1545,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   const [devoluciones,setDevoluciones]=useState("");
   const [observaciones,setObservaciones]=useState("");
   const [sending,setSending]=useState(false);
-  const [memAuto,setMemAuto]=useState(false);   // tokens membresía traídos del módulo VIP
+  const [memSis,setMemSis]=useState(null);      // canjes VIP del turno según el sistema: null = consultando · número · 'err' = no se pudo consultar
   const [abonosTurno,setAbonosTurno]=useState(null);   // pagos QR que este cajero verificó en el turno
   const [devBLE,setDevBLE]=useState([]);               // devoluciones de créditos por Bluetooth en el turno (informativo)
   const desdeSesion=()=>(turno&&turno.created_at)?turno.created_at:new Date(Date.now()-14*3600*1000).toISOString();
@@ -1592,16 +1592,18 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
     }
   };
 
-  // Auto-llenar "tokens membresía" con los canjes VIP del turno (reporte_turno → tokens_canjeados).
+  // Tokens de membresía = canjes VIP que el sistema registró en el turno (reporte_turno → tokens_canjeados). NO se digitan.
   useEffect(()=>{
-    if(DEMO_MODE||srv===null) return;
-    const desde=(srv.ok&&srv.desde)?new Date(srv.desde).getTime():((turno && turno.created_at) ? new Date(turno.created_at).getTime() : (Date.now()-12*3600*1000));
+    if(srv===null) return;
+    if(DEMO_MODE){ setMemSis('err'); return; }
+    let vivo=true; setMemSis(null);
+    const desde=(modo==='corregir'&&corr&&corr.desde)?new Date(corr.desde).getTime()
+      :((srv.ok&&srv.desde)?new Date(srv.desde).getTime():((turno && turno.created_at) ? new Date(turno.created_at).getTime() : (Date.now()-12*3600*1000)));
     vipApi({accion:'reporte_turno', operador, sede:vipSedeNombre(sede), fecha_desde:desde})
-      .then(r=>{ if(r && r.ok && typeof r.tokens_canjeados==='number' && r.tokens_canjeados>0){
-        setTokensMembresia(prev=> prev===""? String(r.tokens_canjeados) : prev); setMemAuto(true);
-      }})
-      .catch(()=>{});
-  },[srv]);
+      .then(r=>{ if(!vivo) return; if(r && r.ok && typeof r.tokens_canjeados==='number') setMemSis(r.tokens_canjeados); else setMemSis('err'); })
+      .catch(()=>{ if(vivo) setMemSis('err'); });
+    return ()=>{ vivo=false; };
+  },[srv,corr]);
 
   // ---- números del turno ----
   const liqIds=liqIdsGet(sede,operador);
@@ -1627,7 +1629,9 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   const vendidosAuto=tokensUnid!=null;
   const vendidosNum=vendidosAuto?tokensUnid:(Number(tokensVendidos)||0);
   const vendidosOk=vendidosAuto||tokensVendidos!=="";
-  const tokensRestantes=(Number(tokensBase)||0)-vendidosNum-(Number(devTokens)||0)-(Number(tokensMembresia)||0);
+  const memAuto=typeof memSis==='number';                           // el número viene del sistema VIP: no se puede cambiar
+  const memNum=memAuto?memSis:(Number(tokensMembresia)||0);
+  const tokensRestantes=(Number(tokensBase)||0)-vendidosNum-(Number(devTokens)||0)-memNum;
   const baseCambiada=modo==='nuevo' && baseSis!=null && tokensBase!=="" && Number(tokensBase)!==baseSis;
   const numReciboTurno=recibos?(recibos.length?(recibos[recibos.length-1].numero_recibo||'—'):'—'):(ventas.length?(ventas[ventas.length-1].recibo||'—'):'—');
   const numRecibo = usaCorr ? (corr.ultimo_recibo||numReciboTurno) : numReciboTurno;
@@ -1640,14 +1644,14 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
   const hayAlerta=sinVentas||tokensRepetidos;
   const paso1Ok=!cargando && !(pendMem>0) && !yaLiquidado && (!sinVentas||confirmo);
   const paso2Ok=!(qrDeMenos>0) || confQr;
-  const paso3Ok=tokensBase!=="" && vendidosOk && (!tokensRepetidos||confirmo);
+  const paso3Ok=tokensBase!=="" && vendidosOk && memSis!==null && (!tokensRepetidos||confirmo);
   const listo=paso1Ok && paso2Ok && paso3Ok && (!hayAlerta||confirmo);
   const horaDe=iso=>new Date(iso).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
 
   const payload=()=>({
     sede, operador, numRecibo,
     tokensBase:Number(tokensBase)||0, tokensVendidos:vendidosNum,
-    devTokens:Number(devTokens)||0, tokensMembresia:Number(tokensMembresia)||0, tokensRestantes,
+    devTokens:Number(devTokens)||0, tokensMembresia:memNum, tokensRestantes,
     valor, valorProductos:productosVal, valorTokens:tokensVal, valorMembresias:membresiasVal,
     qr, efectivoVentas:efectivo, devoluciones:dev, efectivo:efectivoEsperado,
     // seguimiento por cajero: cuánto del QR registrado quedó respaldado por abonos verificados
@@ -1656,6 +1660,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
       (abonosTurno&&qrSolo>0)?("QR verificado "+fmt(qrVerificado)+" de "+fmt(qrSolo)+(qrSinVerificar>0?(" — SIN VERIFICAR "+fmt(qrSinVerificar)):" ✓")):"",
       (qrDeMenos>0)?("OJO: "+fmt(qrDeMenos)+" verificados por QR que no están en el recibo"):"",
       baseCambiada?("Base digitada "+(Number(tokensBase)||0)+" (el sistema decía "+baseSis+")"):"",
+      (!memAuto && memNum>0)?("Membresía digitada a mano: "+memNum+" (no se pudo consultar el sistema VIP)"):"",
       devBTxt].filter(Boolean).join(" | "),
   });
 
@@ -1848,9 +1853,16 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
           {vendidosAuto && <div style={{fontSize:11,color:"var(--td)",marginBottom:6}}>"Vendidos" sale del recibo del turno, ya no se digita. Si no es el número correcto, vuelve al paso 1 y corrige el recibo.</div>}
           <div style={{display:"flex",gap:10}}>
             {tokenInput("Devueltos a clientes", devTokens, setDevTokens)}
-            {tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--purple)"})}
+            {memAuto
+              ? <div style={{flex:1}}><label className="label">Membresía</label>
+                  <div className="input" style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--sf3)",fontWeight:800,borderColor:"var(--purple)"}}>{memSis}<span className="header-sub" style={{fontWeight:500}}>canjes VIP</span></div></div>
+              : memSis===null
+                ? <div style={{flex:1}}><label className="label">Membresía</label>
+                    <div className="input" style={{background:"var(--sf3)",color:"var(--td)"}}>consultando…</div></div>
+                : tokenInput("Membresía", tokensMembresia, setTokensMembresia, {borderColor:"var(--red)"})}
           </div>
-          {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" se trajo automático de los canjes VIP del turno. Puedes ajustarlo.</div>}
+          {memAuto && <div style={{fontSize:11,color:"var(--purple)",marginBottom:6}}>💳 "Membresía" son los tokens que tus clientes VIP canjearon en este turno. Sale del sistema, ya no se digita.</div>}
+          {memSis==='err' && !DEMO_MODE && <div style={{fontSize:12,color:"var(--red)",fontWeight:700,marginBottom:6}}>⚠ No se pudo consultar los canjes VIP. Digita los tokens de membresía; queda marcado en la liquidación para revisión.</div>}
           {devBLE.length>0 && <div className="result-row"><span className="result-label">↩️ Devoluciones por Bluetooth</span><span className="result-value">{devB3} de 3 · {devB2} de 2 · {devB1} de 1 <span className="header-sub">({devBCred} créditos)</span></span></div>}
           {tokensRepetidos && caja('red',<div>
             <b>⛔ Base {ultimo.tokens_base} y vendidos {ultimo.tokens_vendidos} son los mismos de tu cierre anterior.</b> Si los repites, esos tokens quedan contados dos veces. La base de este turno debería ser lo que te quedó ({ultimo.tokens_restantes}).
@@ -1875,7 +1887,7 @@ function CierreSheet({ventas,sede,operador,turno,showToast,onClose,onCerrar,onPe
             {row("QR / Transferencia / Tarjeta", qr, "var(--blue)")}
             {row("Efectivo", efectivo, "var(--green)")}
             {dev>0 && row("− Devoluciones", dev, "var(--red)")}
-            <div className="result-row"><span className="result-label">Tokens</span><span className="result-value" style={{fontSize:13}}>base {Number(tokensBase)||0} − vendidos {vendidosNum}{(Number(devTokens)||0)>0?(" − dev "+Number(devTokens)):""}{(Number(tokensMembresia)||0)>0?(" − memb "+Number(tokensMembresia)):""} = <b>{tokensRestantes}</b></span></div>
+            <div className="result-row"><span className="result-label">Tokens</span><span className="result-value" style={{fontSize:13}}>base {Number(tokensBase)||0} − vendidos {vendidosNum}{(Number(devTokens)||0)>0?(" − dev "+Number(devTokens)):""}{memNum>0?(" − memb "+memNum):""} = <b>{tokensRestantes}</b></span></div>
             <div className="result-row" style={{borderBottom:"none"}}>
               <span className="result-label" style={{fontWeight:800,fontSize:15,color:"var(--tb)"}}>Efectivo que entregas</span>
               <span style={{fontWeight:800,fontSize:24,color:"var(--green)"}}>{fmt(efectivoEsperado)}</span>

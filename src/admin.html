@@ -9235,7 +9235,9 @@ function DevolucionesBLE({showToast}){
   const rMaq=agrupa(porMaq), rOp=agrupa(porOp);
   const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
   const pendientes=delRango.filter(r=>r.estado!=='aplicado').length;
-  const fechaCorta=d=>{ const p=String(d).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; };
+  const MESES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const fechaLarga=(d,conAnio)=>{ const p=String(d).split('-'); return Number(p[2])+' de '+MESES[Number(p[1])-1]+(conAnio?(' de '+p[0]):''); };
+  const diasRango=rangoOk?Math.round((new Date(hasta+'T00:00:00').getTime()-new Date(desde+'T00:00:00').getTime())/86400000)+1:0;
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
@@ -9244,7 +9246,7 @@ function DevolucionesBLE({showToast}){
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
         <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
-        <div style={{display:"flex",gap:4,alignSelf:"flex-end"}}>{[['7','7 días'],['30','30 días'],['90','90 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
+        <div style={{display:"flex",gap:4,alignSelf:"flex-end"}}>{[['hoy','Hoy'],['7','7 días'],['30','30 días'],['90','90 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
         <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={eSede} onChange={e=>cambiaSede(e.target.value)}><option value="">Todas</option>{sedes.map(x=><option key={x} value={x}>{x+" ("+(nSede[x]||0)+")"}</option>)}</select></div>
         <div className="fld"><label className="label">Máquina</label><select className="select" style={{margin:0}} value={eMaq} onChange={e=>setFMaq(e.target.value)}><option value="">{eSede?("Todas las de "+eSede):"Todas"}</option>{maqs.map(x=><option key={x} value={x}>{x+" ("+(nMaq[x]||0)+")"}</option>)}</select></div>
         <div className="fld"><label className="label">Operador</label><select className="select" style={{margin:0}} value={eOp} onChange={e=>setFOp(e.target.value)}><option value="">{eSede?("Todos los de "+eSede):"Todos"}</option>{ops.map(x=><option key={x} value={x}>{x+" ("+(nOp[x]||0)+")"}</option>)}</select></div>
@@ -9258,7 +9260,7 @@ function DevolucionesBLE({showToast}){
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Máquinas con devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{rMaq.length}</div><div className="muted" style={{fontSize:11}}>{rMaq[0]?("la que más: "+rMaq[0].k+" ("+rMaq[0].n+")"):"—"}</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Operadores que devuelven</div><div style={{fontSize:22,fontWeight:800}}>{rOp.length}</div><div className="muted" style={{fontSize:11}}>{rOp[0]?("el que más: "+rOp[0].k+" ("+rOp[0].n+")"):"—"}</div></div>
       </div>
-      {rangoOk && <div className="muted" style={{fontSize:12,marginBottom:8}}>Mostrando devoluciones del <b>{fechaCorta(desde)}</b> al <b>{fechaCorta(hasta)}</b>{cargando?" · actualizando…":""}</div>}
+      {rangoOk && <div style={{fontSize:13,marginBottom:8}}>📅 Mostrando {desde===hasta?<span>solo el <b>{fechaLarga(desde,true)}</b></span>:<span>del <b>{fechaLarga(desde,desde.slice(0,4)!==hasta.slice(0,4))}</b> al <b>{fechaLarga(hasta,true)}</b></span>} <span className="muted">· {diasRango===1?"1 día":(diasRango+" días")}{cargando?" · actualizando…":""}</span></div>}
       {pendientes>0 && <div className="muted" style={{fontSize:11,marginBottom:8}}>{pendientes} intento(s) que la máquina no confirmó (no se cuentan).</div>}
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
         {[['maquinas','🔧 Máquina que más falla'],['operadores','👤 Operador que más devuelve'],['detalle','📋 Detalle']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}

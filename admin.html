@@ -1682,9 +1682,13 @@ const db = {
 
   async listDevolucionesBLE(desdeISO, hastaISO) {
     if (DEMO_MODE) return [];
-    const { data, error } = await sb.from('lavados_celda').select('*').eq('tipo', 'devolucion').
-    gte('creado_en', desdeISO).lte('creado_en', hastaISO).order('creado_en', { ascending: false }).limit(5000);
-    if (error) throw error;return data || [];
+    const todo = [];
+    for (let i = 0; i < 20; i++) {
+      const { data, error } = await sb.from('lavados_celda').select('*').eq('tipo', 'devolucion').
+      gte('creado_en', desdeISO).lte('creado_en', hastaISO).order('creado_en', { ascending: false }).order('id', { ascending: false }).range(i * 1000, i * 1000 + 999);
+      if (error) throw error;todo.push(...(data || []));if (!data || data.length < 1000) break;
+    }
+    return todo;
   },
   async listMaquinasCelda() {
     if (DEMO_MODE) return [];
@@ -9188,35 +9192,66 @@ function DevolucionesBLE({ showToast }) {
   const [fSede, setFSede] = useState('');const [fMaq, setFMaq] = useState('');const [fOp, setFOp] = useState('');const [fCred, setFCred] = useState('');
   const [vista, setVista] = useState('maquinas');
   const preset = (k) => {const h = new Date();const d = new Date();if (k === '7') d.setDate(d.getDate() - 6);else if (k === '30') d.setDate(d.getDate() - 29);else if (k === '90') d.setDate(d.getDate() - 89);else if (k === 'mes') d.setDate(1);setDesde(fLocalDia(d));setHasta(fLocalDia(h));};
-  const cargar = async () => {if (!desde || !hasta) return;setRows(null);
-    try {setRows(await db.listDevolucionesBLE(new Date(desde + 'T00:00:00').toISOString(), new Date(hasta + 'T23:59:59.999').toISOString()));}
-    catch (e) {showToast("" + (e.message || e), "err");setRows([]);}};
-  useEffect(() => {cargar();}, [desde, hasta]);
-  if (rows === null) return React.createElement("div", { className: "empty" }, "Cargando devoluciones\u2026");
-  const todas = rows.filter((r) => r.estado === 'aplicado');
-  const sedes = [...new Set(todas.map((r) => r.sede).filter(Boolean))].sort(),maqs = [...new Set(todas.map((r) => r.maquina))].sort(),ops = [...new Set(todas.map((r) => String(r.operador || '').trim()))].sort();
-  const vis = todas.filter((r) => (!fSede || r.sede === fSede) && (!fMaq || r.maquina === fMaq) && (!fOp || String(r.operador || '').trim() === fOp) && (!fCred || String(r.ciclos) === fCred));
+  const [cargando, setCargando] = useState(false);
+  const seq = React.useRef(0);
+  const fechaOk = (v) => /^20\d\d-\d\d-\d\d$/.test(v || '');
+  const rangoOk = fechaOk(desde) && fechaOk(hasta) && desde <= hasta;
+  const dT = rangoOk ? new Date(desde + 'T00:00:00').getTime() : 0,hT = rangoOk ? new Date(hasta + 'T23:59:59.999').getTime() : 0;
+
+  const cargar = async () => {if (!rangoOk) return;const mio = ++seq.current;setCargando(true);
+    try {const r = await db.listDevolucionesBLE(new Date(dT).toISOString(), new Date(hT).toISOString());if (mio === seq.current) setRows(r);}
+    catch (e) {if (mio === seq.current) {showToast("" + (e.message || e), "err");setRows([]);}} finally
+    {if (mio === seq.current) setCargando(false);}};
+
+  useEffect(() => {if (!rangoOk) return;const t = setTimeout(cargar, rows === null ? 0 : 400);return () => clearTimeout(t);}, [desde, hasta]);
+
+  const enRango = (r) => {const t = new Date(r.creado_en).getTime();return rangoOk && t >= dT && t <= hT;};
+  const delRango = (rows || []).filter(enRango);
+  const todas = delRango.filter((r) => r.estado === 'aplicado');
+
+
+  const opDe = (r) => String(r.operador || '').trim();
+  const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
+  const cuenta = (a, key) => {const m = {};a.forEach((r) => {const k = key(r);if (k) m[k] = (m[k] || 0) + 1;});return m;};
+  const okCred = (r) => !fCred || String(r.ciclos) === fCred;
+  const sedes = uniq(todas.map((r) => r.sede));
+  const eSede = sedes.includes(fSede) ? fSede : '';
+  const enSede = todas.filter((r) => !eSede || r.sede === eSede);
+  const eMaq = enSede.some((r) => r.maquina === fMaq) ? fMaq : '';
+  const eOp = enSede.some((r) => opDe(r) === fOp) ? fOp : '';
+  const nSede = cuenta(todas.filter(okCred), (r) => r.sede);
+  const nMaq = cuenta(enSede.filter((r) => okCred(r) && (!eOp || opDe(r) === eOp)), (r) => r.maquina);
+  const nOp = cuenta(enSede.filter((r) => okCred(r) && (!eMaq || r.maquina === eMaq)), opDe);
+  const nCred = cuenta(enSede.filter((r) => (!eMaq || r.maquina === eMaq) && (!eOp || opDe(r) === eOp)), (r) => String(r.ciclos));
+  const maqs = uniq([...Object.keys(nMaq), eMaq]),ops = uniq([...Object.keys(nOp), eOp]);
+  const vis = enSede.filter((r) => okCred(r) && (!eMaq || r.maquina === eMaq) && (!eOp || opDe(r) === eOp));
+  const hayFiltro = !!(eSede || eMaq || eOp || fCred);
+  const limpiar = () => {setFSede('');setFMaq('');setFOp('');setFCred('');};
+  const cambiaSede = (v) => {setFSede(v);const en = todas.filter((r) => !v || r.sede === v);
+    if (fMaq && !en.some((r) => r.maquina === fMaq)) setFMaq('');if (fOp && !en.some((r) => opDe(r) === fOp)) setFOp('');};
   const cred = (a) => a.reduce((x, r) => x + (Number(r.ciclos) || 0), 0);
   const n3 = vis.filter((r) => Number(r.ciclos) === 3).length,n2 = vis.filter((r) => Number(r.ciclos) === 2).length,n1 = vis.filter((r) => Number(r.ciclos) === 1).length;
   const agrupa = (key) => {const m = {};vis.forEach((r) => {const k = key(r);const o = m[k] || (m[k] = { k, n: 0, cred: 0, n3: 0, n2: 0, n1: 0, ult: null, otros: {} });o.n++;o.cred += Number(r.ciclos) || 0;if (Number(r.ciclos) === 3) o.n3++;else if (Number(r.ciclos) === 2) o.n2++;else o.n1++;if (!o.ult || r.creado_en > o.ult) o.ult = r.creado_en;const otro = key === porMaq ? String(r.operador || '').trim() : r.maquina;o.otros[otro] = (o.otros[otro] || 0) + 1;});return Object.values(m).sort((a, b) => b.n - a.n || b.cred - a.cred);};
   const porMaq = (r) => r.maquina,porOp = (r) => String(r.operador || '').trim();
   const rMaq = agrupa(porMaq),rOp = agrupa(porOp);
   const fecha = (iso) => fLocalDia(iso) + " " + fLocalHora(iso);
-  const pendientes = rows.filter((r) => r.estado !== 'aplicado').length;
+  const pendientes = delRango.filter((r) => r.estado !== 'aplicado').length;
+  const fechaCorta = (d) => {const p = String(d).split('-');return p[2] + '/' + p[1] + '/' + p[0];};
   return (
     React.createElement("div", null,
     React.createElement("div", { className: "card", style: { background: "var(--amber-d)", border: "1px solid rgba(37,99,235,.3)", marginBottom: 12 } },
-    React.createElement("b", { style: { color: "var(--amber)" } }, "\u21A9\uFE0F Devoluciones de cr\xE9ditos por Bluetooth."), " ", React.createElement("span", { className: "muted" }, "Cuando una m\xE1quina le falla al cliente, el cajero le carga 1 o 3 cr\xE9ditos desde el POS (sin tokens ni efectivo) y queda registrado con m\xE1quina y motivo. Una m\xE1quina con muchas devoluciones necesita mantenimiento; un operador con muchas, revisi\xF3n.")
+    React.createElement("b", { style: { color: "var(--amber)" } }, "\u21A9\uFE0F Devoluciones de cr\xE9ditos por Bluetooth."), " ", React.createElement("span", { className: "muted" }, "Cuando una m\xE1quina le falla al cliente, el cajero le carga 1, 2 o 3 cr\xE9ditos desde el POS (sin tokens ni efectivo) y queda registrado con m\xE1quina y motivo. Una m\xE1quina con muchas devoluciones necesita mantenimiento; un operador con muchas, revisi\xF3n.")
     ),
     React.createElement("div", { className: "toolbar", style: { gap: 8, flexWrap: "wrap" } },
     React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Desde"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: desde, onChange: (e) => setDesde(e.target.value) })),
     React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Hasta"), React.createElement("input", { type: "date", className: "input", style: { margin: 0 }, value: hasta, onChange: (e) => setHasta(e.target.value) })),
     React.createElement("div", { style: { display: "flex", gap: 4, alignSelf: "flex-end" } }, [['7', '7 días'], ['30', '30 días'], ['90', '90 días'], ['mes', 'Este mes']].map(([k, l]) => React.createElement("button", { key: k, className: "btn btn-ghost btn-sm", onClick: () => preset(k) }, l))),
-    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Sede"), React.createElement("select", { className: "select", style: { margin: 0 }, value: fSede, onChange: (e) => setFSede(e.target.value) }, React.createElement("option", { value: "" }, "Todas"), sedes.map((x) => React.createElement("option", { key: x, value: x }, x)))),
-    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "M\xE1quina"), React.createElement("select", { className: "select", style: { margin: 0 }, value: fMaq, onChange: (e) => setFMaq(e.target.value) }, React.createElement("option", { value: "" }, "Todas"), maqs.map((x) => React.createElement("option", { key: x, value: x }, x)))),
-    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Operador"), React.createElement("select", { className: "select", style: { margin: 0 }, value: fOp, onChange: (e) => setFOp(e.target.value) }, React.createElement("option", { value: "" }, "Todos"), ops.map((x) => React.createElement("option", { key: x, value: x }, x)))),
-    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Cr\xE9ditos"), React.createElement("select", { className: "select", style: { margin: 0 }, value: fCred, onChange: (e) => setFCred(e.target.value) }, React.createElement("option", { value: "" }, "1 y 3"), React.createElement("option", { value: "1" }, "Solo de 1"), React.createElement("option", { value: "3" }, "Solo de 3"))),
-    React.createElement("button", { className: "btn btn-ghost btn-sm", style: { alignSelf: "flex-end" }, onClick: cargar }, "\u21BB")
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Sede"), React.createElement("select", { className: "select", style: { margin: 0 }, value: eSede, onChange: (e) => cambiaSede(e.target.value) }, React.createElement("option", { value: "" }, "Todas"), sedes.map((x) => React.createElement("option", { key: x, value: x }, x + " (" + (nSede[x] || 0) + ")")))),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "M\xE1quina"), React.createElement("select", { className: "select", style: { margin: 0 }, value: eMaq, onChange: (e) => setFMaq(e.target.value) }, React.createElement("option", { value: "" }, eSede ? "Todas las de " + eSede : "Todas"), maqs.map((x) => React.createElement("option", { key: x, value: x }, x + " (" + (nMaq[x] || 0) + ")")))),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Operador"), React.createElement("select", { className: "select", style: { margin: 0 }, value: eOp, onChange: (e) => setFOp(e.target.value) }, React.createElement("option", { value: "" }, eSede ? "Todos los de " + eSede : "Todos"), ops.map((x) => React.createElement("option", { key: x, value: x }, x + " (" + (nOp[x] || 0) + ")")))),
+    React.createElement("div", { className: "fld" }, React.createElement("label", { className: "label" }, "Cr\xE9ditos"), React.createElement("select", { className: "select", style: { margin: 0 }, value: fCred, onChange: (e) => setFCred(e.target.value) }, React.createElement("option", { value: "" }, "Todos"), ['1', '2', '3'].map((c) => React.createElement("option", { key: c, value: c }, "Solo de " + c + " (" + (nCred[c] || 0) + ")")))),
+    hayFiltro && React.createElement("button", { className: "btn btn-ghost btn-sm", style: { alignSelf: "flex-end" }, onClick: limpiar }, "\u2715 Limpiar filtros"),
+    React.createElement("button", { className: "btn btn-ghost btn-sm", style: { alignSelf: "flex-end" }, title: "Volver a consultar", onClick: cargar }, "\u21BB")
     ),
     React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", margin: "10px 0" } },
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Devoluciones"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, vis.length), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, n3, " de 3 cr\xE9ditos \xB7 ", n2, " de 2 \xB7 ", n1, " de 1")),
@@ -9224,11 +9259,14 @@ function DevolucionesBLE({ showToast }) {
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "M\xE1quinas con devoluciones"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, rMaq.length), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, rMaq[0] ? "la que más: " + rMaq[0].k + " (" + rMaq[0].n + ")" : "—")),
     React.createElement("div", { className: "card", style: { flex: "1 1 150px", padding: "10px 12px" } }, React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "Operadores que devuelven"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800 } }, rOp.length), React.createElement("div", { className: "muted", style: { fontSize: 11 } }, rOp[0] ? "el que más: " + rOp[0].k + " (" + rOp[0].n + ")" : "—"))
     ),
+    rangoOk && React.createElement("div", { className: "muted", style: { fontSize: 12, marginBottom: 8 } }, "Mostrando devoluciones del ", React.createElement("b", null, fechaCorta(desde)), " al ", React.createElement("b", null, fechaCorta(hasta)), cargando ? " · actualizando…" : ""),
     pendientes > 0 && React.createElement("div", { className: "muted", style: { fontSize: 11, marginBottom: 8 } }, pendientes, " intento(s) que la m\xE1quina no confirm\xF3 (no se cuentan)."),
     React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 } },
     [['maquinas', '🔧 Máquina que más falla'], ['operadores', '👤 Operador que más devuelve'], ['detalle', '📋 Detalle']].map(([k, l]) => React.createElement("button", { key: k, className: "btn btn-sm " + (vista === k ? 'btn-amber' : 'btn-ghost'), onClick: () => setVista(k) }, l))
     ),
-    vis.length === 0 && React.createElement("div", { className: "empty" }, "Sin devoluciones con esos filtros."),
+    !rangoOk && React.createElement("div", { className: "empty", style: { color: "var(--red)" } }, fechaOk(desde) && fechaOk(hasta) ? "La fecha \"Desde\" es posterior a \"Hasta\". Corrige el rango." : "Escribe las dos fechas completas (día, mes y año)."),
+    rangoOk && rows === null && React.createElement("div", { className: "empty" }, "Cargando devoluciones\u2026"),
+    rangoOk && rows !== null && vis.length === 0 && React.createElement("div", { className: "empty" }, cargando ? "Actualizando…" : "Sin devoluciones con esos filtros."),
     vista === 'maquinas' && vis.length > 0 &&
     React.createElement("div", { className: "card", style: { padding: 0, overflowX: "auto" } }, React.createElement("table", { className: "tbl" },
     React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "#"), React.createElement("th", null, "M\xE1quina"), React.createElement("th", { className: "num" }, "Devoluciones"), React.createElement("th", { className: "num" }, "De 3"), React.createElement("th", { className: "num" }, "De 2"), React.createElement("th", { className: "num" }, "De 1"), React.createElement("th", { className: "num" }, "Cr\xE9ditos"), React.createElement("th", null, "\xDAltima"), React.createElement("th", null, "Qui\xE9n devolvi\xF3"))),

@@ -1681,9 +1681,13 @@ const db = {
   // Devoluciones de créditos por Bluetooth (misma tabla, tipo = 'devolucion')
   async listDevolucionesBLE(desdeISO, hastaISO){
     if(DEMO_MODE) return [];
-    const {data,error}=await sb.from('lavados_celda').select('*').eq('tipo','devolucion')
-      .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).limit(5000);
-    if(error) throw error; return data||[];
+    const todo=[];   /* paginado: el servidor entrega máximo 1.000 filas por consulta */
+    for(let i=0;i<20;i++){
+      const {data,error}=await sb.from('lavados_celda').select('*').eq('tipo','devolucion')
+        .gte('creado_en',desdeISO).lte('creado_en',hastaISO).order('creado_en',{ascending:false}).order('id',{ascending:false}).range(i*1000,i*1000+999);
+      if(error) throw error; todo.push(...(data||[])); if(!data||data.length<1000) break;
+    }
+    return todo;
   },
   async listMaquinasCelda(){
     if(DEMO_MODE) return [];
@@ -9187,35 +9191,66 @@ function DevolucionesBLE({showToast}){
   const [fSede,setFSede]=useState(''); const [fMaq,setFMaq]=useState(''); const [fOp,setFOp]=useState(''); const [fCred,setFCred]=useState('');
   const [vista,setVista]=useState('maquinas');   // maquinas | operadores | detalle
   const preset=k=>{ const h=new Date(); const d=new Date(); if(k==='7') d.setDate(d.getDate()-6); else if(k==='30') d.setDate(d.getDate()-29); else if(k==='90') d.setDate(d.getDate()-89); else if(k==='mes') d.setDate(1); setDesde(fLocalDia(d)); setHasta(fLocalDia(h)); };
-  const cargar=async()=>{ if(!desde||!hasta) return; setRows(null);
-    try{ setRows(await db.listDevolucionesBLE(new Date(desde+'T00:00:00').toISOString(), new Date(hasta+'T23:59:59.999').toISOString())); }
-    catch(e){ showToast(""+(e.message||e),"err"); setRows([]); } };
-  useEffect(()=>{ cargar(); },[desde,hasta]);
-  if(rows===null) return <div className="empty">Cargando devoluciones…</div>;
-  const todas=rows.filter(r=>r.estado==='aplicado');
-  const sedes=[...new Set(todas.map(r=>r.sede).filter(Boolean))].sort(), maqs=[...new Set(todas.map(r=>r.maquina))].sort(), ops=[...new Set(todas.map(r=>String(r.operador||'').trim()))].sort();
-  const vis=todas.filter(r=>(!fSede||r.sede===fSede)&&(!fMaq||r.maquina===fMaq)&&(!fOp||String(r.operador||'').trim()===fOp)&&(!fCred||String(r.ciclos)===fCred));
+  const [cargando,setCargando]=useState(false);
+  const seq=React.useRef(0);
+  const fechaOk=v=>/^20\d\d-\d\d-\d\d$/.test(v||'');
+  const rangoOk=fechaOk(desde)&&fechaOk(hasta)&&desde<=hasta;
+  const dT=rangoOk?new Date(desde+'T00:00:00').getTime():0, hT=rangoOk?new Date(hasta+'T23:59:59.999').getTime():0;
+  /* solo vale la respuesta de la última consulta; los campos de fecha no se desmontan mientras carga */
+  const cargar=async()=>{ if(!rangoOk) return; const mio=++seq.current; setCargando(true);
+    try{ const r=await db.listDevolucionesBLE(new Date(dT).toISOString(), new Date(hT).toISOString()); if(mio===seq.current) setRows(r); }
+    catch(e){ if(mio===seq.current){ showToast(""+(e.message||e),"err"); setRows([]); } }
+    finally{ if(mio===seq.current) setCargando(false); } };
+  /* espera a que termine de escribir la fecha antes de consultar */
+  useEffect(()=>{ if(!rangoOk) return; const t=setTimeout(cargar,rows===null?0:400); return ()=>clearTimeout(t); },[desde,hasta]);
+  /* lo que se muestra siempre respeta el rango que dicen los campos, aunque la consulta nueva no haya llegado */
+  const enRango=r=>{ const t=new Date(r.creado_en).getTime(); return rangoOk && t>=dT && t<=hT; };
+  const delRango=(rows||[]).filter(enRango);
+  const todas=delRango.filter(r=>r.estado==='aplicado');
+  /* Filtros encadenados (2026-11-13): cada lista solo ofrece lo que existe con lo ya elegido (con su cantidad),
+     y una máquina u operador que no pertenece a la sede elegida se suelta sola en vez de dejar la tabla vacía. */
+  const opDe=r=>String(r.operador||'').trim();
+  const uniq=a=>[...new Set(a.filter(Boolean))].sort();
+  const cuenta=(a,key)=>{ const m={}; a.forEach(r=>{ const k=key(r); if(k) m[k]=(m[k]||0)+1; }); return m; };
+  const okCred=r=>!fCred||String(r.ciclos)===fCred;
+  const sedes=uniq(todas.map(r=>r.sede));
+  const eSede=sedes.includes(fSede)?fSede:'';
+  const enSede=todas.filter(r=>!eSede||r.sede===eSede);
+  const eMaq=enSede.some(r=>r.maquina===fMaq)?fMaq:'';
+  const eOp=enSede.some(r=>opDe(r)===fOp)?fOp:'';
+  const nSede=cuenta(todas.filter(okCred),r=>r.sede);
+  const nMaq=cuenta(enSede.filter(r=>okCred(r)&&(!eOp||opDe(r)===eOp)),r=>r.maquina);
+  const nOp=cuenta(enSede.filter(r=>okCred(r)&&(!eMaq||r.maquina===eMaq)),opDe);
+  const nCred=cuenta(enSede.filter(r=>(!eMaq||r.maquina===eMaq)&&(!eOp||opDe(r)===eOp)),r=>String(r.ciclos));
+  const maqs=uniq([...Object.keys(nMaq),eMaq]), ops=uniq([...Object.keys(nOp),eOp]);
+  const vis=enSede.filter(r=>okCred(r)&&(!eMaq||r.maquina===eMaq)&&(!eOp||opDe(r)===eOp));
+  const hayFiltro=!!(eSede||eMaq||eOp||fCred);
+  const limpiar=()=>{ setFSede(''); setFMaq(''); setFOp(''); setFCred(''); };
+  const cambiaSede=v=>{ setFSede(v); const en=todas.filter(r=>!v||r.sede===v);
+    if(fMaq && !en.some(r=>r.maquina===fMaq)) setFMaq(''); if(fOp && !en.some(r=>opDe(r)===fOp)) setFOp(''); };
   const cred=a=>a.reduce((x,r)=>x+(Number(r.ciclos)||0),0);
   const n3=vis.filter(r=>Number(r.ciclos)===3).length, n2=vis.filter(r=>Number(r.ciclos)===2).length, n1=vis.filter(r=>Number(r.ciclos)===1).length;
   const agrupa=key=>{ const m={}; vis.forEach(r=>{ const k=key(r); const o=m[k]||(m[k]={k, n:0, cred:0, n3:0, n2:0, n1:0, ult:null, otros:{}}); o.n++; o.cred+=Number(r.ciclos)||0; if(Number(r.ciclos)===3) o.n3++; else if(Number(r.ciclos)===2) o.n2++; else o.n1++; if(!o.ult||r.creado_en>o.ult) o.ult=r.creado_en; const otro=key===porMaq?String(r.operador||'').trim():r.maquina; o.otros[otro]=(o.otros[otro]||0)+1; }); return Object.values(m).sort((a,b)=>b.n-a.n||b.cred-a.cred); };
   const porMaq=r=>r.maquina, porOp=r=>String(r.operador||'').trim();
   const rMaq=agrupa(porMaq), rOp=agrupa(porOp);
   const fecha=iso=>fLocalDia(iso)+" "+fLocalHora(iso);
-  const pendientes=rows.filter(r=>r.estado!=='aplicado').length;
+  const pendientes=delRango.filter(r=>r.estado!=='aplicado').length;
+  const fechaCorta=d=>{ const p=String(d).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; };
   return (
     <div>
       <div className="card" style={{background:"var(--amber-d)",border:"1px solid rgba(37,99,235,.3)",marginBottom:12}}>
-        <b style={{color:"var(--amber)"}}>↩️ Devoluciones de créditos por Bluetooth.</b> <span className="muted">Cuando una máquina le falla al cliente, el cajero le carga 1 o 3 créditos desde el POS (sin tokens ni efectivo) y queda registrado con máquina y motivo. Una máquina con muchas devoluciones necesita mantenimiento; un operador con muchas, revisión.</span>
+        <b style={{color:"var(--amber)"}}>↩️ Devoluciones de créditos por Bluetooth.</b> <span className="muted">Cuando una máquina le falla al cliente, el cajero le carga 1, 2 o 3 créditos desde el POS (sin tokens ni efectivo) y queda registrado con máquina y motivo. Una máquina con muchas devoluciones necesita mantenimiento; un operador con muchas, revisión.</span>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:"wrap"}}>
         <div className="fld"><label className="label">Desde</label><input type="date" className="input" style={{margin:0}} value={desde} onChange={e=>setDesde(e.target.value)}/></div>
         <div className="fld"><label className="label">Hasta</label><input type="date" className="input" style={{margin:0}} value={hasta} onChange={e=>setHasta(e.target.value)}/></div>
         <div style={{display:"flex",gap:4,alignSelf:"flex-end"}}>{[['7','7 días'],['30','30 días'],['90','90 días'],['mes','Este mes']].map(([k,l])=><button key={k} className="btn btn-ghost btn-sm" onClick={()=>preset(k)}>{l}</button>)}</div>
-        <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={fSede} onChange={e=>setFSede(e.target.value)}><option value="">Todas</option>{sedes.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
-        <div className="fld"><label className="label">Máquina</label><select className="select" style={{margin:0}} value={fMaq} onChange={e=>setFMaq(e.target.value)}><option value="">Todas</option>{maqs.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
-        <div className="fld"><label className="label">Operador</label><select className="select" style={{margin:0}} value={fOp} onChange={e=>setFOp(e.target.value)}><option value="">Todos</option>{ops.map(x=><option key={x} value={x}>{x}</option>)}</select></div>
-        <div className="fld"><label className="label">Créditos</label><select className="select" style={{margin:0}} value={fCred} onChange={e=>setFCred(e.target.value)}><option value="">1 y 3</option><option value="1">Solo de 1</option><option value="3">Solo de 3</option></select></div>
-        <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={cargar}>↻</button>
+        <div className="fld"><label className="label">Sede</label><select className="select" style={{margin:0}} value={eSede} onChange={e=>cambiaSede(e.target.value)}><option value="">Todas</option>{sedes.map(x=><option key={x} value={x}>{x+" ("+(nSede[x]||0)+")"}</option>)}</select></div>
+        <div className="fld"><label className="label">Máquina</label><select className="select" style={{margin:0}} value={eMaq} onChange={e=>setFMaq(e.target.value)}><option value="">{eSede?("Todas las de "+eSede):"Todas"}</option>{maqs.map(x=><option key={x} value={x}>{x+" ("+(nMaq[x]||0)+")"}</option>)}</select></div>
+        <div className="fld"><label className="label">Operador</label><select className="select" style={{margin:0}} value={eOp} onChange={e=>setFOp(e.target.value)}><option value="">{eSede?("Todos los de "+eSede):"Todos"}</option>{ops.map(x=><option key={x} value={x}>{x+" ("+(nOp[x]||0)+")"}</option>)}</select></div>
+        <div className="fld"><label className="label">Créditos</label><select className="select" style={{margin:0}} value={fCred} onChange={e=>setFCred(e.target.value)}><option value="">Todos</option>{['1','2','3'].map(c=><option key={c} value={c}>{"Solo de "+c+" ("+(nCred[c]||0)+")"}</option>)}</select></div>
+        {hayFiltro && <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} onClick={limpiar}>✕ Limpiar filtros</button>}
+        <button className="btn btn-ghost btn-sm" style={{alignSelf:"flex-end"}} title="Volver a consultar" onClick={cargar}>↻</button>
       </div>
       <div style={{display:"flex",gap:12,flexWrap:"wrap",margin:"10px 0"}}>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{vis.length}</div><div className="muted" style={{fontSize:11}}>{n3} de 3 créditos · {n2} de 2 · {n1} de 1</div></div>
@@ -9223,11 +9258,14 @@ function DevolucionesBLE({showToast}){
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Máquinas con devoluciones</div><div style={{fontSize:22,fontWeight:800}}>{rMaq.length}</div><div className="muted" style={{fontSize:11}}>{rMaq[0]?("la que más: "+rMaq[0].k+" ("+rMaq[0].n+")"):"—"}</div></div>
         <div className="card" style={{flex:"1 1 150px",padding:"10px 12px"}}><div className="muted" style={{fontSize:11}}>Operadores que devuelven</div><div style={{fontSize:22,fontWeight:800}}>{rOp.length}</div><div className="muted" style={{fontSize:11}}>{rOp[0]?("el que más: "+rOp[0].k+" ("+rOp[0].n+")"):"—"}</div></div>
       </div>
+      {rangoOk && <div className="muted" style={{fontSize:12,marginBottom:8}}>Mostrando devoluciones del <b>{fechaCorta(desde)}</b> al <b>{fechaCorta(hasta)}</b>{cargando?" · actualizando…":""}</div>}
       {pendientes>0 && <div className="muted" style={{fontSize:11,marginBottom:8}}>{pendientes} intento(s) que la máquina no confirmó (no se cuentan).</div>}
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
         {[['maquinas','🔧 Máquina que más falla'],['operadores','👤 Operador que más devuelve'],['detalle','📋 Detalle']].map(([k,l])=><button key={k} className={"btn btn-sm "+(vista===k?'btn-amber':'btn-ghost')} onClick={()=>setVista(k)}>{l}</button>)}
       </div>
-      {vis.length===0 && <div className="empty">Sin devoluciones con esos filtros.</div>}
+      {!rangoOk && <div className="empty" style={{color:"var(--red)"}}>{(fechaOk(desde)&&fechaOk(hasta))?"La fecha \"Desde\" es posterior a \"Hasta\". Corrige el rango.":"Escribe las dos fechas completas (día, mes y año)."}</div>}
+      {rangoOk && rows===null && <div className="empty">Cargando devoluciones…</div>}
+      {rangoOk && rows!==null && vis.length===0 && <div className="empty">{cargando?"Actualizando…":"Sin devoluciones con esos filtros."}</div>}
       {vista==='maquinas' && vis.length>0 && (
         <div className="card" style={{padding:0,overflowX:"auto"}}><table className="tbl">
           <thead><tr><th>#</th><th>Máquina</th><th className="num">Devoluciones</th><th className="num">De 3</th><th className="num">De 2</th><th className="num">De 1</th><th className="num">Créditos</th><th>Última</th><th>Quién devolvió</th></tr></thead>
